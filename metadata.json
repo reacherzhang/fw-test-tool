@@ -1,0 +1,7 @@
+{
+  "name": "IoT Nexus Core",
+  "description": "A comprehensive IoT device management platform. Features real-time telemetry monitoring, MQTT/API protocol testing, remote configuration, and AI-powered device health analysis reports.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
