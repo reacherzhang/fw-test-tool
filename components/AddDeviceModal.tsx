@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import {
-  X, Plus, Trash2, Wifi, Bluetooth, RefreshCw, CheckCircle, Cpu, Signal, ChevronDown, ChevronRight, Zap, Loader2, ArrowRight, ShieldCheck, ListFilter, Braces
+  X, Plus, Trash2, Wifi, Bluetooth, RefreshCw, CheckCircle, Cpu, Signal, ChevronDown, ChevronRight, Zap, Loader2, ArrowRight, ShieldCheck, ListFilter, Braces, Lock, Clock, AlertCircle
 } from 'lucide-react';
 import { DeviceStatus } from '../types';
 
@@ -15,6 +15,7 @@ interface AddDeviceModalProps {
   connectionTypes: string[];
   onUpdateDeviceTypes: (types: string[]) => void;
   onUpdateConnectionTypes: (types: string[]) => void;
+  session: any;
 }
 
 interface DiscoveredDevice {
@@ -35,9 +36,28 @@ interface ConfigRequest {
 
 export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
   isOpen, onClose, onAdd,
-  deviceTypes, connectionTypes
+  deviceTypes, connectionTypes, session
 }) => {
   const [step, setStep] = useState(1);
+
+  // Provisioning State
+  const [provisionStep, setProvisionStep] = useState<'INIT' | 'KEY' | 'TIME' | 'WIFI' | 'DONE'>('INIT');
+  const [keyPayload, setKeyPayload] = useState<any>(null);
+  const [wifiList, setWifiList] = useState<any[]>([]);
+  const [selectedWifi, setSelectedWifi] = useState<string>('');
+  const [wifiPassword, setWifiPassword] = useState<string>('');
+  const [provisionStatus, setProvisionStatus] = useState<{
+    init: 'PENDING' | 'LOADING' | 'SUCCESS' | 'ERROR';
+    key: 'PENDING' | 'LOADING' | 'SUCCESS' | 'ERROR';
+    time: 'PENDING' | 'LOADING' | 'SUCCESS' | 'ERROR';
+    wifi: 'PENDING' | 'LOADING' | 'SUCCESS' | 'ERROR';
+  }>({
+    init: 'PENDING',
+    key: 'PENDING',
+    time: 'PENDING',
+    wifi: 'PENDING'
+  });
+  const [provisionError, setProvisionError] = useState<string>('');
   const [formData, setFormData] = useState({
     name: '',
     type: deviceTypes[0] || 'Sensor',
@@ -59,13 +79,12 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
   const [provisioningStatus, setProvisioningStatus] = useState<'IDLE' | 'SENDING' | 'SUCCESS' | 'ERROR'>('IDLE');
   const [provisionLog, setProvisionLog] = useState<string[]>([]);
 
-  const getDeviceIp = () => {
-    if (!connectedDevice) return '192.168.1.1';
-    return '192.168.1.1';
-  };
+  const [targetIp, setTargetIp] = useState('10.10.10.1');
+  const wifiPasswordRef = React.useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (isOpen) {
+      // 重置所有状态
       setStep(1);
       setConnectedDevice(null);
       setConnectionStatus('IDLE');
@@ -75,12 +94,37 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
       setRequests([]);
       setConnectingToId(null);
       setFormData(prev => ({ ...prev, name: '' }));
+
+      // 重置 Provisioning 状态
+      setProvisionStep('INIT');
+      setProvisionStatus({
+        init: 'PENDING',
+        key: 'PENDING',
+        time: 'PENDING',
+        wifi: 'PENDING'
+      });
+      setProvisionError('');
+      setKeyPayload(null);
+      setWifiList([]);
+      setSelectedWifi('');
+      setWifiPassword('');
+      setTargetIp('10.10.10.1');
     }
   }, [isOpen]);
 
+  // Auto-start provisioning when entering Step 3
+  useEffect(() => {
+    if (step === 3 && provisionStep === 'INIT' && provisionStatus.init === 'PENDING') {
+      const timer = setTimeout(() => {
+        runInit();
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [step, provisionStep, provisionStatus.init]);
+
   useEffect(() => {
     if (step === 3 && requests.length === 0) {
-      const currentIp = getDeviceIp();
+      const currentIp = targetIp;
       const defaultRequests: ConfigRequest[] = [{
         id: 'req-' + Date.now(),
         method: 'POST',
@@ -100,7 +144,7 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
       setRawConfigJson(JSON.stringify(defaultRequests, null, 2));
       setExpandedRequestId(defaultRequests[0].id);
     }
-  }, [step, connectedDevice]);
+  }, [step, requests.length, targetIp]);
 
   if (!isOpen) return null;
 
@@ -115,7 +159,7 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
   };
 
   const addRequest = () => {
-    const currentIp = getDeviceIp();
+    const currentIp = targetIp;
     const newReq: ConfigRequest = {
       id: 'req-' + Math.random().toString(36).substr(2, 9),
       method: 'POST',
@@ -203,6 +247,191 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
     }
   };
 
+  // 辅助函数：执行初始化
+  const runInit = async () => {
+    setProvisionStatus(prev => ({ ...prev, init: 'LOADING' }));
+    setProvisionError('');
+    try {
+      const ip = targetIp;
+      const res = await window.electronAPI?.provisionInit({ ip, session });
+      if (res?.success) {
+        setProvisionStatus(prev => ({ ...prev, init: 'SUCCESS' }));
+        setProvisionStep('KEY');
+        runGetKey(); // 自动进入下一步获取 Key
+      } else {
+        setProvisionStatus(prev => ({ ...prev, init: 'ERROR' }));
+        setProvisionError(res?.error || res?.message || 'Init failed');
+      }
+    } catch (e: any) {
+      setProvisionStatus(prev => ({ ...prev, init: 'ERROR' }));
+      setProvisionError(e.message);
+    }
+  };
+
+  // 辅助函数：获取 Key Payload
+  const runGetKey = async () => {
+    setProvisionStatus(prev => ({ ...prev, key: 'LOADING' }));
+    setProvisionError('');
+    try {
+      const res = await window.electronAPI?.provisionGetKeyPayload({ session });
+      if (res?.success) {
+        setKeyPayload(res.payload);
+        setProvisionStatus(prev => ({ ...prev, key: 'PENDING' }));
+        // 这里不自动发送，等待用户确认
+      } else {
+        setProvisionStatus(prev => ({ ...prev, key: 'ERROR' }));
+        setProvisionError(res?.error || 'Get Key failed');
+      }
+    } catch (e: any) {
+      setProvisionStatus(prev => ({ ...prev, key: 'ERROR' }));
+      setProvisionError(e.message);
+    }
+  };
+
+  // 辅助函数：发送 Key
+  const sendKey = async () => {
+    setProvisionStatus(prev => ({ ...prev, key: 'LOADING' }));
+    setProvisionError('');
+    try {
+      const ip = targetIp;
+      const res = await window.electronAPI?.provisionSendRequest({
+        ip,
+        namespace: 'Appliance.Config.Key',
+        method: 'SET',
+        payload: keyPayload,
+        session
+      });
+      if (res?.success) {
+        setProvisionStatus(prev => ({ ...prev, key: 'SUCCESS' }));
+        setProvisionStep('TIME');
+        runSetTime(); // 自动设置时间
+      } else {
+        setProvisionStatus(prev => ({ ...prev, key: 'ERROR' }));
+        setProvisionError(res?.error || 'Send Key failed');
+      }
+    } catch (e: any) {
+      setProvisionStatus(prev => ({ ...prev, key: 'ERROR' }));
+      setProvisionError(e.message);
+    }
+  };
+
+  // 辅助函数：设置时间
+  const runSetTime = async () => {
+    setProvisionStatus(prev => ({ ...prev, time: 'LOADING' }));
+    setProvisionError('');
+    try {
+      const ip = targetIp;
+      const res = await window.electronAPI?.provisionSetTime({ ip, session });
+      if (res?.success) {
+        setProvisionStatus(prev => ({ ...prev, time: 'SUCCESS' }));
+        setProvisionStep('WIFI');
+        scanWifiForProvision(); // 自动扫描 WiFi
+      } else {
+        setProvisionStatus(prev => ({ ...prev, time: 'ERROR' }));
+        setProvisionError(res?.error || 'Set Time failed');
+      }
+    } catch (e: any) {
+      setProvisionStatus(prev => ({ ...prev, time: 'ERROR' }));
+      setProvisionError(e.message);
+    }
+  };
+
+  // 辅助函数：扫描 WiFi
+  const scanWifiForProvision = async () => {
+    setProvisionStatus(prev => ({ ...prev, wifi: 'LOADING' }));
+    setProvisionError('');
+    try {
+      const list = await window.electronAPI?.scanWifi() || [];
+      setWifiList(list);
+      // 扫描成功后重置状态为 PENDING，允许用户点击按钮
+      setProvisionStatus(prev => ({ ...prev, wifi: 'PENDING' }));
+    } catch (e: any) {
+      setProvisionStatus(prev => ({ ...prev, wifi: 'ERROR' }));
+      setProvisionError(e.message);
+    }
+  };
+
+  // 辅助函数：发送 WiFi
+  const sendWifi = async () => {
+    console.log('[AddDeviceModal] sendWifi called');
+    console.log('[AddDeviceModal] electronAPI:', window.electronAPI);
+
+    if (!window.electronAPI?.provisionSetWifi) {
+      console.error('[AddDeviceModal] provisionSetWifi API not found!');
+      setProvisionStatus(prev => ({ ...prev, wifi: 'ERROR' }));
+      setProvisionError('Internal Error: API not found');
+      return;
+    }
+
+    setProvisionStatus(prev => ({ ...prev, wifi: 'LOADING' }));
+    setProvisionError('');
+    try {
+      const ip = targetIp;
+
+      // Test IPC connectivity with a known working method
+      console.log('[AddDeviceModal] Testing IPC with provisionSetTime...');
+      try {
+        await window.electronAPI.provisionSetTime({ ip, session });
+        console.log('[AddDeviceModal] IPC Test Passed (provisionSetTime)');
+      } catch (err) {
+        console.error('[AddDeviceModal] IPC Test Failed:', err);
+      }
+
+      console.log('[AddDeviceModal] Invoking provisionSetWifi IPC', { ip, ssid: selectedWifi });
+
+      // 从 wifiList 中获取选中 WiFi 的完整信息
+      const selectedWifiInfo = wifiList.find((w: any) => w.name === selectedWifi);
+
+      // Sanitize session object to prevent IPC serialization issues
+      const safeSession = {
+        key: session?.key,
+        uid: session?.uid,
+        token: session?.token,
+        mqttDomain: session?.mqttDomain,
+        domain: session?.domain
+      };
+
+      // 构建 wifiConfig 对象
+      const wifiConfig = {
+        ssid: selectedWifi,
+        password: wifiPassword,
+        bssid: selectedWifiInfo?.mac || '',
+        channel: selectedWifiInfo?.channel || 0
+      };
+
+      console.log('[AddDeviceModal] wifiConfig:', wifiConfig);
+
+      // Add 15s timeout for IPC call
+      const ipcPromise = window.electronAPI.provisionSetWifi({
+        ip,
+        wifiConfig,
+        session: safeSession
+      });
+
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('IPC Timeout')), 15000)
+      );
+
+      const res: any = await Promise.race([ipcPromise, timeoutPromise]);
+
+      console.log('[AddDeviceModal] provisionSetWifi returned', res);
+      if (res?.success) {
+        setProvisionStatus(prev => ({ ...prev, wifi: 'SUCCESS' }));
+        setProvisionStep('DONE');
+        setProvisionError(''); // Clear any previous error
+        // 配网成功后，设备需要时间连接到家庭 WiFi 和 MQTT
+        // 用户也需要切换回家庭 WiFi 才能继续使用
+      } else {
+        setProvisionStatus(prev => ({ ...prev, wifi: 'ERROR' }));
+        setProvisionError(res?.error || 'Set WiFi failed');
+      }
+    } catch (e: any) {
+      console.error('[AddDeviceModal] sendWifi error', e);
+      setProvisionStatus(prev => ({ ...prev, wifi: 'ERROR' }));
+      setProvisionError(e.message || 'Set WiFi failed');
+    }
+  };
+
   const deployConfig = async () => {
     setProvisioningStatus('SENDING');
     setProvisionLog([]);
@@ -230,7 +459,7 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
           {step === 1 && (
             <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
               <div className="space-y-4">
-                <label className="text-xs font-black text-slate-500 uppercase tracking-widest ml-1">Identity Tag</label>
+                <label className="text-xs font-black text-slate-500 uppercase tracking-widest ml-1">Device Name</label>
                 <input
                   autoFocus
                   value={formData.name}
@@ -239,14 +468,34 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
                   className="w-full bg-slate-900/50 border border-slate-800 rounded-3xl px-6 py-5 text-base text-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all outline-none"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-8">
-                <div className="space-y-4">
-                  <label className="text-xs font-black text-slate-500 uppercase tracking-widest ml-1">Hardware Class</label>
-                  <select value={formData.type} onChange={e => setFormData({ ...formData, type: e.target.value })} className="w-full bg-slate-900/50 border border-slate-800 rounded-2xl px-6 py-4 text-sm text-white appearance-none">{deviceTypes.map(t => <option key={t}>{t}</option>)}</select>
-                </div>
-                <div className="space-y-4">
-                  <label className="text-xs font-black text-slate-500 uppercase tracking-widest ml-1">Physical Link</label>
-                  <select value={formData.connectionType} onChange={e => setFormData({ ...formData, connectionType: e.target.value })} className="w-full bg-slate-900/50 border border-slate-800 rounded-2xl px-6 py-4 text-sm text-white appearance-none">{connectionTypes.map(c => <option key={c}>{c}</option>)}</select>
+
+              <div className="space-y-4">
+                <label className="text-xs font-black text-slate-500 uppercase tracking-widest ml-1">Connection Type</label>
+                <div className="grid grid-cols-2 gap-4">
+                  <button
+                    type="button"
+                    onClick={() => setFormData({ ...formData, connectionType: 'WIFI' })}
+                    className={`p-6 rounded-2xl border-2 transition-all flex flex-col items-center gap-3 ${formData.connectionType === 'WIFI'
+                      ? 'border-indigo-500 bg-indigo-500/10 text-indigo-400'
+                      : 'border-slate-800 bg-slate-900/30 text-slate-500 hover:border-slate-700'
+                      }`}
+                  >
+                    <Wifi size={32} />
+                    <span className="font-black text-sm uppercase tracking-wider">WiFi AP Mode</span>
+                    <p className="text-[10px] text-slate-500">Connect to device hotspot</p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFormData({ ...formData, connectionType: 'BLE' })}
+                    className={`p-6 rounded-2xl border-2 transition-all flex flex-col items-center gap-3 ${formData.connectionType === 'BLE'
+                      ? 'border-indigo-500 bg-indigo-500/10 text-indigo-400'
+                      : 'border-slate-800 bg-slate-900/30 text-slate-500 hover:border-slate-700'
+                      }`}
+                  >
+                    <Bluetooth size={32} />
+                    <span className="font-black text-sm uppercase tracking-wider">Bluetooth</span>
+                    <p className="text-[10px] text-slate-500">Scan and pair via BLE</p>
+                  </button>
                 </div>
               </div>
             </div>
@@ -299,7 +548,7 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
                     <div className="w-12 h-12 bg-emerald-500 rounded-2xl flex items-center justify-center text-white"><CheckCircle size={24} /></div>
                     <div>
                       <p className="text-sm font-black text-white uppercase">STA Established</p>
-                      <p className="text-xs font-medium text-emerald-400">Locked on {connectedDevice?.name} // Interface @ {getDeviceIp()}</p>
+                      <p className="text-xs font-medium text-emerald-400">Locked on {connectedDevice?.name} // Interface @ {targetIp}</p>
                     </div>
                   </div>
                   <ArrowRight className="text-emerald-500 animate-bounce-x" />
@@ -309,127 +558,222 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
           )}
 
           {step === 3 && (
-            <div className="flex flex-col h-full min-h-[500px] animate-in fade-in slide-in-from-right-4 duration-500">
-              {/* Metadata Header */}
-              <div className="bg-slate-900/40 p-6 rounded-[2.5rem] border border-slate-800 flex items-center justify-between mb-8">
-                <div className="flex items-center gap-5">
-                  <div className="p-4 bg-indigo-500/10 rounded-2xl text-indigo-400"><Cpu size={24} /></div>
+            <div className="flex flex-col h-full max-h-[calc(100vh-200px)] animate-in fade-in slide-in-from-right-4 duration-500">
+              {/* Header */}
+              <div className="bg-slate-900/40 p-4 rounded-[2rem] border border-slate-800 flex items-center justify-between mb-4 flex-shrink-0">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 bg-indigo-500/10 rounded-xl text-indigo-400"><Cpu size={20} /></div>
                   <div>
-                    <p className="text-[11px] font-black text-slate-500 uppercase tracking-widest">Target Endpoint</p>
-                    <p className="text-sm font-mono text-white tracking-tight">{getDeviceIp()}</p>
+                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Target Endpoint</p>
+                    <input
+                      value={targetIp}
+                      onChange={e => setTargetIp(e.target.value)}
+                      className="text-sm font-mono text-white tracking-tight bg-transparent border-b border-slate-700 focus:border-indigo-500 outline-none w-32"
+                    />
                   </div>
                 </div>
-                <div className="flex bg-slate-950 p-1.5 rounded-2xl border border-slate-800 shadow-inner">
-                  <button onClick={() => setConfigMode('BUILDER')} className={`px-6 py-2.5 text-xs font-black uppercase rounded-xl transition-all ${configMode === 'BUILDER' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-600 hover:text-slate-400'}`}>Builder</button>
-                  <button onClick={() => setConfigMode('JSON')} className={`px-6 py-2.5 text-xs font-black uppercase rounded-xl transition-all ${configMode === 'JSON' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-600 hover:text-slate-400'}`}>JSON</button>
+                <div className="flex items-center gap-2">
+                  <div className={`w-2.5 h-2.5 rounded-full ${provisionStep === 'DONE' ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{provisionStep === 'DONE' ? 'DONE' : 'PROVISIONING'}</span>
                 </div>
               </div>
 
-              {/* Configuration Area */}
-              <div className="flex-1 overflow-y-auto space-y-6 custom-scrollbar pr-3">
-                {configMode === 'JSON' ? (
-                  <textarea value={rawConfigJson} onChange={e => syncToRawJson(JSON.parse(e.target.value))} className="w-full h-[400px] bg-slate-950 border border-slate-800 rounded-[2.5rem] p-10 text-sm font-mono text-indigo-300 outline-none shadow-inner leading-relaxed" />
-                ) : (
-                  <div className="space-y-6">
-                    {requests.map((req, idx) => (
-                      <div key={req.id} className="bg-slate-900/20 border border-slate-800 rounded-[3rem] overflow-hidden">
-                        {/* Request Header */}
-                        <div className="px-8 py-6 bg-slate-900/50 flex items-center justify-between cursor-pointer group" onClick={() => setExpandedRequestId(expandedRequestId === req.id ? null : req.id)}>
-                          <div className="flex items-center gap-5">
-                            <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center text-indigo-400 font-black text-xs">0{idx + 1}</div>
-                            <div>
-                              <span className="text-xs font-black text-indigo-500 uppercase tracking-widest block mb-0.5">{req.method}</span>
-                              <span className="text-sm font-mono text-slate-400 truncate max-w-[300px] block">{req.url}</span>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-3">
-                            <button onClick={(e) => { e.stopPropagation(); setRequests(requests.filter(r => r.id !== req.id)); }} className="p-3 text-slate-600 hover:text-red-400 transition-colors"><Trash2 size={20} /></button>
-                            {expandedRequestId === req.id ? <ChevronDown size={20} className="text-slate-400" /> : <ChevronRight size={20} className="text-slate-600 group-hover:text-slate-400" />}
-                          </div>
-                        </div>
+              {/* Provisioning Steps - Scrollable Area */}
+              <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar pr-2 min-h-0">
 
-                        {/* Expanded Form */}
-                        {expandedRequestId === req.id && (
-                          <div className="p-10 space-y-10 border-t border-slate-800/50 animate-in slide-in-from-top-4 duration-300">
-                            {/* Section: URL & Method */}
-                            <div className="grid grid-cols-4 gap-4">
-                              <div className="col-span-1">
-                                <label className="text-[11px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-2 block">Method</label>
-                                <select value={req.method} onChange={e => updateRequest(req.id, 'method', e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-sm text-white font-black uppercase outline-none focus:border-indigo-500 transition-all">{['GET', 'POST', 'PUT', 'DELETE'].map(m => <option key={m}>{m}</option>)}</select>
-                              </div>
-                              <div className="col-span-3">
-                                <label className="text-[11px] font-black text-slate-500 uppercase tracking-widest ml-1 mb-2 block">Endpoint URL</label>
-                                <input value={req.url} onChange={e => updateRequest(req.id, 'url', e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-6 py-4 text-sm text-slate-300 font-mono outline-none focus:border-indigo-500 transition-all" />
-                              </div>
-                            </div>
-
-                            {/* Section: Headers */}
-                            <div className="space-y-4">
-                              <div className="flex justify-between items-center ml-1">
-                                <label className="text-[11px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2"><ListFilter size={14} /> Request Headers</label>
-                                <button onClick={() => updateRequest(req.id, 'headers', [...req.headers, { key: '', value: '' }])} className="text-[11px] font-black text-indigo-500 hover:text-indigo-400 transition-colors tracking-widest uppercase">Add Header +</button>
-                              </div>
-                              <div className="space-y-3 bg-slate-950/30 p-6 rounded-3xl border border-slate-800/50">
-                                {req.headers.length === 0 && <p className="text-xs text-slate-700 italic text-center py-2">No custom headers defined.</p>}
-                                {req.headers.map((h, i) => (
-                                  <div key={i} className="flex gap-4">
-                                    <input value={h.key} onChange={e => { const nh = [...req.headers]; nh[i].key = e.target.value; updateRequest(req.id, 'headers', nh); }} placeholder="Header Key" className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-5 py-3 text-sm text-indigo-400 font-bold outline-none" />
-                                    <input value={h.value} onChange={e => { const nh = [...req.headers]; nh[i].value = e.target.value; updateRequest(req.id, 'headers', nh); }} placeholder="Value" className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-5 py-3 text-sm text-slate-400 outline-none" />
-                                    <button onClick={() => updateRequest(req.id, 'headers', req.headers.filter((_, j) => i !== j))} className="text-slate-700 hover:text-red-400"><X size={18} /></button>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-
-                            {/* Section: Body/Payload */}
-                            <div className="space-y-4">
-                              <div className="flex justify-between items-center ml-1">
-                                <label className="text-[11px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2"><Braces size={14} /> Request Payload</label>
-                                <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800 scale-90 origin-right">
-                                  <button onClick={() => updateRequest(req.id, 'bodyMode', 'FORM')} className={`px-4 py-1.5 text-[10px] font-black uppercase rounded-lg transition-all ${req.bodyMode === 'FORM' ? 'bg-indigo-600 text-white' : 'text-slate-600'}`}>Fields</button>
-                                  <button onClick={() => updateRequest(req.id, 'bodyMode', 'JSON')} className={`px-4 py-1.5 text-[10px] font-black uppercase rounded-lg transition-all ${req.bodyMode === 'JSON' ? 'bg-indigo-600 text-white' : 'text-slate-600'}`}>Raw JSON</button>
-                                </div>
-                              </div>
-
-                              {req.bodyMode === 'JSON' ? (
-                                <textarea value={req.body} onChange={e => updateRequest(req.id, 'body', e.target.value)} className="w-full h-48 bg-slate-950 border border-slate-800 rounded-3xl p-6 text-sm font-mono text-indigo-300 outline-none shadow-inner" />
-                              ) : (
-                                <div className="space-y-3 bg-slate-950/30 p-6 rounded-3xl border border-slate-800/50">
-                                  {getBodyFields(req.body).map((f, i) => (
-                                    <div key={i} className="flex gap-4">
-                                      <input value={f.key} onChange={e => { const fs = getBodyFields(req.body); fs[i].key = e.target.value; updateBodyFromFields(req.id, fs); }} placeholder="Param Name" className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-5 py-3 text-sm text-emerald-400 font-bold outline-none" />
-                                      <input value={f.value} onChange={e => { const fs = getBodyFields(req.body); fs[i].value = e.target.value; updateBodyFromFields(req.id, fs); }} placeholder="Value" className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-5 py-3 text-sm text-slate-300 outline-none" />
-                                      <button onClick={() => { const fs = getBodyFields(req.body).filter((_, j) => i !== j); updateBodyFromFields(req.id, fs); }} className="text-slate-700 hover:text-red-400"><X size={18} /></button>
-                                    </div>
-                                  ))}
-                                  <button onClick={() => { const fs = getBodyFields(req.body); fs.push({ key: '', value: '' }); updateBodyFromFields(req.id, fs); }} className="text-[11px] font-black text-emerald-500 hover:text-emerald-400 flex items-center gap-2 mt-4 ml-1 uppercase tracking-widest"><Plus size={14} /> Append Data Field</button>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
+                {/* Step 1: Initialization */}
+                <div className={`p-4 rounded-xl border transition-all ${provisionStep === 'INIT' ? 'bg-slate-900/50 border-indigo-500/50 shadow-lg shadow-indigo-500/10' : 'bg-slate-950/50 border-slate-800/50 opacity-60'}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${provisionStatus.init === 'SUCCESS' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>
+                        {provisionStatus.init === 'LOADING' ? <Loader2 size={18} className="animate-spin" /> : <ShieldCheck size={18} />}
                       </div>
-                    ))}
+                      <div>
+                        <h4 className="text-xs font-black text-white uppercase tracking-wide">Security Handshake</h4>
+                        <p className="text-[10px] text-slate-500">Establish secure session</p>
+                      </div>
+                    </div>
+                    {provisionStatus.init === 'PENDING' && provisionStep === 'INIT' && (
+                      <button onClick={runInit} className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[10px] font-black uppercase tracking-wider transition-all">Start</button>
+                    )}
+                    {provisionStatus.init === 'SUCCESS' && <CheckCircle size={18} className="text-emerald-500" />}
+                  </div>
+                  {provisionStatus.init === 'ERROR' && (
+                    <div className="mt-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg text-[10px] text-red-400 flex items-center gap-2">
+                      <AlertCircle size={12} /> {provisionError}
+                      <button onClick={runInit} className="ml-auto underline hover:text-red-300">Retry</button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 2: Set Key */}
+                <div className={`p-4 rounded-xl border transition-all ${provisionStep === 'KEY' ? 'bg-slate-900/50 border-indigo-500/50 shadow-lg shadow-indigo-500/10' : 'bg-slate-950/50 border-slate-800/50 opacity-60'}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${provisionStatus.key === 'SUCCESS' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>
+                        {provisionStatus.key === 'LOADING' ? <Loader2 size={18} className="animate-spin" /> : <Lock size={18} />}
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-black text-white uppercase tracking-wide">Device Binding</h4>
+                        <p className="text-[10px] text-slate-500">Configure owner key</p>
+                      </div>
+                    </div>
+                    {provisionStatus.key === 'SUCCESS' && <CheckCircle size={18} className="text-emerald-500" />}
+                  </div>
+
+                  {provisionStep === 'KEY' && keyPayload && (
+                    <div className="mt-3 space-y-2 animate-in slide-in-from-top-2">
+                      <textarea
+                        value={JSON.stringify(keyPayload, null, 2)}
+                        onChange={e => {
+                          try {
+                            setKeyPayload(JSON.parse(e.target.value));
+                          } catch { }
+                        }}
+                        className="w-full h-24 bg-slate-950 rounded-lg border border-slate-800 font-mono text-[9px] text-slate-400 p-3 outline-none focus:border-indigo-500 transition-all resize-none"
+                      />
+                      <button onClick={sendKey} disabled={provisionStatus.key === 'LOADING'} className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-[10px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2">
+                        {provisionStatus.key === 'LOADING' ? <Loader2 size={12} className="animate-spin" /> : 'Confirm & Bind'}
+                      </button>
+                    </div>
+                  )}
+
+                  {provisionStatus.key === 'ERROR' && (
+                    <div className="mt-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg text-[10px] text-red-400 flex items-center gap-2">
+                      <AlertCircle size={12} /> {provisionError}
+                      <button onClick={runGetKey} className="ml-auto underline hover:text-red-300">Retry</button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 3: Set Time */}
+                <div className={`p-4 rounded-xl border transition-all ${provisionStep === 'TIME' ? 'bg-slate-900/50 border-indigo-500/50 shadow-lg shadow-indigo-500/10' : 'bg-slate-950/50 border-slate-800/50 opacity-60'}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${provisionStatus.time === 'SUCCESS' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>
+                        {provisionStatus.time === 'LOADING' ? <Loader2 size={18} className="animate-spin" /> : <Clock size={18} />}
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-black text-white uppercase tracking-wide">Time Sync</h4>
+                        <p className="text-[10px] text-slate-500">Synchronize device clock</p>
+                      </div>
+                    </div>
+                    {provisionStatus.time === 'SUCCESS' && <CheckCircle size={18} className="text-emerald-500" />}
+                  </div>
+                  {provisionStatus.time === 'ERROR' && (
+                    <div className="mt-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg text-[10px] text-red-400 flex items-center gap-2">
+                      <AlertCircle size={12} /> {provisionError}
+                      <button onClick={runSetTime} className="ml-auto underline hover:text-red-300">Retry</button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 4: Set WiFi */}
+                <div className={`p-4 rounded-xl border transition-all ${provisionStep === 'WIFI' ? 'bg-slate-900/50 border-indigo-500/50 shadow-lg shadow-indigo-500/10' : 'bg-slate-950/50 border-slate-800/50 opacity-60'}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${provisionStatus.wifi === 'SUCCESS' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>
+                        {provisionStatus.wifi === 'LOADING' ? <Loader2 size={18} className="animate-spin" /> : <Wifi size={18} />}
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-black text-white uppercase tracking-wide">Network Config</h4>
+                        <p className="text-[10px] text-slate-500">Connect to home WiFi</p>
+                      </div>
+                    </div>
+                    {provisionStatus.wifi === 'SUCCESS' && <CheckCircle size={18} className="text-emerald-500" />}
+                  </div>
+
+                  {provisionStep === 'WIFI' && (
+                    <div className="mt-3 space-y-2 animate-in slide-in-from-top-2">
+                      {wifiList.length === 0 ? (
+                        <div className="text-center py-4">
+                          <Loader2 size={20} className="animate-spin mx-auto text-indigo-500 mb-2" />
+                          <p className="text-[10px] text-slate-500 font-medium">Scanning networks...</p>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="space-y-1.5 max-h-44 overflow-y-auto custom-scrollbar pr-1">
+                            {wifiList.map((net) => (
+                              <button
+                                key={net.id}
+                                onClick={() => {
+                                  setSelectedWifi(net.name);
+                                  // 选择后自动滚动到密码输入区域
+                                  setTimeout(() => {
+                                    wifiPasswordRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                                  }, 100);
+                                }}
+                                className={`w-full p-2.5 rounded-lg border text-left flex items-center justify-between transition-all ${selectedWifi === net.name ? 'bg-indigo-600 border-indigo-500' : 'bg-slate-900 border-slate-800 hover:border-slate-600'}`}
+                              >
+                                <span className={`text-xs font-bold truncate ${selectedWifi === net.name ? 'text-white' : 'text-slate-200'}`}>{net.name}</span>
+                                <span className={`text-[10px] ${selectedWifi === net.name ? 'text-indigo-200' : 'text-slate-500'}`}>{net.rssi}dBm</span>
+                              </button>
+                            ))}
+                          </div>
+
+                          {selectedWifi && (
+                            <div ref={wifiPasswordRef} className="mt-2 space-y-2 animate-in slide-in-from-top-2">
+                              <div className="relative">
+                                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
+                                  <Lock size={14} />
+                                </div>
+                                <input
+                                  type="password"
+                                  placeholder={`Password for ${selectedWifi}`}
+                                  value={wifiPassword}
+                                  onChange={(e) => setWifiPassword(e.target.value)}
+                                  className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-xs text-white outline-none focus:border-indigo-500 transition-all placeholder:text-slate-600"
+                                  autoFocus
+                                />
+                              </div>
+                              <button onClick={sendWifi} disabled={provisionStatus.wifi === 'LOADING'} className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-[10px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2">
+                                {provisionStatus.wifi === 'LOADING' ? <Loader2 size={14} className="animate-spin" /> : 'Connect & Finish'}
+                              </button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {provisionStatus.wifi === 'ERROR' && (
+                    <div className="mt-2 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-xs text-red-400 flex items-center gap-2">
+                      <AlertCircle size={14} /> {provisionError}
+                      <button onClick={scanWifiForProvision} className="ml-auto underline hover:text-red-300">Retry</button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Success Message */}
+                {provisionStep === 'DONE' && (
+                  <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 animate-in fade-in slide-in-from-bottom-2">
+                    <div className="flex items-center gap-3 mb-3">
+                      <div className="w-10 h-10 rounded-full bg-emerald-500/20 flex items-center justify-center">
+                        <CheckCircle size={24} className="text-emerald-400" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-black text-emerald-400 uppercase">Provisioning Complete!</h4>
+                        <p className="text-[10px] text-slate-400">Device is connecting to your home network</p>
+                      </div>
+                    </div>
+                    <div className="space-y-2 text-[10px] text-slate-400 bg-slate-900/50 rounded-lg p-3">
+                      <p className="flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                        <span><b>Step 1:</b> Switch your computer back to your home WiFi network</span>
+                      </p>
+                      <p className="flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                        <span><b>Step 2:</b> Wait 30-60 seconds for the device to connect to MQTT</span>
+                      </p>
+                      <p className="flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                        <span><b>Step 3:</b> Click "Finalize & Bind" to complete the setup</span>
+                      </p>
+                    </div>
                   </div>
                 )}
-                <button onClick={addRequest} className="w-full py-6 border-2 border-dashed border-slate-900 rounded-[3rem] text-slate-700 text-xs font-black uppercase tracking-[0.3em] hover:text-indigo-500 hover:border-indigo-500/50 transition-all">+ Add Instruction Step</button>
+
               </div>
-
-              {/* Activity Log */}
-              {provisioningStatus !== 'IDLE' && (
-                <div className="mt-8 bg-slate-950 p-6 rounded-[2.5rem] border border-slate-900 h-32 overflow-y-auto custom-scrollbar font-mono text-xs shadow-inner">
-                  {provisionLog.map((l, i) => <div key={i} className="text-emerald-500/80 mb-2 flex items-center gap-3"><ChevronRight size={12} /> {l}</div>)}
-                  {provisioningStatus === 'SENDING' && <div className="text-indigo-400 animate-pulse pl-6">Negotiating protocol...</div>}
-                  {provisioningStatus === 'SUCCESS' && <div className="text-emerald-400 font-black mt-4 pl-6 flex items-center gap-2"><CheckCircle size={14} /> Provisioning Sequence Finalized.</div>}
-                </div>
-              )}
-
-              {/* Deploy Action */}
-              {provisioningStatus === 'IDLE' && (
-                <button onClick={deployConfig} className="mt-8 w-full py-6 bg-emerald-600 hover:bg-emerald-500 text-white rounded-[2.5rem] font-black text-sm uppercase tracking-[0.2em] shadow-2xl shadow-emerald-600/20 active:scale-95 transition-all flex items-center justify-center gap-4">
-                  <Zap size={24} /> Commit Sequence to Node
-                </button>
-              )}
             </div>
           )}
         </div>
@@ -441,7 +785,7 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({
             {step < 3 ? (
               <button onClick={handleNext} disabled={step === 2 && !connectedDevice} className="px-12 py-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-900 disabled:text-slate-700 text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-xl shadow-indigo-600/20">Proceed</button>
             ) : (
-              <button onClick={() => { onAdd({ ...formData, ip: getDeviceIp(), status: DeviceStatus.ONLINE }); onClose(); }} disabled={provisioningStatus !== 'SUCCESS'} className="px-12 py-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-900 text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all">Finalize & Bind</button>
+              <button onClick={() => { onAdd({ ...formData, ip: targetIp, status: DeviceStatus.ONLINE }); onClose(); }} disabled={provisioningStatus !== 'SUCCESS'} className="px-12 py-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-900 text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all">Finalize & Bind</button>
             )}
           </div>
         </div>

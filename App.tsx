@@ -12,14 +12,19 @@ import { CloudApiLab } from './components/CloudApiLab';
 import { AuthScreen, md5 } from './components/AuthScreen';
 import { MqttSettings } from './components/MqttSettings';
 import { MqttDeviceConsole } from './components/MqttDeviceConsole';
+import { MatterConsole } from './components/MatterConsole';
+import { MatterDashboard } from './components/MatterDashboard';
+import DeviceDiscoveryModal from './components/DeviceDiscoveryModal';
+import ErrorBoundary from './components/ErrorBoundary';
 
 
 const App: React.FC = () => {
   const [session, setSession] = useState<CloudSession | null>(null);
-  const [currentView, setCurrentView] = useState<'DASHBOARD' | 'LAB' | 'CLOUD_LAB' | 'SETTINGS' | 'DEVICE_DETAIL'>('DASHBOARD');
+  const [currentView, setCurrentView] = useState<'DASHBOARD' | 'LAB' | 'CLOUD_LAB' | 'MATTER' | 'SETTINGS' | 'DEVICE_DETAIL'>('DASHBOARD');
   const [devices, setDevices] = useState<Device[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isDiscoveryModalOpen, setIsDiscoveryModalOpen] = useState(false);
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
@@ -44,6 +49,9 @@ const App: React.FC = () => {
 
 
 
+  // 设备列表加载状态
+  const [isDevicesLoading, setIsDevicesLoading] = useState(false);
+
   const recordGlobalLog = useCallback((log: Omit<GlobalLogEntry, 'id' | 'timestamp'>) => {
     const newEntry: GlobalLogEntry = {
       ...log,
@@ -53,8 +61,12 @@ const App: React.FC = () => {
     setGlobalLogs(prev => [...prev.slice(-199), newEntry]);
   }, []);
 
-  // 设备列表加载状态
-  const [isDevicesLoading, setIsDevicesLoading] = useState(false);
+  const handleMqttPublish = useCallback(async (topic: string, message: string) => {
+    if (!window.electronAPI?.mqttPublish) {
+      throw new Error('Electron API not available');
+    }
+    return window.electronAPI.mqttPublish({ topic, message });
+  }, []);
 
   // 封装请求数据包（复用 AuthScreen 中的逻辑）
   const encapsulatePacket = useCallback((paramsValues: any, userKey?: string) => {
@@ -207,6 +219,16 @@ const App: React.FC = () => {
     });
   }, [mqttConfig.isConnected, mqttConfig.appid, probeDevice, recordGlobalLog]);
 
+  // MQTT 连接就绪且有设备时，自动发起探测（System.All）以获取详细信息（如 IP）
+  useEffect(() => {
+    if (mqttConfig.isConnected && mqttConfig.appid && devices.length > 0 && session) {
+      // 使用防抖或简单的标志位来避免过于频繁的探测可能更好，但这里直接调用
+      // 检查是否已经探测过？或者每次连接都探测？
+      // 为了简单起见，且 System.All 是轻量级请求，我们允许每次连接/设备列表更新时发送
+      probeAllDevices(devices, session);
+    }
+  }, [mqttConfig.isConnected, mqttConfig.appid, devices.length, session, probeAllDevices]);
+
   // 获取设备列表
   const fetchDeviceList = useCallback(async (currentSession: CloudSession) => {
     if (!currentSession || currentSession.guid === 'PENDING') return;
@@ -255,22 +277,26 @@ const App: React.FC = () => {
 
       if (result?.apiStatus === 0 && Array.isArray(result.data)) {
         // 将 API 返回的设备数据映射到 Device 类型
-        const mappedDevices: Device[] = result.data.map((dev: any) => ({
-          id: dev.uuid || dev.devUuid || Math.random().toString(36).substring(2, 9),
-          name: dev.devName || dev.deviceName || 'Unknown Device',
-          ip: dev.devIp || dev.localIp || '0.0.0.0',
-          type: dev.deviceType || dev.devType || 'Unknown',
-          status: dev.onlineStatus === 1 || dev.online === true ? DeviceStatus.ONLINE : DeviceStatus.OFFLINE,
-          protocol: Protocol.MQTT,
-          connectionType: dev.connectionType || 'WIFI',
-          lastSeen: dev.lastActiveTime ? new Date(dev.lastActiveTime * 1000).toISOString() : new Date().toISOString(),
-          firmwareVersion: dev.fmwareVersion || dev.firmwareVersion || 'N/A',
-          telemetry: [],
-          config: dev.channels || dev.digest || {},
-          isBound: true,
-          mqttTopic: `/appliance/${dev.uuid || dev.devUuid}/subscribe`,
-          bindingToken: dev.bindToken || dev.token
-        }));
+        const mappedDevices: Device[] = result.data.map((dev: any) => {
+          const id = dev.uuid || dev.devUuid || dev.deviceUuid || Math.random().toString(36).substring(2, 9);
+          console.log('[DeviceList] Mapped device:', dev.devName, 'ID:', id);
+          return {
+            id,
+            name: dev.devName || dev.deviceName || 'Unknown Device',
+            ip: dev.devIp || dev.localIp || '0.0.0.0',
+            type: dev.deviceType || dev.devType || 'Unknown',
+            status: dev.onlineStatus === 1 || dev.online === true ? DeviceStatus.ONLINE : DeviceStatus.OFFLINE,
+            protocol: Protocol.MQTT,
+            connectionType: dev.connectionType || 'WIFI',
+            lastSeen: dev.lastActiveTime ? new Date(dev.lastActiveTime * 1000).toISOString() : new Date().toISOString(),
+            firmwareVersion: dev.fmwareVersion || dev.firmwareVersion || 'N/A',
+            telemetry: [],
+            config: dev.channels || dev.digest || {},
+            isBound: true,
+            mqttTopic: `/appliance/${dev.uuid || dev.devUuid}/subscribe`,
+            bindingToken: dev.bindToken || dev.token
+          };
+        });
 
         setDevices(mappedDevices);
 
@@ -286,9 +312,9 @@ const App: React.FC = () => {
           setSelectedDeviceId(mappedDevices[0].id);
         }
 
-        // 并发向每个设备发送 MQTT 消息获取状态
+        // 通过 HTTP 请求每个设备的 Appliance.System.All 获取详细信息
         if (mappedDevices.length > 0) {
-          probeAllDevices(mappedDevices, currentSession);
+          fetchDeviceDetails(mappedDevices, currentSession);
         }
       }
     } catch (err: any) {
@@ -302,6 +328,66 @@ const App: React.FC = () => {
       setIsDevicesLoading(false);
     }
   }, [encapsulatePacket, recordGlobalLog, selectedDeviceId]);
+
+  // 获取设备详细信息 (Appliance.System.All via HTTP)
+  const fetchDeviceDetails = useCallback(async (deviceList: Device[], currentSession: CloudSession) => {
+    console.log('[App] Fetching device details for', deviceList.length, 'devices...');
+
+    for (const device of deviceList) {
+      if (!device.ip || device.ip === '0.0.0.0') {
+        console.log(`[App] Skipping device ${device.name} - no valid IP`);
+        continue;
+      }
+
+      try {
+        const result = await window.electronAPI?.discoveryGetDeviceInfo({
+          ip: device.ip,
+          session: currentSession
+        });
+
+        if (result?.success && result.data) {
+          const deviceData = result.data;
+          console.log(`[App] Got details for ${device.name}:`, deviceData);
+
+          // 更新设备信息
+          setDevices(prev => prev.map(d => {
+            if (d.id === device.id) {
+              const firmware = deviceData.firmware;
+              const system = deviceData.system;
+              const hardware = deviceData.hardware;
+
+              return {
+                ...d,
+                firmwareVersion: typeof firmware?.version === 'string'
+                  ? firmware.version
+                  : (d.firmwareVersion || 'N/A'),
+                config: {
+                  ...d.config,
+                  systemInfo: {
+                    hardware: hardware || {},
+                    firmware: firmware || {},
+                    online: system?.online || {}
+                  }
+                }
+              };
+            }
+            return d;
+          }));
+
+          recordGlobalLog({
+            type: 'HTTP',
+            direction: 'RX',
+            label: `Device Info: ${device.name}`,
+            detail: `Got System.All from ${device.ip}`
+          });
+        } else {
+          console.log(`[App] Failed to get details for ${device.name}:`, result?.error);
+        }
+      } catch (error: any) {
+        console.error(`[App] Error fetching details for ${device.name}:`, error);
+      }
+    }
+  }, [recordGlobalLog]);
 
   // 登录成功后（guid 获取完成后）自动拉取设备列表
   useEffect(() => {
@@ -526,6 +612,37 @@ const App: React.FC = () => {
           label: `MQTT <- ${parsed.header?.namespace || 'Response'}`,
           detail: `[Topic]: ${data.topic}\n[Payload]:\n${JSON.stringify(parsed, null, 2)}`
         });
+
+        // 自动更新设备 IP
+        if (parsed.header?.namespace === 'Appliance.System.All' && parsed.header?.method === 'GETACK') {
+          const innerIp = parsed.payload?.all?.system?.firmware?.innerIp;
+          const deviceId = parsed.header?.uuid || data.topic.split('/')[2];
+
+          if (innerIp && deviceId) {
+            console.log(`[AutoIP] Received System.All GETACK. UUID: ${deviceId}, InnerIP: ${innerIp}`);
+            setDevices(prev => {
+              let hasChange = false;
+              const newDevices = prev.map(d => {
+                // 宽松匹配：忽略大小写
+                if (d.id.toLowerCase() === deviceId.toLowerCase()) {
+                  if (d.ip !== innerIp) {
+                    console.log(`[AutoIP] Updating device ${d.name} (${d.id}) IP: ${d.ip} -> ${innerIp}`);
+                    hasChange = true;
+                    return { ...d, ip: innerIp };
+                  } else {
+                    console.log(`[AutoIP] Device ${d.name} IP already up to date.`);
+                  }
+                }
+                return d;
+              });
+
+              if (!hasChange) {
+                console.log(`[AutoIP] No matching device found for UUID: ${deviceId} in list:`, prev.map(d => d.id));
+              }
+              return hasChange ? newDevices : prev;
+            });
+          }
+        }
       } catch {
         // 非 JSON 消息
         recordGlobalLog({
@@ -587,9 +704,12 @@ const App: React.FC = () => {
 
   const selectedDevice = devices.find(d => d.id === selectedDeviceId);
 
+  // 临时禁用登录（开发模式）- 完成后改为 false
+  const DEV_SKIP_AUTH = false;
+
   return (
     <div className="h-screen bg-slate-950 text-slate-200 flex flex-col font-sans relative overflow-hidden">
-      {!session ? (
+      {!session && !DEV_SKIP_AUTH ? (
         <AuthScreen
           onLoginSuccess={setSession}
           onLog={recordGlobalLog}
@@ -619,8 +739,9 @@ const App: React.FC = () => {
               ) : (
                 [
                   { id: 'DASHBOARD', label: 'Dashboard', icon: LayoutDashboard },
-                  { id: 'LAB', label: 'Protocol Lab', icon: RefreshCw },
-                  { id: 'CLOUD_LAB', label: 'Cloud API', icon: Cloud },
+                  { id: 'MATTER', label: 'Matter', icon: Zap },
+                  { id: 'LAB', label: 'TOOL', icon: RefreshCw },
+                  { id: 'CLOUD_LAB', label: 'API', icon: Cloud },
                   { id: 'SETTINGS', label: 'Connectivity', icon: Settings }
                 ].map(tab => (
                   <button key={tab.id} onClick={() => setCurrentView(tab.id as any)} className={`flex items-center gap-3 px-6 py-3 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all ${currentView === tab.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/10' : 'text-slate-500 hover:text-slate-300'}`}>
@@ -768,9 +889,22 @@ const App: React.FC = () => {
                     <h2 className="text-2xl font-black text-white uppercase tracking-tight">Device Fleet</h2>
                     <p className="text-slate-500 text-xs mt-1">Manage and monitor your connected devices</p>
                   </div>
-                  <button onClick={() => setIsAddModalOpen(true)} className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-xl shadow-indigo-600/20 flex items-center gap-3">
-                    <Plus size={16} /> Add Device
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => session && fetchDeviceList(session)}
+                      disabled={isDevicesLoading}
+                      className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2 disabled:opacity-50"
+                    >
+                      <RefreshCw size={16} className={isDevicesLoading ? 'animate-spin' : ''} />
+                      Refresh
+                    </button>
+                    <button onClick={() => setIsDiscoveryModalOpen(true)} className="px-5 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-xl shadow-emerald-600/20 flex items-center gap-2">
+                      <Activity size={16} /> Scan Devices
+                    </button>
+                    <button onClick={() => setIsAddModalOpen(true)} className="px-5 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-xl shadow-indigo-600/20 flex items-center gap-2">
+                      <Plus size={16} /> Add New
+                    </button>
+                  </div>
                 </div>
 
                 {/* 设备网格 */}
@@ -840,13 +974,19 @@ const App: React.FC = () => {
                 </div>
 
                 {/* 设备监控面板 */}
-                <DeviceMonitor device={selectedDevice} />
+                <DeviceMonitor
+                  device={selectedDevice}
+                  onGetOnlineStatus={async () => {
+                    // 直接使用设备状态确定在线状态
+                    return { status: selectedDevice.status === DeviceStatus.ONLINE ? 1 : 2 };
+                  }}
+                />
 
                 {/* MQTT 控制台和配置 - 两列布局 */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                   <MqttDeviceConsole
                     device={selectedDevice}
-                    session={session}
+                    session={session!}
                     mqttConnected={mqttConfig.isConnected}
                     appid={mqttConfig.appid}
                     onLog={recordGlobalLog}
@@ -855,9 +995,37 @@ const App: React.FC = () => {
                 </div>
               </div>
             )}
-            {currentView === 'LAB' && <ProtocolLab onLog={recordGlobalLog} />}
-            {currentView === 'CLOUD_LAB' && <CloudApiLab session={session} onLog={recordGlobalLog} />}
-            {currentView === 'SETTINGS' && <MqttSettings config={mqttConfig} session={session} onUpdate={setMqttConfig} onConnect={() => connectMqtt(mqttConfig, true)} onCancel={cancelMqtt} isLogEnabled={isLogEnabled} onToggleLog={setIsLogEnabled} onLog={recordGlobalLog} />}
+            {currentView === 'LAB' && (
+              <div className="h-full space-y-6">
+                <ProtocolLab
+                  onLog={recordGlobalLog}
+                  devices={devices.map(d => ({ id: d.id, name: d.name, ip: d.ip }))}
+                  mqttConnected={mqttConfig.isConnected}
+                  onMqttPublish={handleMqttPublish}
+                  appid={mqttConfig.appid}
+                  session={session}
+                  onHttpRequest={async (ip, payload) => {
+                    if (!window.electronAPI?.nativeRequest) throw new Error('Electron API not available');
+                    const res = await window.electronAPI.nativeRequest({
+                      url: `http://${ip}/config`,
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: payload
+                    });
+                    if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+                    return res.data;
+                  }}
+                />
+              </div>
+            )}
+            {currentView === 'MATTER' && (
+              <div className="space-y-6">
+                <MatterDashboard onLog={recordGlobalLog} />
+                <MatterConsole onLog={recordGlobalLog} />
+              </div>
+            )}
+            {currentView === 'CLOUD_LAB' && <CloudApiLab session={session!} onLog={recordGlobalLog} />}
+            {currentView === 'SETTINGS' && <MqttSettings config={mqttConfig} session={session!} onUpdate={setMqttConfig} onConnect={() => connectMqtt(mqttConfig, true)} onCancel={cancelMqtt} isLogEnabled={isLogEnabled} onToggleLog={setIsLogEnabled} onLog={recordGlobalLog} />}
           </main>
         </div>
       )}
@@ -886,7 +1054,17 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      <AddDeviceModal isOpen={isAddModalOpen} onClose={() => setIsAddModalOpen(false)} onAdd={(d) => setDevices([...devices, { ...d, id: Math.random().toString(), status: DeviceStatus.ONLINE, telemetry: [] }])} deviceTypes={DEFAULT_DEVICE_TYPES} connectionTypes={DEFAULT_CONNECTION_TYPES} onUpdateDeviceTypes={() => { }} onUpdateConnectionTypes={() => { }} />
+      <AddDeviceModal isOpen={isAddModalOpen} onClose={() => setIsAddModalOpen(false)} onAdd={(d) => setDevices([...devices, { ...d, id: Math.random().toString(), status: DeviceStatus.ONLINE, telemetry: [] }])} deviceTypes={DEFAULT_DEVICE_TYPES} connectionTypes={DEFAULT_CONNECTION_TYPES} onUpdateDeviceTypes={() => { }} onUpdateConnectionTypes={() => { }} session={session} />
+
+      {/* Device Discovery Modal */}
+      <ErrorBoundary>
+        <DeviceDiscoveryModal
+          isOpen={isDiscoveryModalOpen}
+          onClose={() => setIsDiscoveryModalOpen(false)}
+          session={session}
+          onLog={recordGlobalLog}
+        />
+      </ErrorBoundary>
     </div>
   );
 };

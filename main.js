@@ -5,11 +5,31 @@ import { exec } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import https from 'https';
+import http from 'http';
 import { fileURLToPath } from 'url';
 import mqtt from 'mqtt';
+import { createRequire } from 'module';
+
+// 使用 createRequire 导入 CommonJS 模块
+const require = createRequire(import.meta.url);
+
+// WiFi 模块
+const wifi = require('node-wifi');
+wifi.init({ iface: null });
+
+// SerialPort 模块
+const { SerialPort } = require('serialport');
+const { ReadlineParser } = require('@serialport/parser-readline');
+
+// 串口实例管理
+let serialPort = null;
+let serialParser = null;
 
 // MQTT 客户端实例（主进程持有）
 let mqttClient = null;
+
+// Matter Controller 状态
+let matterInitialized = false;
 
 // 在 ES 模块中手动定义 __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -83,16 +103,17 @@ function createWindow() {
 ipcMain.handle('http:request', async (event, { url, method, headers, body }) => {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
+    const protocol = parsedUrl.protocol === 'https:' ? https : http;
     const options = {
       hostname: parsedUrl.hostname,
-      port: parsedUrl.port || 443,
+      port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
       path: parsedUrl.pathname + parsedUrl.search,
       method: method || 'POST',
       headers: headers || {},
       rejectUnauthorized: false
     };
 
-    const req = https.request(options, (res) => {
+    const req = protocol.request(options, (res) => {
       let responseBody = '';
       res.on('data', (chunk) => { responseBody += chunk; });
       res.on('end', () => {
@@ -113,90 +134,6 @@ ipcMain.handle('http:request', async (event, { url, method, headers, body }) => 
       req.write(typeof body === 'string' ? body : JSON.stringify(body));
     }
     req.end();
-  });
-});
-
-// Wi-Fi 扫描
-ipcMain.handle('wifi:scan', async () => {
-  return new Promise((resolve) => {
-    let cmd = process.platform === 'win32'
-      ? 'chcp 65001 > nul && netsh wlan show networks mode=Bssid'
-      : 'nmcli -t -f SSID,SIGNAL,BSSID dev wifi';
-
-    exec(cmd, { encoding: 'utf8' }, (error, stdout) => {
-      if (error) { resolve([]); return; }
-      const results = [];
-      const lines = stdout.split('\n');
-      if (process.platform === 'win32') {
-        let current = null;
-        lines.forEach(line => {
-          const t = line.trim();
-          const ssid = t.match(/SSID \d+ : (.*)/);
-          if (ssid) {
-            if (current) results.push(current);
-            current = { id: Math.random().toString(36).substr(2, 5), name: ssid[1].trim(), rssi: -100, mac: '---' };
-          } else if (current) {
-            const sig = t.match(/(Signal|信号)\s*:\s*(\d+)%/i);
-            if (sig) current.rssi = Math.floor((parseInt(sig[2]) / 2) - 100);
-            const bssid = t.match(/BSSID \d+ : (.*)/);
-            if (bssid) current.mac = bssid[1].trim().toUpperCase();
-          }
-        });
-        if (current) results.push(current);
-      }
-      resolve(results);
-    });
-  });
-});
-
-// 核心功能：真实的系统级连接
-ipcMain.handle('wifi:connect', async (event, { ssid, password }) => {
-  return new Promise((resolve, reject) => {
-    if (process.platform !== 'win32') {
-      exec(`nmcli dev wifi connect "${ssid}" password "${password || ''}"`, (err) => {
-        err ? reject(err) : resolve(true);
-      });
-      return;
-    }
-
-    const profileName = `Nexus_Temp_${Date.now()}`;
-    const profileXml = `
-      <?xml version="1.0"?>
-      <WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
-        <name>${ssid}</name>
-        <SSIDConfig>
-          <SSID>
-            <name>${ssid}</name>
-          </SSID>
-        </SSIDConfig>
-        <connectionType>ESS</connectionType>
-        <connectionMode>manual</connectionMode>
-        <MSM>
-          <security>
-            <authEncryption>
-              <authentication>${password ? 'WPA2PSK' : 'open'}</authentication>
-              <encryption>${password ? 'AES' : 'none'}</encryption>
-              <useOneX>false</useOneX>
-            </authEncryption>
-            ${password ? `<sharedKey><keyType>passPhrase</keyType><protected>false</protected><keyMaterial>${password}</keyMaterial></sharedKey>` : ''}
-          </security>
-        </MSM>
-      </WLANProfile>
-    `.trim();
-
-    const tempPath = path.join(os.tmpdir(), `${profileName}.xml`);
-    fs.writeFileSync(tempPath, profileXml);
-
-    const connectCmd = `chcp 65001 > nul && netsh wlan add profile filename="${tempPath}" && netsh wlan connect name="${ssid}" ssid="${ssid}"`;
-
-    exec(connectCmd, (err) => {
-      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-      if (err) {
-        reject(err);
-      } else {
-        setTimeout(() => resolve(true), 3000);
-      }
-    });
   });
 });
 
@@ -337,9 +274,834 @@ ipcMain.handle('mqtt:status', async () => {
 
 // ========== END MQTT ==========
 
+// ========== MATTER PROTOCOL ==========
+
+// 延迟加载 Matter Controller (避免启动时加载失败)
+let matterController = null;
+
+async function getMatterController() {
+  if (!matterController) {
+    try {
+      matterController = require('./matter-controller.cjs');
+    } catch (error) {
+      console.error('[Matter] Failed to load Matter Controller:', error);
+      throw error;
+    }
+  }
+  return matterController;
+}
+
+// 初始化 Matter Controller
+ipcMain.handle('matter:init', async () => {
+  try {
+    const controller = await getMatterController();
+    const result = await controller.initializeMatter(win);
+    matterInitialized = result.success;
+    return result;
+  } catch (error) {
+    console.error('[Matter] Init error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 发现 Matter 设备
+ipcMain.handle('matter:discover', async (event, options = {}) => {
+  try {
+    if (!matterInitialized) {
+      return { success: false, error: 'Matter Controller not initialized' };
+    }
+    const controller = await getMatterController();
+    return await controller.discoverMatterDevices(win, options);
+  } catch (error) {
+    console.error('[Matter] Discover error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 停止扫描
+ipcMain.handle('matter:stopScan', async () => {
+  try {
+    const controller = await getMatterController();
+    return controller.stopScan();
+  } catch (error) {
+    console.error('[Matter] Stop scan error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 配网 Matter 设备
+ipcMain.handle('matter:commission', async (event, { deviceId, setupCode, wifiCredentials }) => {
+  try {
+    if (!matterInitialized) {
+      return { success: false, error: 'Matter Controller not initialized' };
+    }
+    const controller = await getMatterController();
+    return await controller.commissionMatterDevice(win, deviceId, setupCode, wifiCredentials);
+  } catch (error) {
+    console.error('[Matter] Commission error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 读取 Matter 属性
+ipcMain.handle('matter:read', async (event, { nodeId, endpointId, clusterId, attributeId }) => {
+  try {
+    if (!matterInitialized) {
+      return { success: false, error: 'Matter Controller not initialized' };
+    }
+    const controller = await getMatterController();
+    return await controller.readMatterAttribute(nodeId, endpointId, clusterId, attributeId);
+  } catch (error) {
+    console.error('[Matter] Read error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 写入 Matter 属性
+ipcMain.handle('matter:write', async (event, { nodeId, endpointId, clusterId, attributeId, value }) => {
+  try {
+    if (!matterInitialized) {
+      return { success: false, error: 'Matter Controller not initialized' };
+    }
+    const controller = await getMatterController();
+    return await controller.writeMatterAttribute(nodeId, endpointId, clusterId, attributeId, value);
+  } catch (error) {
+    console.error('[Matter] Write error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 调用 Matter 命令
+ipcMain.handle('matter:invoke', async (event, { nodeId, endpointId, clusterId, commandId, args }) => {
+  try {
+    if (!matterInitialized) {
+      return { success: false, error: 'Matter Controller not initialized' };
+    }
+    const controller = await getMatterController();
+    return await controller.invokeMatterCommand(nodeId, endpointId, clusterId, commandId, args);
+  } catch (error) {
+    console.error('[Matter] Invoke error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取已配网设备
+ipcMain.handle('matter:devices', async () => {
+  try {
+    if (!matterInitialized) {
+      return { success: false, error: 'Matter Controller not initialized' };
+    }
+    const controller = await getMatterController();
+    return await controller.getCommissionedDevices();
+  } catch (error) {
+    console.error('[Matter] Get devices error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Matter 状态
+ipcMain.handle('matter:status', async () => {
+  return {
+    initialized: matterInitialized
+  };
+});
+
+// ========== SSH 远程配网 ==========
+
+// 获取 SSH 配置
+ipcMain.handle('matter:getSshConfig', async () => {
+  try {
+    const controller = await getMatterController();
+    return controller.getSshConfig();
+  } catch (error) {
+    console.error('[Matter] Get SSH config error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 保存 SSH 配置
+ipcMain.handle('matter:saveSshConfig', async (event, config) => {
+  try {
+    const controller = await getMatterController();
+    return controller.saveSshConfig(config);
+  } catch (error) {
+    console.error('[Matter] Save SSH config error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取所有 SSH 配置
+ipcMain.handle('matter:getSshConfigs', async () => {
+  try {
+    const controller = await getMatterController();
+    return controller.getSshConfigs();
+  } catch (error) {
+    console.error('[Matter] Get SSH configs error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 添加 SSH 配置
+ipcMain.handle('matter:addSshConfig', async (event, config) => {
+  try {
+    const controller = await getMatterController();
+    return controller.addSshConfig(config);
+  } catch (error) {
+    console.error('[Matter] Add SSH config error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 删除 SSH 配置
+ipcMain.handle('matter:deleteSshConfig', async (event, configId) => {
+  try {
+    const controller = await getMatterController();
+    return controller.deleteSshConfig(configId);
+  } catch (error) {
+    console.error('[Matter] Delete SSH config error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 选择 SSH 配置
+ipcMain.handle('matter:selectSshConfig', async (event, configId) => {
+  try {
+    const controller = await getMatterController();
+    return controller.selectSshConfig(configId);
+  } catch (error) {
+    console.error('[Matter] Select SSH config error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 测试 SSH 连接
+ipcMain.handle('matter:testSshConnection', async (event, config) => {
+  try {
+    const controller = await getMatterController();
+    return await controller.testSshConnection(config);
+  } catch (error) {
+    console.error('[Matter] Test SSH error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 通过 SSH 远程配网
+ipcMain.handle('matter:commissionViaSSH', async (event, { sshConfig, commissionParams }) => {
+  try {
+    const controller = await getMatterController();
+    return await controller.commissionViaSSH(win, sshConfig, commissionParams);
+  } catch (error) {
+    console.error('[Matter] SSH commission error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 检查设备在线状态
+ipcMain.handle('matter:checkDeviceOnline', async (event, { nodeId, sshConfig }) => {
+  try {
+    const controller = await getMatterController();
+    return await controller.checkDeviceOnline(nodeId, sshConfig);
+  } catch (error) {
+    console.error('[Matter] Check device online error:', error);
+    return { online: false, error: error.message };
+  }
+});
+
+// 批量检查设备在线状态
+ipcMain.handle('matter:checkDevicesOnline', async (event, { devices, sshConfig }) => {
+  try {
+    const controller = await getMatterController();
+    const results = await controller.checkDevicesOnline(devices, sshConfig);
+    // 将 Map 转换为对象
+    const resultObj = {};
+    results.forEach((value, key) => {
+      resultObj[key] = value;
+    });
+    return { success: true, results: resultObj };
+  } catch (error) {
+    console.error('[Matter] Check devices online error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 读取设备结构 (Endpoints, Clusters, Attributes)
+ipcMain.handle('matter:readDeviceStructure', async (event, { nodeId, sshConfig, forceRefresh }) => {
+  try {
+    const controller = await getMatterController();
+    return await controller.readDeviceStructure(nodeId, sshConfig, forceRefresh);
+  } catch (error) {
+    console.error('[Matter] Read device structure error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 删除已配网设备
+ipcMain.handle('matter:deleteDevice', async (event, { nodeId }) => {
+  try {
+    const controller = await getMatterController();
+    return controller.deleteCommissionedDevice(nodeId);
+  } catch (error) {
+    console.error('[Matter] Delete device error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 更新设备名称
+ipcMain.handle('matter:updateDeviceName', async (event, { nodeId, name }) => {
+  try {
+    const controller = await getMatterController();
+    return controller.updateDeviceName(nodeId, name);
+  } catch (error) {
+    console.error('[Matter] Update device name error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 通用交互指令
+ipcMain.handle('matter:executeGenericCommand', async (event, { params, sshConfig }) => {
+  try {
+    const controller = await getMatterController();
+    return await controller.executeGenericCommand(params, sshConfig);
+  } catch (error) {
+    console.error('[Matter] Execute generic command error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取自定义 Cluster
+ipcMain.handle('matter:getCustomClusters', async () => {
+  try {
+    const controller = await getMatterController();
+    return controller.getCustomClusters();
+  } catch (error) {
+    console.error('[Matter] Get custom clusters error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 保存自定义 Cluster
+ipcMain.handle('matter:saveCustomCluster', async (event, cluster) => {
+  try {
+    const controller = await getMatterController();
+    return controller.saveCustomCluster(cluster);
+  } catch (error) {
+    console.error('[Matter] Save custom cluster error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取 chip-tool 支持的所有 clusters
+ipcMain.handle('matter:getChipToolClusters', async (event, { sshConfig, forceRefresh }) => {
+  try {
+    const controller = await getMatterController();
+    return await controller.getChipToolClusters(sshConfig, forceRefresh);
+  } catch (error) {
+    console.error('[Matter] Get chip-tool clusters error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取指定 cluster 的详细信息 (attributes, commands)
+ipcMain.handle('matter:getClusterDetails', async (event, { sshConfig, clusterName }) => {
+  try {
+    const controller = await getMatterController();
+    return await controller.getClusterDetails(sshConfig, clusterName);
+  } catch (error) {
+    console.error('[Matter] Get cluster details error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 清除 cluster 缓存
+ipcMain.handle('matter:clearClusterCache', async () => {
+  try {
+    const controller = await getMatterController();
+    return controller.clearClusterCache();
+  } catch (error) {
+    console.error('[Matter] Clear cluster cache error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 开始后台预加载 cluster 详情
+ipcMain.handle('matter:startClusterDetailsPrefetch', async (event, { sshConfig }) => {
+  try {
+    const controller = await getMatterController();
+    return await controller.prefetchClusterDetails(sshConfig);
+  } catch (error) {
+    console.error('[Matter] Start prefetch error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========== END MATTER ==========
+
+// ========== WIFI ==========
+
+// 扫描 WiFi
+ipcMain.handle('wifi:scan', async () => {
+  try {
+    const networks = await wifi.scan();
+    // 过滤重复 SSID，只保留信号最强的
+    const uniqueNetworks = {};
+    networks.forEach(net => {
+      if (!net.ssid) return;
+      if (!uniqueNetworks[net.ssid] || net.quality > uniqueNetworks[net.ssid].quality) {
+        uniqueNetworks[net.ssid] = net;
+      }
+    });
+
+    // 转换为前端需要的格式
+    return Object.values(uniqueNetworks).map(net => ({
+      id: net.mac,
+      name: net.ssid,
+      rssi: net.signal_level, // node-wifi 返回 signal_level (dBm)
+      mac: net.mac,
+      security: net.security,
+      channel: net.channel
+    }));
+  } catch (error) {
+    console.error('[WiFi] Scan error:', error);
+    return [];
+  }
+});
+
+// 连接 WiFi
+ipcMain.handle('wifi:connect', async (event, { ssid, password }) => {
+  try {
+    console.log(`[WiFi] Connecting to ${ssid}...`);
+    await wifi.connect({ ssid, password: password || '' });
+    console.log(`[WiFi] Connected to ${ssid}`);
+    return true;
+  } catch (error) {
+    console.error(`[WiFi] Connect to ${ssid} error:`, error);
+    return false;
+  }
+});
+
+// ========== END WIFI ==========
+
+// ========== DISCOVERY ==========
+let discoveryService = null;
+let discoveryCallback = null;
+
+function getDiscoveryService() {
+  if (!discoveryService) {
+    discoveryService = require('./discovery-service.cjs');
+  }
+  return discoveryService;
+}
+
+// 开始发现设备 (HAP + Matter)
+ipcMain.handle('discovery:start', async () => {
+  try {
+    const service = getDiscoveryService();
+
+    // 设置回调，将发现事件发送到渲染进程
+    discoveryCallback = (event, device) => {
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('discovery:device', { event, device });
+      }
+    };
+
+    return service.startAllDiscovery(discoveryCallback);
+  } catch (error) {
+    console.error('[Discovery] Start error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 停止发现
+ipcMain.handle('discovery:stop', async () => {
+  try {
+    const service = getDiscoveryService();
+    discoveryCallback = null;
+    return service.stopAllDiscovery();
+  } catch (error) {
+    console.error('[Discovery] Stop error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取已发现的设备列表 (HAP + Matter)
+ipcMain.handle('discovery:getDevices', async () => {
+  try {
+    const service = getDiscoveryService();
+    return { success: true, devices: service.getAllDiscoveredDevices() };
+  } catch (error) {
+    console.error('[Discovery] Get devices error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 检查设备绑定状态 (仅 HAP 设备)
+ipcMain.handle('discovery:checkBindStatus', async (event, { ip, session }) => {
+  try {
+    const service = getDiscoveryService();
+    return await service.checkDeviceBindStatus(ip, session);
+  } catch (error) {
+    console.error('[Discovery] Check bind status error:', error);
+    return { success: false, error: error.message, canBind: false };
+  }
+});
+
+// 绑定设备 (仅 HAP 设备)
+ipcMain.handle('discovery:bindDevice', async (event, { ip, session }) => {
+  try {
+    const service = getDiscoveryService();
+    return await service.bindDevice(ip, session);
+  } catch (error) {
+    console.error('[Discovery] Bind device error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 通过 HTTP 获取设备详细信息 (Appliance.System.All)
+ipcMain.handle('discovery:getDeviceInfo', async (event, { ip, session }) => {
+  try {
+    const service = getDiscoveryService();
+    const result = await service.getDeviceSystemAll(ip, session);
+
+    if (result.success && result.data?.payload) {
+      const all = result.data.payload.all || result.data.payload;
+      return {
+        success: true,
+        data: {
+          system: all.system || {},
+          hardware: all.hardware || {},
+          firmware: all.firmware || {},
+          digest: all.digest || {},
+          raw: result.data
+        }
+      };
+    }
+    return { success: false, error: result.error || 'Failed to get device info' };
+  } catch (error) {
+    console.error('[Discovery] Get device info error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 向设备发送命令 (优先 HTTP，失败后提示使用 MQTT)
+ipcMain.handle('device:sendCommand', async (event, { ip, namespace, method, payload, session }) => {
+  try {
+    const service = getDiscoveryService();
+    const result = await service.sendHttpRequestWithRetry(ip, namespace, method, payload, session, 2);
+
+    if (result.success) {
+      return { success: true, data: result.data, via: 'http' };
+    }
+
+    if (result.shouldFallbackToMqtt) {
+      console.log(`[Device] HTTP failed for ${ip}, frontend should use MQTT`);
+      return {
+        success: false,
+        error: result.error,
+        shouldFallbackToMqtt: true
+      };
+    }
+
+    return { success: false, error: result.error };
+  } catch (error) {
+    console.error('[Device] Send command error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========== SERIAL PORT ==========
+
+// 获取可用串口列表
+ipcMain.handle('serial:listPorts', async () => {
+  try {
+    const ports = await SerialPort.list();
+    console.log('[Serial] Available ports:', ports);
+    return {
+      success: true,
+      ports: ports.map(p => ({
+        path: p.path,
+        manufacturer: p.manufacturer || 'Unknown',
+        vendorId: p.vendorId,
+        productId: p.productId,
+        serialNumber: p.serialNumber,
+        pnpId: p.pnpId,
+        friendlyName: p.friendlyName || p.path
+      }))
+    };
+  } catch (error) {
+    console.error('[Serial] List ports error:', error);
+    return { success: false, error: error.message, ports: [] };
+  }
+});
+
+// 连接串口
+ipcMain.handle('serial:connect', async (event, { path, baudRate }) => {
+  try {
+    // 如果已有连接，先断开
+    if (serialPort && serialPort.isOpen) {
+      serialPort.close();
+      serialPort = null;
+      serialParser = null;
+    }
+
+    console.log(`[Serial] Connecting to ${path} at ${baudRate} baud`);
+
+    serialPort = new SerialPort({
+      path,
+      baudRate: baudRate || 115200,
+      autoOpen: false
+    });
+
+    // ANSI 转义序列过滤函数 - 移除终端颜色代码等控制字符
+    const stripAnsi = (str) => {
+      // 匹配所有 ANSI 转义序列
+      // 包括: ESC[...m (颜色), ESC[...H (光标位置), ESC[...J (清屏) 等
+      return str
+        .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')  // 标准 ANSI 转义序列
+        .replace(/\x1B\][^\x07]*\x07/g, '')     // OSC 序列
+        .replace(/\x1B[PX^_].*?\x1B\\/g, '')    // DCS, SOS, PM, APC 序列
+        .replace(/\x1B[@-Z\\-_]/g, '')          // 其他单字符转义
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ''); // 其他控制字符
+    };
+
+    // 数据缓冲区，用于处理不完整的行
+    let dataBuffer = '';
+    let flushTimeout = null;
+
+    // 刷新缓冲区函数 - 将不完整的行也发送出去
+    const flushBuffer = () => {
+      if (dataBuffer && win && !win.isDestroyed()) {
+        const cleanLine = stripAnsi(dataBuffer);
+        if (cleanLine.length > 0) {
+          win.webContents.send('serial:data', {
+            line: cleanLine,
+            timestamp: Date.now(),
+            type: 'line'
+          });
+        }
+        dataBuffer = '';
+      }
+    };
+
+    // 直接监听原始数据 - 实时模式，类似 SecureCRT
+    serialPort.on('data', (data) => {
+      const chunk = data.toString('utf8');
+      console.log('[Serial] Raw data received:', data.length, 'bytes');
+
+      // 清除之前的刷新定时器
+      if (flushTimeout) {
+        clearTimeout(flushTimeout);
+        flushTimeout = null;
+      }
+
+      if (win && !win.isDestroyed()) {
+        // 将数据添加到缓冲区
+        dataBuffer += chunk;
+
+        // 按行分割
+        const lines = dataBuffer.split(/\r?\n/);
+
+        // 最后一个元素可能是不完整的行，保留在缓冲区
+        dataBuffer = lines.pop() || '';
+
+        // 发送所有完整的行
+        lines.forEach(line => {
+          // 只移除 ANSI 码，保留缩进
+          const cleanLine = stripAnsi(line);
+          // 只有当行不为空（不仅仅是空白字符）或者我们想保留空行时才发送
+          // 这里我们允许发送只包含空白的行，以保留格式
+          if (cleanLine.length > 0) {
+            win.webContents.send('serial:data', {
+              line: cleanLine,
+              timestamp: Date.now(),
+              type: 'line'
+            });
+          }
+        });
+
+        // 如果缓冲区还有数据，设置定时器在 100ms 后刷新
+        // 这样可以处理不以换行结尾的响应
+        if (dataBuffer) {
+          flushTimeout = setTimeout(flushBuffer, 100);
+        }
+      }
+    });
+
+    // 监听错误
+    serialPort.on('error', (err) => {
+      console.error('[Serial] Port error:', err.message);
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('serial:error', { error: err.message });
+      }
+    });
+
+    // 监听关闭
+    serialPort.on('close', () => {
+      console.log('[Serial] Port closed');
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('serial:disconnected');
+      }
+    });
+
+    // 打开串口
+    return new Promise((resolve, reject) => {
+      serialPort.open((err) => {
+        if (err) {
+          console.error('[Serial] Open error:', err.message);
+          serialPort = null;
+          serialParser = null;
+          reject(new Error(err.message));
+        } else {
+          console.log('[Serial] Connected successfully');
+          resolve({ success: true, path, baudRate });
+        }
+      });
+    });
+  } catch (error) {
+    console.error('[Serial] Connect error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 断开串口
+ipcMain.handle('serial:disconnect', async () => {
+  try {
+    if (serialPort && serialPort.isOpen) {
+      return new Promise((resolve) => {
+        serialPort.close((err) => {
+          if (err) {
+            console.error('[Serial] Close error:', err.message);
+          }
+          serialPort = null;
+          serialParser = null;
+          resolve({ success: true });
+        });
+      });
+    }
+    return { success: true, message: 'No active connection' };
+  } catch (error) {
+    console.error('[Serial] Disconnect error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 发送数据到串口
+ipcMain.handle('serial:write', async (event, { data, addNewline }) => {
+  try {
+    if (!serialPort || !serialPort.isOpen) {
+      throw new Error('Serial port not connected');
+    }
+
+    const toSend = addNewline !== false ? data + '\n' : data;
+
+    return new Promise((resolve, reject) => {
+      serialPort.write(toSend, (err) => {
+        if (err) {
+          console.error('[Serial] Write error:', err.message);
+          reject(new Error(err.message));
+        } else {
+          serialPort.drain((drainErr) => {
+            if (drainErr) {
+              console.error('[Serial] Drain error:', drainErr.message);
+            }
+            console.log('[Serial] Data sent:', toSend.trim());
+            resolve({ success: true });
+          });
+        }
+      });
+    });
+  } catch (error) {
+    console.error('[Serial] Write error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取串口状态
+ipcMain.handle('serial:status', async () => {
+  return {
+    connected: serialPort ? serialPort.isOpen : false,
+    path: serialPort ? serialPort.path : null,
+    baudRate: serialPort ? serialPort.baudRate : null
+  };
+});
+
+// ========== END SERIAL PORT ==========
+
+// ========== PROVISIONING ==========
+
+// 初始化配网 (检查能力 + 密钥交换)
+ipcMain.handle('provision:init', async (event, { ip, session }) => {
+  try {
+    const service = getDiscoveryService();
+    return await service.initializeProvisioning(ip, session);
+  } catch (error) {
+    console.error('[Provision] Init error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取 SetKey Payload
+ipcMain.handle('provision:getKeyPayload', async (event, { session }) => {
+  try {
+    const service = getDiscoveryService();
+    const payload = service.getSetKeyPayload(session);
+    return { success: true, payload };
+  } catch (error) {
+    console.error('[Provision] Get Key Payload error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 发送通用配网请求
+ipcMain.handle('provision:sendRequest', async (event, { ip, namespace, method, payload, session }) => {
+  try {
+    const service = getDiscoveryService();
+    return await service.sendProvisionRequest(ip, namespace, method, payload, session);
+  } catch (error) {
+    console.error('[Provision] Send Request error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 设置时间
+ipcMain.handle('provision:setTime', async (event, { ip, session }) => {
+  try {
+    const service = getDiscoveryService();
+    return await service.sendSetTime(ip, session);
+  } catch (error) {
+    console.error('[Provision] Set Time error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 设置 WiFi
+ipcMain.handle('provision:setWifi', async (event, { ip, wifiConfig, session }) => {
+  console.log('=== WIFI HANDLER TRIGGERED ===');
+  console.log('[IPC] provision:setWifi called', { ip, ssid: wifiConfig?.ssid, bssid: wifiConfig?.bssid, channel: wifiConfig?.channel });
+  try {
+    const service = getDiscoveryService();
+    const result = await service.sendSetWifi(ip, wifiConfig, session);
+    console.log('[IPC] provision:setWifi result', result);
+    return result;
+  } catch (error) {
+    console.error('[Provision] Set Wifi error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========== END PROVISIONING ==========
+
 app.whenReady().then(createWindow);
 
-app.on('window-all-closed', () => {
+app.on('window-all-closed', async () => {
+  // 关闭 Matter Controller
+  if (matterInitialized && matterController) {
+    try {
+      await matterController.shutdownMatter();
+    } catch (e) {
+      console.error('[Matter] Shutdown error:', e);
+    }
+  }
+
   if (process.platform !== 'darwin') {
     app.quit();
   }

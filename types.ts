@@ -17,7 +17,7 @@ export enum Protocol {
 export interface GlobalLogEntry {
   id: string;
   timestamp: string;
-  type: 'HTTP' | 'MQTT' | 'SYSTEM' | 'CUSTOM';
+  type: 'HTTP' | 'MQTT' | 'SYSTEM' | 'CUSTOM' | 'MATTER' | 'DISCOVERY';
   direction: 'TX' | 'RX' | 'ERR' | 'SYS';
   label: string;
   detail: string;
