@@ -11,7 +11,8 @@ export enum Protocol {
   HTTP = 'HTTP',
   COAP = 'COAP',
   CUSTOM = 'CUSTOM',
-  UNKNOWN = 'UNKNOWN'
+  UNKNOWN = 'UNKNOWN',
+  MATTER = 'MATTER'
 }
 
 export interface GlobalLogEntry {
@@ -79,6 +80,9 @@ export interface Device {
   connectionType: string;
   lastSeen: string;
   firmwareVersion: string;
+  hardwareVersion?: string;
+  subType?: string;
+  onlineStatusCode?: number; // 原始 onlineStatus 值
   telemetry: TelemetryPoint[];
   config: Record<string, any>;
   testSequence?: SequenceStep[];

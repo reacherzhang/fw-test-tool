@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { RefreshCw, Zap, ShieldCheck, X, LayoutDashboard, Database, Settings, Plus, Cloud, Terminal, Trash2, ChevronRight, Share2, Activity, BrainCircuit, User, LogOut, Mail, Key, Globe, Hash } from 'lucide-react';
+import { RefreshCw, Zap, ShieldCheck, X, LayoutDashboard, Database, Settings, Plus, Cloud, Terminal, Trash2, ChevronRight, Share2, Activity, BrainCircuit, User, LogOut, Mail, Key, Globe, Hash, Edit3 } from 'lucide-react';
 import { Device, DeviceStatus, Protocol, MqttSessionConfig, CloudSession, GlobalLogEntry, IOT_CONSTANTS, DEFAULT_DEVICE_TYPES, DEFAULT_CONNECTION_TYPES } from './types';
 import { analyzeFleetHealth } from './services/geminiService';
 import { DeviceMonitor } from './components/DeviceMonitor';
@@ -14,13 +14,14 @@ import { MqttSettings } from './components/MqttSettings';
 import { MqttDeviceConsole } from './components/MqttDeviceConsole';
 import { MatterConsole } from './components/MatterConsole';
 import { MatterDashboard } from './components/MatterDashboard';
+import { ProtocolAudit } from './components/ProtocolAudit';
 import DeviceDiscoveryModal from './components/DeviceDiscoveryModal';
 import ErrorBoundary from './components/ErrorBoundary';
 
-
 const App: React.FC = () => {
   const [session, setSession] = useState<CloudSession | null>(null);
-  const [currentView, setCurrentView] = useState<'DASHBOARD' | 'LAB' | 'CLOUD_LAB' | 'MATTER' | 'SETTINGS' | 'DEVICE_DETAIL'>('DASHBOARD');
+  const [currentView, setCurrentView] = useState<'DASHBOARD' | 'LAB' | 'CLOUD_LAB' | 'MATTER' | 'SETTINGS' | 'DEVICE_DETAIL' | 'AUDIT'>('DASHBOARD');
+  const [lastMqttMessage, setLastMqttMessage] = useState<any>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -30,6 +31,18 @@ const App: React.FC = () => {
 
   const [isLogEnabled, setIsLogEnabled] = useState(false);
   const [isLogVisible, setIsLogVisible] = useState(false);
+
+  // 新增的状态
+  const selectedDevice = devices.find(d => d.id === selectedDeviceId) || null;
+  const [editingDeviceNameId, setEditingDeviceNameId] = useState<string | null>(null);
+  const [editingDeviceName, setEditingDeviceName] = useState('');
+
+  const updateDeviceName = (deviceId: string, newName: string) => {
+    if (!newName.trim()) return;
+    setDevices(prev => prev.map(d => d.id === deviceId ? { ...d, name: newName.trim() } : d));
+    setEditingDeviceNameId(null);
+  };
+
   const [globalLogs, setGlobalLogs] = useState<GlobalLogEntry[]>([]);
   const logScrollRef = useRef<HTMLDivElement>(null);
 
@@ -560,13 +573,49 @@ const App: React.FC = () => {
       });
 
       if (result.success) {
-        setMqttConfig(prev => ({ ...prev, isConnected: true, status: 'CONNECTED', retryCount: 0 }));
         recordGlobalLog({
           type: 'MQTT',
           direction: 'RX',
           label: 'SSL Link Active',
           detail: `Encrypted tunnel (TLS) established with ${config.host} via Electron main process`
         });
+
+        // 订阅 app topic 以接收设备响应
+        // 订阅两种格式：带 appid 和不带 appid
+        const appTopicWithAppid = `/app/${config.username}-${config.appid || config.clientId?.replace('app:', '')}/subscribe`;
+        const appTopicWithoutAppid = `/app/${config.username}/subscribe`;
+
+        try {
+          // 订阅带 appid 的 topic
+          await window.electronAPI.mqttSubscribe({ topic: appTopicWithAppid });
+          recordGlobalLog({
+            type: 'MQTT',
+            direction: 'SYS',
+            label: 'App Topic Subscribed',
+            detail: `Subscribed to: ${appTopicWithAppid}`
+          });
+
+          // 同时订阅不带 appid 的 topic
+          if (appTopicWithAppid !== appTopicWithoutAppid) {
+            await window.electronAPI.mqttSubscribe({ topic: appTopicWithoutAppid });
+            recordGlobalLog({
+              type: 'MQTT',
+              direction: 'SYS',
+              label: 'App Topic Subscribed',
+              detail: `Subscribed to: ${appTopicWithoutAppid}`
+            });
+          }
+        } catch (subErr: any) {
+          recordGlobalLog({
+            type: 'MQTT',
+            direction: 'ERR',
+            label: 'Subscribe Failed',
+            detail: `Failed to subscribe: ${subErr.message}`
+          });
+        }
+
+        // 订阅完成后设置连接状态，确保 probeAllDevices 触发时已订阅
+        setMqttConfig(prev => ({ ...prev, isConnected: true, status: 'CONNECTED', retryCount: 0 }));
       }
     } catch (err: any) {
       const errorMessage = err.message || 'Unknown error';
@@ -613,32 +662,59 @@ const App: React.FC = () => {
           detail: `[Topic]: ${data.topic}\n[Payload]:\n${JSON.stringify(parsed, null, 2)}`
         });
 
-        // 自动更新设备 IP
+        // 保存最新消息用于 ProtocolAudit (添加时间戳确保每次都是新引用)
+        console.log('[App.tsx] Setting lastMqttMessage:', parsed.header?.namespace, parsed.header?.method);
+        setLastMqttMessage({ ...parsed, _receivedAt: Date.now() });
+
+        // 自动更新设备 IP 和信息
         if (parsed.header?.namespace === 'Appliance.System.All' && parsed.header?.method === 'GETACK') {
-          const innerIp = parsed.payload?.all?.system?.firmware?.innerIp;
+          const system = parsed.payload?.all?.system;
+          const firmware = system?.firmware;
+          const hardware = system?.hardware;
+          const innerIp = firmware?.innerIp;
           const deviceId = parsed.header?.uuid || data.topic.split('/')[2];
 
-          if (innerIp && deviceId) {
-            console.log(`[AutoIP] Received System.All GETACK. UUID: ${deviceId}, InnerIP: ${innerIp}`);
+          if (deviceId) {
+            console.log(`[AutoUpdate] Received System.All GETACK. UUID: ${deviceId}`);
             setDevices(prev => {
               let hasChange = false;
               const newDevices = prev.map(d => {
-                // 宽松匹配：忽略大小写
                 if (d.id.toLowerCase() === deviceId.toLowerCase()) {
-                  if (d.ip !== innerIp) {
-                    console.log(`[AutoIP] Updating device ${d.name} (${d.id}) IP: ${d.ip} -> ${innerIp}`);
+                  const updates: Partial<Device> = {};
+
+                  if (innerIp && d.ip !== innerIp) {
+                    console.log(`[AutoUpdate] Updating IP: ${d.ip} -> ${innerIp}`);
+                    updates.ip = innerIp;
+                  }
+
+                  if (firmware?.version && d.firmwareVersion !== firmware.version) {
+                    updates.firmwareVersion = firmware.version;
+                  }
+
+                  if (hardware?.version && d.hardwareVersion !== hardware.version) {
+                    updates.hardwareVersion = hardware.version;
+                  }
+
+                  // 保存完整的 devInfo 到 config 中以便显示
+                  const devInfo = {
+                    ...firmware,
+                    ...hardware,
+                    mac: firmware?.wifiMac || hardware?.macAddress
+                  };
+
+                  // 检查 devInfo 是否有变化 (简单比较)
+                  const currentDevInfo = d.config?.devInfo;
+                  if (JSON.stringify(currentDevInfo) !== JSON.stringify(devInfo)) {
+                    updates.config = { ...d.config, devInfo };
+                  }
+
+                  if (Object.keys(updates).length > 0) {
                     hasChange = true;
-                    return { ...d, ip: innerIp };
-                  } else {
-                    console.log(`[AutoIP] Device ${d.name} IP already up to date.`);
+                    return { ...d, ...updates };
                   }
                 }
                 return d;
               });
-
-              if (!hasChange) {
-                console.log(`[AutoIP] No matching device found for UUID: ${deviceId} in list:`, prev.map(d => d.id));
-              }
               return hasChange ? newDevices : prev;
             });
           }
@@ -702,7 +778,7 @@ const App: React.FC = () => {
     }
   }, [session, connectMqtt, mqttConfig.isConnected, mqttConfig.status, mqttConfig.retryCount]);
 
-  const selectedDevice = devices.find(d => d.id === selectedDeviceId);
+
 
   // 临时禁用登录（开发模式）- 完成后改为 false
   const DEV_SKIP_AUTH = false;
@@ -742,6 +818,7 @@ const App: React.FC = () => {
                   { id: 'MATTER', label: 'Matter', icon: Zap },
                   { id: 'LAB', label: 'TOOL', icon: RefreshCw },
                   { id: 'CLOUD_LAB', label: 'API', icon: Cloud },
+                  { id: 'AUDIT', label: 'Audit', icon: ShieldCheck },
                   { id: 'SETTINGS', label: 'Connectivity', icon: Settings }
                 ].map(tab => (
                   <button key={tab.id} onClick={() => setCurrentView(tab.id as any)} className={`flex items-center gap-3 px-6 py-3 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all ${currentView === tab.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/10' : 'text-slate-500 hover:text-slate-300'}`}>
@@ -952,18 +1029,68 @@ const App: React.FC = () => {
               </div>
             )}
 
-            {/* 设备详情页面 */}
+            {/* DEVICE_DETAIL VIEW */}
             {currentView === 'DEVICE_DETAIL' && selectedDevice && (
               <div className="space-y-8 animate-in fade-in slide-in-from-right-4 duration-300">
-                {/* 设备标题栏 */}
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-6">
                     <div className={`w-16 h-16 rounded-2xl flex items-center justify-center ${selectedDevice.status === DeviceStatus.ONLINE ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-500'}`}>
                       <Zap size={32} />
                     </div>
                     <div>
-                      <h2 className="text-2xl font-black text-white uppercase tracking-tight">{selectedDevice.name}</h2>
+                      {editingDeviceNameId === selectedDevice.id ? (
+                        <input
+                          value={editingDeviceName}
+                          onChange={e => setEditingDeviceName(e.target.value)}
+                          onBlur={() => updateDeviceName(selectedDevice.id, editingDeviceName)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') updateDeviceName(selectedDevice.id, editingDeviceName);
+                            if (e.key === 'Escape') setEditingDeviceNameId(null);
+                          }}
+                          autoFocus
+                          className="text-2xl font-black text-white uppercase tracking-tight bg-transparent border-b border-indigo-500 outline-none w-full"
+                        />
+                      ) : (
+                        <h2
+                          className="text-2xl font-black text-white uppercase tracking-tight cursor-pointer hover:text-indigo-400 flex items-center gap-2 group"
+                          onClick={() => {
+                            setEditingDeviceNameId(selectedDevice.id);
+                            setEditingDeviceName(selectedDevice.name);
+                          }}
+                        >
+                          {selectedDevice.name}
+                          <Edit3 size={16} className="text-slate-600 group-hover:text-indigo-400 transition-colors opacity-0 group-hover:opacity-100" />
+                        </h2>
+                      )}
                       <p className="text-slate-500 text-xs font-mono mt-1">{selectedDevice.id}</p>
+                      {selectedDevice.config?.devInfo && (
+                        <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-slate-400 font-mono bg-slate-800/50 px-3 py-1.5 rounded-lg border border-slate-700/50">
+                          {selectedDevice.config.devInfo.version && (
+                            <span className="flex items-center gap-1">
+                              <span className="text-slate-500">FW:</span>
+                              <span className="text-indigo-300">{selectedDevice.config.devInfo.version}</span>
+                            </span>
+                          )}
+                          {selectedDevice.config.devInfo.mac && (
+                            <span className="flex items-center gap-1 border-l border-slate-700 pl-3">
+                              <span className="text-slate-500">MAC:</span>
+                              <span className="text-emerald-300">{selectedDevice.config.devInfo.mac}</span>
+                            </span>
+                          )}
+                          {selectedDevice.config.devInfo.innerIp && (
+                            <span className="flex items-center gap-1 border-l border-slate-700 pl-3">
+                              <span className="text-slate-500">IP:</span>
+                              <span className="text-orange-300">{selectedDevice.config.devInfo.innerIp}</span>
+                            </span>
+                          )}
+                          {selectedDevice.config.devInfo.model && (
+                            <span className="flex items-center gap-1 border-l border-slate-700 pl-3">
+                              <span className="text-slate-500">Model:</span>
+                              <span className="text-blue-300">{selectedDevice.config.devInfo.model}</span>
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-4">
@@ -972,17 +1099,12 @@ const App: React.FC = () => {
                     </span>
                   </div>
                 </div>
-
-                {/* 设备监控面板 */}
                 <DeviceMonitor
                   device={selectedDevice}
                   onGetOnlineStatus={async () => {
-                    // 直接使用设备状态确定在线状态
                     return { status: selectedDevice.status === DeviceStatus.ONLINE ? 1 : 2 };
                   }}
                 />
-
-                {/* MQTT 控制台和配置 - 两列布局 */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                   <MqttDeviceConsole
                     device={selectedDevice}
@@ -995,6 +1117,8 @@ const App: React.FC = () => {
                 </div>
               </div>
             )}
+
+            {/* LAB VIEW */}
             {currentView === 'LAB' && (
               <div className="h-full space-y-6">
                 <ProtocolLab
@@ -1018,13 +1142,32 @@ const App: React.FC = () => {
                 />
               </div>
             )}
+
+            {/* MATTER VIEW */}
             {currentView === 'MATTER' && (
               <div className="space-y-6">
                 <MatterDashboard onLog={recordGlobalLog} />
                 <MatterConsole onLog={recordGlobalLog} />
               </div>
             )}
+
+            {/* CLOUD_LAB VIEW */}
             {currentView === 'CLOUD_LAB' && <CloudApiLab session={session!} onLog={recordGlobalLog} />}
+
+            {/* AUDIT VIEW */}
+            {currentView === 'AUDIT' && (
+              <ProtocolAudit
+                session={session}
+                devices={devices}
+                mqttConnected={mqttConfig.isConnected}
+                appid={mqttConfig.appid}
+                onMqttPublish={handleMqttPublish}
+                onLog={recordGlobalLog}
+                lastMqttMessage={lastMqttMessage}
+              />
+            )}
+
+            {/* SETTINGS VIEW */}
             {currentView === 'SETTINGS' && <MqttSettings config={mqttConfig} session={session!} onUpdate={setMqttConfig} onConnect={() => connectMqtt(mqttConfig, true)} onCancel={cancelMqtt} isLogEnabled={isLogEnabled} onToggleLog={setIsLogEnabled} onLog={recordGlobalLog} />}
           </main>
         </div>
@@ -1065,7 +1208,7 @@ const App: React.FC = () => {
           onLog={recordGlobalLog}
         />
       </ErrorBoundary>
-    </div>
+    </div >
   );
 };
 
