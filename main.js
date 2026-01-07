@@ -1,5 +1,5 @@
 
-import { app, BrowserWindow, Menu, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, session } from 'electron';
 import path from 'path';
 import { exec } from 'child_process';
 import fs from 'fs';
@@ -100,34 +100,247 @@ function createWindow() {
 }
 
 // 通用的原生请求处理器，绕过所有浏览器层面的限制
-ipcMain.handle('http:request', async (event, { url, method, headers, body }) => {
+// 支持自动跟随重定向
+ipcMain.handle('http:request', async (event, { url, method, headers, body, followRedirects = true, maxRedirects = 5 }) => {
+  const makeRequest = (requestUrl, redirectCount = 0) => {
+    return new Promise((resolve, reject) => {
+      const parsedUrl = new URL(requestUrl);
+      const protocol = parsedUrl.protocol === 'https:' ? https : http;
+      const options = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: method || 'GET',
+        headers: headers || {},
+        rejectUnauthorized: false
+      };
+
+      console.log(`[HTTP] Request: ${options.method} ${requestUrl}`);
+
+      const req = protocol.request(options, (res) => {
+        let responseBody = '';
+        res.on('data', (chunk) => { responseBody += chunk; });
+        res.on('end', () => {
+          // 处理重定向 (301, 302, 303, 307, 308)
+          if (followRedirects && [301, 302, 303, 307, 308].includes(res.statusCode)) {
+            if (redirectCount >= maxRedirects) {
+              resolve({
+                status: res.statusCode,
+                data: null,
+                text: responseBody,
+                error: `Too many redirects (max: ${maxRedirects})`,
+                headers: res.headers
+              });
+              return;
+            }
+
+            const redirectUrl = res.headers.location;
+            if (redirectUrl) {
+              // 处理相对 URL
+              const absoluteUrl = redirectUrl.startsWith('http')
+                ? redirectUrl
+                : new URL(redirectUrl, requestUrl).href;
+
+              console.log(`[HTTP] Redirect ${res.statusCode} -> ${absoluteUrl}`);
+
+              // 递归跟随重定向
+              makeRequest(absoluteUrl, redirectCount + 1)
+                .then(resolve)
+                .catch(reject);
+              return;
+            }
+          }
+
+          // 正常响应处理
+          let data = null;
+          try {
+            data = JSON.parse(responseBody);
+          } catch (e) {
+            // 非 JSON 响应
+          }
+
+          resolve({
+            status: res.statusCode,
+            data: data,
+            text: responseBody,
+            headers: res.headers,
+            finalUrl: requestUrl
+          });
+        });
+      });
+
+      req.on('error', (e) => {
+        console.error(`[HTTP] Request error:`, e.message);
+        reject(e);
+      });
+
+      // 设置超时
+      req.setTimeout(30000, () => {
+        req.destroy();
+        reject(new Error('Request timeout (30s)'));
+      });
+
+      if (body) {
+        req.write(typeof body === 'string' ? body : JSON.stringify(body));
+      }
+      req.end();
+    });
+  };
+
+  return makeRequest(url);
+});
+
+// ========== CONFLUENCE SSO LOGIN ==========
+// 存储 Confluence session cookies
+let confluenceCookies = {};
+
+// 打开登录窗口，让用户手动登录 LDAP/SSO，完成后获取 cookies
+ipcMain.handle('confluence:login', async (event, { baseUrl }) => {
+  return new Promise((resolve) => {
+    // 创建独立的登录窗口
+    const loginWin = new BrowserWindow({
+      width: 800,
+      height: 700,
+      parent: win,
+      modal: true,
+      title: 'Confluence 登录 (LDAP/SSO)',
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        // 使用独立的 session 分区
+        partition: 'persist:confluence'
+      }
+    });
+
+    // 加载 Confluence 页面 (会被重定向到 LDAP 登录)
+    const targetUrl = `${baseUrl}/rest/api/user/current`;
+    console.log(`[Confluence] Opening login window for: ${targetUrl}`);
+    loginWin.loadURL(targetUrl);
+
+    // 监听 URL 变化，检测登录成功
+    loginWin.webContents.on('did-navigate', async (e, url) => {
+      console.log(`[Confluence] Navigated to: ${url}`);
+
+      // 如果回到了 Confluence 的 API 或页面，说明登录成功
+      if (url.includes(baseUrl) && !url.includes('ldap.') && !url.includes('login')) {
+        console.log('[Confluence] Login successful, capturing cookies...');
+
+        // 获取 cookies
+        const ses = session.fromPartition('persist:confluence');
+        const cookies = await ses.cookies.get({ url: baseUrl });
+
+        // 存储 cookies
+        confluenceCookies[baseUrl] = cookies.map(c => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path
+        }));
+
+        const cookieNames = cookies.map(c => c.name).join(', ');
+        console.log(`[Confluence] Captured ${cookies.length} cookies for ${baseUrl}: ${cookieNames}`);
+
+        // 延迟关闭窗口，确保用户看到成功
+        setTimeout(() => {
+          loginWin.close();
+          resolve({
+            success: true,
+            message: `登录成功！获取到 ${cookies.length} 个 cookies`,
+            cookieCount: cookies.length
+          });
+        }, 500);
+      }
+    });
+
+    // 用户关闭窗口
+    loginWin.on('closed', () => {
+      const hasCookies = confluenceCookies[baseUrl] && confluenceCookies[baseUrl].length > 0;
+      if (!hasCookies) {
+        resolve({
+          success: false,
+          message: '登录窗口已关闭，未获取到有效凭证'
+        });
+      }
+    });
+  });
+});
+
+// 获取存储的 Confluence cookies
+ipcMain.handle('confluence:getCookies', async (event, { baseUrl }) => {
+  const cookies = confluenceCookies[baseUrl] || [];
+  return { success: true, cookies };
+});
+
+// 清除 Confluence cookies
+ipcMain.handle('confluence:clearCookies', async (event, { baseUrl }) => {
+  if (baseUrl) {
+    delete confluenceCookies[baseUrl];
+    // 也清除 Electron session 中的 cookies
+    const ses = session.fromPartition('persist:confluence');
+    const cookies = await ses.cookies.get({ url: baseUrl });
+    for (const cookie of cookies) {
+      await ses.cookies.remove(baseUrl, cookie.name);
+    }
+  } else {
+    confluenceCookies = {};
+  }
+  return { success: true };
+});
+
+// 带 Cookie 的 HTTP 请求（用于 Confluence API 调用）
+ipcMain.handle('http:requestWithCookies', async (event, { url, method, headers, body, cookies }) => {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
     const protocol = parsedUrl.protocol === 'https:' ? https : http;
+
+    // 构建 Cookie header
+    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
     const options = {
       hostname: parsedUrl.hostname,
       port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
       path: parsedUrl.pathname + parsedUrl.search,
-      method: method || 'POST',
-      headers: headers || {},
+      method: method || 'GET',
+      headers: {
+        ...headers,
+        'Cookie': cookieHeader,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': parsedUrl.origin + '/',
+        'Origin': parsedUrl.origin
+      },
       rejectUnauthorized: false
     };
+
+    console.log(`[HTTP+Cookie] Request: ${options.method} ${url}`);
 
     const req = protocol.request(options, (res) => {
       let responseBody = '';
       res.on('data', (chunk) => { responseBody += chunk; });
       res.on('end', () => {
+        let data = null;
         try {
-          const json = JSON.parse(responseBody);
-          resolve({ status: res.statusCode, data: json });
+          data = JSON.parse(responseBody);
         } catch (e) {
-          resolve({ status: res.statusCode, data: responseBody });
+          // 非 JSON 响应
         }
+
+        resolve({
+          status: res.statusCode,
+          data: data,
+          text: responseBody,
+          headers: res.headers
+        });
       });
     });
 
     req.on('error', (e) => {
+      console.error(`[HTTP+Cookie] Request error:`, e.message);
       reject(e);
+    });
+
+    req.setTimeout(30000, () => {
+      req.destroy();
+      reject(new Error('Request timeout (30s)'));
     });
 
     if (body) {
@@ -136,6 +349,8 @@ ipcMain.handle('http:request', async (event, { url, method, headers, body }) => 
     req.end();
   });
 });
+
+// ========== END CONFLUENCE SSO ==========
 
 ipcMain.handle('bluetooth:scan', async () => {
   return new Promise((resolve) => {

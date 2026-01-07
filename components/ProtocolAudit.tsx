@@ -3,11 +3,12 @@ import {
     ShieldCheck, Play, Plus, Trash2, ChevronRight, ChevronDown,
     CheckCircle, XCircle, AlertTriangle, Edit3, FolderOpen,
     RefreshCw, Copy, Zap, ArrowRight, Download, Upload, FileJson,
-    Package, Clock, History, Send, Check, X
+    Package, Clock, History, Send, Check, X, Wand2
 } from 'lucide-react';
 import Ajv from 'ajv';
 import { CloudSession, Device } from '../types';
 import { md5 } from './AuthScreen';
+import { ProtocolGenerator } from './ProtocolGenerator';
 
 // --- Types ---
 
@@ -96,6 +97,7 @@ interface ProtocolAuditProps {
     mqttConnected: boolean;
     appid?: string;
     onMqttPublish?: (topic: string, message: string) => Promise<any>;
+    onMqttSubscribe?: (topic: string) => Promise<any>;
     onLog?: (log: any) => void;
     lastMqttMessage?: any;
 }
@@ -258,100 +260,131 @@ const FieldTreeItem = ({
     node,
     level,
     onUpdate,
+    onRename,
+    onAdd,
     onDelete
 }: {
     node: TreeNode;
     level: number;
     onUpdate: (path: string, updates: Partial<FieldConfig>) => void;
+    onRename?: (oldPath: string, newPath: string) => void;
+    onAdd?: (parentPath: string) => void;
     onDelete: (path: string) => void;
 }) => {
     const [expanded, setExpanded] = useState(true);
     const hasChildren = node.children.length > 0;
+    const [isEditingKey, setIsEditingKey] = useState(false);
+    const [tempKey, setTempKey] = useState(node.key);
+
+    const handleKeyBlur = () => {
+        setIsEditingKey(false);
+        if (onRename && tempKey !== node.key && tempKey.trim()) {
+            const parentPath = node.fullPath.substring(0, node.fullPath.lastIndexOf('.'));
+            const newPath = parentPath ? `${parentPath}.${tempKey}` : tempKey;
+            onRename(node.fullPath, newPath);
+        } else {
+            setTempKey(node.key);
+        }
+    };
 
     return (
-        <div className="select-none">
-            <div
-                className={`flex items-center gap-2 p-2 hover:bg-slate-800/50 rounded group border-b border-slate-800/30 last:border-0 transition-colors ${level === 0 ? 'bg-slate-900/30' : ''}`}
-                style={{ paddingLeft: `${level * 20 + 8}px` }}
-            >
-                {/* Expand/Collapse Toggle */}
-                <div
-                    className={`w-5 h-5 flex items-center justify-center rounded hover:bg-slate-700 cursor-pointer text-slate-500 ${!hasChildren ? 'invisible' : ''}`}
-                    onClick={() => setExpanded(!expanded)}
-                >
-                    {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                </div>
+        <div className="space-y-2">
+            <div className="flex items-center gap-2 group">
+                {/* Required Checkbox */}
+                <input
+                    type="checkbox"
+                    checked={node.config.required}
+                    onChange={e => onUpdate(node.fullPath, { required: e.target.checked })}
+                    className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-900 text-indigo-600 focus:ring-indigo-500 flex-shrink-0 cursor-pointer"
+                    title="Required Field"
+                />
 
-                {/* Checkbox & Key */}
-                <label className="flex items-center gap-3 cursor-pointer flex-1 min-w-0">
-                    <input
-                        type="checkbox"
-                        checked={node.config.required}
-                        onChange={e => onUpdate(node.fullPath, { required: e.target.checked })}
-                        className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-indigo-600 focus:ring-indigo-500 flex-shrink-0"
-                    />
-                    <div className={`font-mono text-sm truncate ${node.config.required ? 'text-white font-bold' : 'text-slate-300'}`} title={node.fullPath}>
-                        {node.key}
-                    </div>
-                </label>
+                {/* Editable Key */}
+                <input
+                    value={isEditingKey ? tempKey : node.key}
+                    onChange={e => setTempKey(e.target.value)}
+                    onFocus={() => onRename && setIsEditingKey(true)}
+                    onBlur={handleKeyBlur}
+                    onKeyDown={e => {
+                        if (e.key === 'Enter') handleKeyBlur();
+                    }}
+                    readOnly={!onRename}
+                    className={`w-32 px-2 py-1 text-xs font-mono rounded border outline-none transition-colors ${node.config.required ? 'bg-slate-800 border-indigo-500/50 text-white' : 'bg-slate-900 border-slate-700 text-slate-400'} ${!onRename ? 'cursor-default' : ''}`}
+                    title={node.fullPath}
+                />
+
+                <span className="text-slate-600">:</span>
 
                 {/* Type Selector */}
-                <div className="w-[100px]">
-                    <select
-                        value={node.config.type}
-                        onChange={e => onUpdate(node.fullPath, { type: e.target.value })}
-                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-400 outline-none hover:border-indigo-500 focus:border-indigo-500 transition-colors"
-                        onClick={e => e.stopPropagation()}
-                    >
-                        <option value="string">String</option>
-                        <option value="number">Number</option>
-                        <option value="integer">Integer</option>
-                        <option value="boolean">Boolean</option>
-                        <option value="object">Object</option>
-                        <option value="array">Array</option>
-                        <option value="null">Null</option>
-                    </select>
-                </div>
+                <select
+                    value={node.config.type}
+                    onChange={e => onUpdate(node.fullPath, { type: e.target.value })}
+                    className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-400 outline-none hover:border-indigo-500 focus:border-indigo-500 transition-colors"
+                >
+                    <option value="string">String</option>
+                    <option value="number">Number</option>
+                    <option value="integer">Integer</option>
+                    <option value="boolean">Boolean</option>
+                    <option value="object">Object</option>
+                    <option value="array">Array</option>
+                    <option value="null">Null</option>
+                </select>
 
                 {/* Value Input */}
-                <div className="flex-1 min-w-0 max-w-[200px]">
-                    {node.config.type !== 'object' && node.config.type !== 'array' && node.config.type !== 'null' && (
-                        <input
-                            type="text"
-                            value={node.config.value === undefined ? '' : String(node.config.value)}
-                            onChange={e => onUpdate(node.fullPath, { value: e.target.value })}
-                            placeholder="Default Value"
-                            className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 font-mono outline-none hover:border-indigo-500 focus:border-indigo-500 transition-colors placeholder:text-slate-600"
-                            onClick={e => e.stopPropagation()}
-                        />
-                    )}
-                </div>
+                {node.config.type !== 'object' && node.config.type !== 'array' && node.config.type !== 'null' && (
+                    <input
+                        type="text"
+                        value={node.config.value === undefined ? '' : String(node.config.value)}
+                        onChange={e => onUpdate(node.fullPath, { value: e.target.value })}
+                        placeholder="Default Value"
+                        className="flex-1 min-w-[100px] bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-emerald-400 font-mono outline-none hover:border-indigo-500 focus:border-indigo-500 transition-colors placeholder:text-slate-700"
+                    />
+                )}
 
                 {/* Actions */}
-                <button
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        onDelete(node.fullPath);
-                    }}
-                    className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded transition-colors"
-                    title="Remove field"
-                >
-                    <X size={14} />
-                </button>
+                <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
+                    {hasChildren && (
+                        <button
+                            onClick={() => setExpanded(!expanded)}
+                            className="p-1 text-slate-500 hover:text-indigo-400"
+                            title={expanded ? "Collapse" : "Expand"}
+                        >
+                            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        </button>
+                    )}
+                    <button
+                        onClick={() => onDelete(node.fullPath)}
+                        className="p-1 text-slate-500 hover:text-red-400"
+                        title="Remove field"
+                    >
+                        <X size={14} />
+                    </button>
+                </div>
             </div>
 
             {/* Children */}
-            {expanded && hasChildren && (
-                <div>
+            {expanded && (
+                <div className="ml-4 pl-3 border-l-2 border-slate-700 space-y-2">
                     {node.children.map(child => (
                         <FieldTreeItem
                             key={child.fullPath}
                             node={child}
                             level={level + 1}
                             onUpdate={onUpdate}
+                            onRename={onRename}
+                            onAdd={onAdd}
                             onDelete={onDelete}
                         />
                     ))}
+                    {/* Add Field Button for Objects */}
+                    {onAdd && node.config.type === 'object' && (
+                        <button
+                            onClick={() => onAdd(node.fullPath)}
+                            className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 mt-1"
+                        >
+                            <Plus size={12} /> Add field
+                        </button>
+                    )}
                 </div>
             )}
         </div>
@@ -424,6 +457,28 @@ const applyRequiredFields = (schema: any, fieldConfigs: Record<string, FieldConf
     return newSchema;
 };
 
+// Convert Schema to FieldConfig for Tree View
+const schemaToFieldConfig = (schema: any, prefix: string = ''): Record<string, FieldConfig> => {
+    let configs: Record<string, FieldConfig> = {};
+    if (!schema || schema.type !== 'object' || !schema.properties) return configs;
+
+    const required = new Set(schema.required || []);
+
+    Object.entries(schema.properties).forEach(([key, prop]: [string, any]) => {
+        const path = prefix ? `${prefix}.${key}` : key;
+        configs[path] = {
+            required: required.has(key),
+            type: prop.type,
+            value: prop.default
+        };
+
+        if (prop.type === 'object') {
+            configs = { ...configs, ...schemaToFieldConfig(prop, path) };
+        }
+    });
+    return configs;
+};
+
 const generateJUnitXML = (run: TestRun): string => {
     const failures = run.results.filter(r => r.status === 'FAIL').length;
     const errors = run.results.filter(r => r.status === 'TIMEOUT').length;
@@ -451,6 +506,8 @@ interface KVPair {
     key: string;
     value: string;
     type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+    type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+    active: boolean;
     children?: KVPair[];
 }
 
@@ -458,9 +515,14 @@ const generateId = () => Math.random().toString(36).substr(2, 9);
 
 const KeyValueEditor: React.FC<{ value: string; onChange: (v: string) => void }> = ({ value, onChange }) => {
     const [pairs, setPairs] = useState<KVPair[]>([]);
+    const isInternalChange = useRef(false);
 
-    // Parse JSON to pairs on mount
+    // Parse JSON to pairs on mount or when value changes externally
     useEffect(() => {
+        if (isInternalChange.current) {
+            isInternalChange.current = false;
+            return;
+        }
         try {
             const obj = JSON.parse(value);
             if (typeof obj === 'object' && obj !== null && !Array.isArray(obj)) {
@@ -469,24 +531,25 @@ const KeyValueEditor: React.FC<{ value: string; onChange: (v: string) => void }>
         } catch (e) {
             setPairs([]);
         }
-    }, []);
+    }, [value]);
 
     const objectToPairs = (obj: any): KVPair[] => {
         return Object.entries(obj).map(([key, val]) => {
             const id = generateId();
-            if (val === null) return { id, key, value: 'null', type: 'string' as const };
-            if (Array.isArray(val)) return { id, key, value: JSON.stringify(val), type: 'array' as const };
-            if (typeof val === 'object') return { id, key, value: '', type: 'object' as const, children: objectToPairs(val) };
-            if (typeof val === 'number') return { id, key, value: String(val), type: 'number' as const };
-            if (typeof val === 'boolean') return { id, key, value: String(val), type: 'boolean' as const };
-            return { id, key, value: String(val), type: 'string' as const };
+            const common = { id, key, active: true };
+            if (val === null) return { ...common, value: 'null', type: 'string' as const };
+            if (Array.isArray(val)) return { ...common, value: JSON.stringify(val), type: 'array' as const };
+            if (typeof val === 'object') return { ...common, value: '', type: 'object' as const, children: objectToPairs(val) };
+            if (typeof val === 'number') return { ...common, value: String(val), type: 'number' as const };
+            if (typeof val === 'boolean') return { ...common, value: String(val), type: 'boolean' as const };
+            return { ...common, value: String(val), type: 'string' as const };
         });
     };
 
     const pairsToObject = (p: KVPair[]): any => {
         const obj: any = {};
         p.forEach(pair => {
-            if (!pair.key) return; // 跳过空 key
+            if (!pair.key || !pair.active) return; // Skip inactive or empty keys
             if (pair.type === 'object' && pair.children) {
                 obj[pair.key] = pairsToObject(pair.children);
             } else if (pair.type === 'array') {
@@ -503,6 +566,7 @@ const KeyValueEditor: React.FC<{ value: string; onChange: (v: string) => void }>
     };
 
     const syncToParent = (newPairs: KVPair[]) => {
+        isInternalChange.current = true;
         setPairs(newPairs);
         onChange(JSON.stringify(pairsToObject(newPairs), null, 2));
     };
@@ -550,7 +614,7 @@ const KeyValueEditor: React.FC<{ value: string; onChange: (v: string) => void }>
             if (p.id !== currentId) return p;
             if (restPath.length === 0) {
                 // 在这个节点添加子节点
-                const newChild: KVPair = { id: generateId(), key: '', value: '', type: 'string' };
+                const newChild: KVPair = { id: generateId(), key: '', value: '', type: 'string', active: true };
                 return { ...p, children: [...(p.children || []), newChild] };
             } else {
                 return { ...p, children: addChildByPath(p.children || [], restPath) };
@@ -563,12 +627,21 @@ const KeyValueEditor: React.FC<{ value: string; onChange: (v: string) => void }>
 
         return (
             <div key={pair.id} className="space-y-2">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 group">
+                    {/* Active Checkbox */}
+                    <input
+                        type="checkbox"
+                        checked={pair.active}
+                        onChange={e => syncToParent(updatePairByPath(pairs, currentPath, { active: e.target.checked }))}
+                        className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-900 text-indigo-600 focus:ring-indigo-500 flex-shrink-0 cursor-pointer"
+                        title="Include in Payload"
+                    />
+
                     <input
                         value={pair.key}
                         onChange={e => syncToParent(updatePairByPath(pairs, currentPath, { key: e.target.value }))}
                         placeholder="key"
-                        className="w-24 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono outline-none"
+                        className={`w-32 px-2 py-1 text-xs font-mono rounded border outline-none transition-colors ${pair.active ? 'bg-slate-800 border-indigo-500/50 text-white' : 'bg-slate-900 border-slate-700 text-slate-500 line-through'}`}
                     />
                     <span className="text-slate-600">:</span>
                     <select
@@ -578,7 +651,7 @@ const KeyValueEditor: React.FC<{ value: string; onChange: (v: string) => void }>
                             children: e.target.value === 'object' ? [] : undefined,
                             value: e.target.value === 'object' ? '' : pair.value
                         }))}
-                        className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-400 outline-none"
+                        className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-400 outline-none hover:border-indigo-500 focus:border-indigo-500 transition-colors"
                     >
                         <option value="string">String</option>
                         <option value="number">Number</option>
@@ -591,14 +664,14 @@ const KeyValueEditor: React.FC<{ value: string; onChange: (v: string) => void }>
                             value={pair.value}
                             onChange={e => syncToParent(updatePairByPath(pairs, currentPath, { value: e.target.value }))}
                             placeholder="value"
-                            className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-emerald-400 font-mono outline-none"
+                            className="flex-1 min-w-[100px] bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-emerald-400 font-mono outline-none hover:border-indigo-500 focus:border-indigo-500 transition-colors"
                         />
                     )}
                     <button
                         onClick={() => syncToParent(removePairByPath(pairs, currentPath))}
-                        className="text-red-400 hover:text-red-300 px-1"
+                        className="p-1 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
                     >
-                        ×
+                        <X size={14} />
                     </button>
                 </div>
                 {pair.type === 'object' && (
@@ -606,9 +679,9 @@ const KeyValueEditor: React.FC<{ value: string; onChange: (v: string) => void }>
                         {pair.children?.map(child => renderPair(child, currentPath))}
                         <button
                             onClick={() => syncToParent(addChildByPath(pairs, currentPath))}
-                            className="text-xs text-indigo-400 hover:text-indigo-300"
+                            className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 mt-1"
                         >
-                            + Add field
+                            <Plus size={12} /> Add field
                         </button>
                     </div>
                 )}
@@ -621,7 +694,7 @@ const KeyValueEditor: React.FC<{ value: string; onChange: (v: string) => void }>
             {pairs.map(pair => renderPair(pair, []))}
             <button
                 onClick={() => {
-                    const newPair: KVPair = { id: generateId(), key: '', value: '', type: 'string' };
+                    const newPair: KVPair = { id: generateId(), key: '', value: '', type: 'string', active: true };
                     syncToParent([...pairs, newPair]);
                 }}
                 className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
@@ -635,7 +708,7 @@ const KeyValueEditor: React.FC<{ value: string; onChange: (v: string) => void }>
 // --- Component ---
 
 export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
-    session, devices, mqttConnected, appid, onMqttPublish, onLog, lastMqttMessage
+    session, devices, mqttConnected, appid, onMqttPublish, onMqttSubscribe, onLog, lastMqttMessage
 }) => {
     // State - Suites
     const [suites, setSuites] = useState<ProtocolTestSuite[]>([DEFAULT_SUITE]);
@@ -659,6 +732,9 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     const [isAddingSuite, setIsAddingSuite] = useState(false);
     const [newSuite, setNewSuite] = useState({ name: '', description: '' });
 
+    // State - Protocol Generator (从 Ability + Confluence 自动生成)
+    const [showProtocolGenerator, setShowProtocolGenerator] = useState(false);
+
     // State - Add Protocol Wizard
     const [isAddingProtocol, setIsAddingProtocol] = useState(false);
     const [wizardStep, setWizardStep] = useState(1);
@@ -675,7 +751,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         }
     });
     const [currentMethodIndex, setCurrentMethodIndex] = useState(0);
-    const [payloadEditMode, setPayloadEditMode] = useState<'json' | 'keyvalue'>('json');
+    const [editMode, setEditMode] = useState<'json' | 'keyvalue'>('json');
 
     // State - Test History
     const [testHistory, setTestHistory] = useState<TestRun[]>([]);
@@ -772,6 +848,24 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         }
     }, [lastMqttMessage, addTestLog]);
 
+    // Sync Schema Tree View when switching methods or modes
+    useEffect(() => {
+        if (isAddingProtocol && editMode === 'keyvalue') {
+            const methods = getEnabledMethods();
+            const currentMethod = methods[currentMethodIndex];
+            if (currentMethod) {
+                const methodConfig = newProtocol.methods[currentMethod];
+                try {
+                    const schema = JSON.parse(methodConfig.schema);
+                    setGeneratedSchema(schema);
+                    setFieldConfigSelection(schemaToFieldConfig(schema));
+                } catch (e) {
+                    console.error("Failed to parse schema for tree view", e);
+                }
+            }
+        }
+    }, [currentMethodIndex, editMode, isAddingProtocol]);
+
     // --- Suite Actions ---
 
     const addNewSuite = () => {
@@ -848,6 +942,89 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         ));
         setEditingSuiteId(null);
         setEditingSuiteName('');
+    };
+
+    // 处理从 ProtocolGenerator 生成的协议
+    const handleGeneratedProtocols = (protocols: any[], suiteName: string, suiteDescription: string) => {
+        // 创建新的测试库
+        const newSuite: ProtocolTestSuite = {
+            id: `suite_${Date.now()}`,
+            name: suiteName,
+            description: suiteDescription,
+            protocols: protocols,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+        };
+        setSuites(prev => [...prev, newSuite]);
+        setSelectedSuiteId(newSuite.id);
+        addTestLog('INFO', `从 Confluence 生成协议库 "${suiteName}"，包含 ${protocols.length} 个协议`);
+    };
+
+    // 确保订阅了接收回复的 topic
+    useEffect(() => {
+        if (mqttConnected && session && onMqttSubscribe) {
+            const topic = appid
+                ? `/app/${session.uid}-${appid}/subscribe`
+                : `/app/${session.uid}/subscribe`;
+            onMqttSubscribe(topic).catch(err => {
+                console.error('Failed to subscribe:', err);
+                addTestLog('ERROR', `订阅失败: ${err.message}`);
+            });
+        }
+    }, [mqttConnected, session, appid, onMqttSubscribe]);
+
+    // 获取设备 Ability
+    const fetchDeviceAbility = async (): Promise<any> => {
+        if (!targetDevice || !mqttConnected || !onMqttPublish || !session) {
+            throw new Error('设备未连接或 MQTT 未就绪');
+        }
+
+        return new Promise((resolve, reject) => {
+            const timestamp = Math.floor(Date.now() / 1000);
+            const messageId = md5(`${Date.now()}`);
+            const key = session.key || '';
+            const sign = md5(messageId + key + timestamp);
+
+            const fromTopic = appid
+                ? `/app/${session.uid}-${appid}/subscribe`
+                : `/app/${session.uid}/subscribe`;
+
+            const message = {
+                header: {
+                    from: fromTopic,
+                    messageId,
+                    method: 'GET',
+                    namespace: 'Appliance.System.Ability',
+                    payloadVersion: 1,
+                    sign,
+                    timestamp,
+                    triggerSrc: 'App',
+                    uuid: targetDevice.id,
+                },
+                payload: {}
+            };
+
+            // 设置响应监听器
+            pendingNamespaceRef.current = 'Appliance.System.Ability';
+            pendingMethodRef.current = 'GET';
+            responseResolverRef.current = (response: any) => {
+                resolve(response);
+            };
+
+            // 发送请求
+            const topic = `/appliance/${targetDevice.id}/subscribe`;
+            onMqttPublish(topic, JSON.stringify(message)).catch(reject);
+
+            // 超时处理
+            setTimeout(() => {
+                if (pendingNamespaceRef.current === 'Appliance.System.Ability') {
+                    pendingNamespaceRef.current = null;
+                    pendingMethodRef.current = null;
+                    responseResolverRef.current = null;
+                    reject(new Error('获取 Ability 超时'));
+                }
+            }, 10000);
+        });
     };
 
     // --- Protocol Actions ---
@@ -1022,7 +1199,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
     // --- Test Execution ---
 
-    const runSingleTest = async (protocol: ProtocolDefinition, methodName: 'SET' | 'GET'): Promise<{ status: 'PASS' | 'FAIL' | 'TIMEOUT'; duration: number; response?: any; error?: string }> => {
+    const runSingleTest = async (protocol: ProtocolDefinition, methodName: RequestMethod): Promise<{ status: 'PASS' | 'FAIL' | 'TIMEOUT'; duration: number; response?: any; error?: string }> => {
         const methodConfig = protocol.methods[methodName];
         if (!methodConfig || !targetDevice || !mqttConnected || !onMqttPublish || !session) {
             return { status: 'FAIL', duration: 0, error: '设备未连接或 MQTT 未就绪' };
@@ -1307,17 +1484,27 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                 </div>
 
                 {/* Actions */}
-                <div className="p-2 border-t border-slate-800 flex gap-2">
+                <div className="p-2 border-t border-slate-800 space-y-2">
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => setIsAddingSuite(true)}
+                            className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1"
+                        >
+                            <Plus size={14} /> 新建
+                        </button>
+                        <label className="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 cursor-pointer">
+                            <Upload size={14} /> 导入
+                            <input type="file" accept=".json" className="hidden" onChange={importSuite} />
+                        </label>
+                    </div>
                     <button
-                        onClick={() => setIsAddingSuite(true)}
-                        className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1"
+                        onClick={() => setShowProtocolGenerator(true)}
+                        disabled={!mqttConnected || !targetDevice}
+                        className="w-full py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="从设备 Ability + Confluence 文档自动生成协议库"
                     >
-                        <Plus size={14} /> 新建
+                        <Wand2 size={14} /> 自动生成
                     </button>
-                    <label className="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1 cursor-pointer">
-                        <Upload size={14} /> 导入
-                        <input type="file" accept=".json" className="hidden" onChange={importSuite} />
-                    </label>
                 </div>
             </div>
 
@@ -1587,7 +1774,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             {/* Add Protocol Wizard Modal */}
             {isAddingProtocol && (
                 <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[600px] max-h-[80vh] overflow-hidden flex flex-col">
+                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[1000px] h-[90vh] overflow-hidden flex flex-col">
                         {/* Header with Steps */}
                         <div className="flex items-center justify-between mb-6">
                             <h3 className="text-lg font-black text-white">{editingProtocolId ? '编辑协议' : '添加协议'}</h3>
@@ -1672,9 +1859,9 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
                             {/* Step 2: Configure Each Method */}
                             {wizardStep === 2 && (
-                                <div className="space-y-4">
+                                <div className="min-h-full flex flex-col">
                                     {/* Method Tabs */}
-                                    <div className="flex gap-2 border-b border-slate-700 pb-2">
+                                    <div className="sticky top-0 z-20 bg-slate-900 flex gap-2 border-b border-slate-700 pb-2 mb-4 pt-1">
                                         {getEnabledMethods().map((method, idx) => (
                                             <button
                                                 key={method}
@@ -1697,19 +1884,19 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                         const methodConfig = newProtocol.methods[currentMethod];
 
                                         return (
-                                            <div className="space-y-4">
+                                            <div className="flex-1 flex flex-col gap-4">
                                                 {/* Edit Mode Toggle */}
                                                 <div className="flex items-center gap-2">
                                                     <span className="text-xs text-slate-500">编辑模式:</span>
                                                     <button
-                                                        onClick={() => setPayloadEditMode('json')}
-                                                        className={`px-3 py-1 text-xs rounded-lg ${payloadEditMode === 'json' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+                                                        onClick={() => setEditMode('json')}
+                                                        className={`px-3 py-1 text-xs rounded-lg ${editMode === 'json' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
                                                     >
                                                         JSON
                                                     </button>
                                                     <button
-                                                        onClick={() => setPayloadEditMode('keyvalue')}
-                                                        className={`px-3 py-1 text-xs rounded-lg ${payloadEditMode === 'keyvalue' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+                                                        onClick={() => setEditMode('keyvalue')}
+                                                        className={`px-3 py-1 text-xs rounded-lg ${editMode === 'keyvalue' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
                                                     >
                                                         Key-Value
                                                     </button>
@@ -1717,8 +1904,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
                                                 {/* Request Payload - 仅对非 PUSH 方法显示 */}
                                                 {currentMethod !== 'PUSH' ? (
-                                                    <div>
-                                                        <div className="flex items-center justify-between mb-2">
+                                                    <div className="flex-1 min-h-0 flex flex-col">
+                                                        <div className="flex items-center justify-between mb-2 shrink-0">
                                                             <label className="text-xs font-bold text-slate-400 uppercase">
                                                                 Request Payload
                                                                 <span className="text-slate-600 font-normal ml-2">(发送给设备的数据)</span>
@@ -1734,7 +1921,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                                 <Copy size={12} /> 从示例提取 Payload
                                                             </button>
                                                         </div>
-                                                        {payloadEditMode === 'json' ? (
+                                                        {editMode === 'json' ? (
                                                             <textarea
                                                                 value={methodConfig.payload}
                                                                 onChange={e => setNewProtocol(p => ({
@@ -1745,10 +1932,10 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                                     }
                                                                 }))}
                                                                 placeholder='{"key": "value"}'
-                                                                className="w-full h-32 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-emerald-400 font-mono outline-none focus:border-indigo-500 resize-none"
+                                                                className="w-full h-full min-h-[300px] bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-emerald-400 font-mono outline-none focus:border-indigo-500 resize-none"
                                                             />
                                                         ) : (
-                                                            <div className="bg-slate-950 border border-slate-700 rounded-lg p-3 space-y-2">
+                                                            <div className="h-full bg-slate-950 border border-slate-700 rounded-lg p-3 space-y-2 overflow-y-auto custom-scrollbar">
                                                                 <KeyValueEditor
                                                                     value={methodConfig.payload}
                                                                     onChange={(v) => setNewProtocol(p => ({
@@ -1774,8 +1961,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                 )}
 
                                                 {/* Expected Response Schema */}
-                                                <div>
-                                                    <div className="flex items-center justify-between mb-2">
+                                                <div className="flex-1 min-h-0 flex flex-col">
+                                                    <div className="flex items-center justify-between mb-2 shrink-0">
                                                         <label className="text-xs font-bold text-slate-400 uppercase">
                                                             Expected Response Schema
                                                             <span className="text-slate-600 font-normal ml-2">(用于验证设备响应)</span>
@@ -1791,21 +1978,147 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                             <Zap size={12} /> 从 JSON 示例生成
                                                         </button>
                                                     </div>
-                                                    <textarea
-                                                        value={methodConfig.schema}
-                                                        onChange={e => setNewProtocol(p => ({
-                                                            ...p,
-                                                            methods: {
-                                                                ...p.methods,
-                                                                [currentMethod]: { ...p.methods[currentMethod], schema: e.target.value }
-                                                            }
-                                                        }))}
-                                                        placeholder='{"type": "object", "required": ["header", "payload"]}'
-                                                        className="w-full h-32 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-blue-400 font-mono outline-none focus:border-indigo-500 resize-none"
-                                                    />
-                                                    <p className="text-[10px] text-slate-600 mt-1">
-                                                        💡 提示：点击「从 JSON 示例生成」，粘贴协议文档中的响应 JSON 即可自动生成 Schema
-                                                    </p>
+                                                    {editMode === 'json' ? (
+                                                        <>
+                                                            <textarea
+                                                                value={methodConfig.schema}
+                                                                onChange={e => setNewProtocol(p => ({
+                                                                    ...p,
+                                                                    methods: {
+                                                                        ...p.methods,
+                                                                        [currentMethod]: { ...p.methods[currentMethod], schema: e.target.value }
+                                                                    }
+                                                                }))}
+                                                                placeholder='{"type": "object", "required": ["header", "payload"]}'
+                                                                className="w-full h-full min-h-[300px] bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-blue-400 font-mono outline-none focus:border-indigo-500 resize-none"
+                                                            />
+                                                            <p className="text-[10px] text-slate-600 mt-1 shrink-0">
+                                                                💡 提示：点击「从 JSON 示例生成」，粘贴协议文档中的响应 JSON 即可自动生成 Schema
+                                                            </p>
+                                                        </>
+                                                    ) : (
+                                                        <div className="h-full bg-slate-950 border border-slate-700 rounded-lg p-3 overflow-y-auto custom-scrollbar">
+                                                            {Object.keys(fieldConfigSelection).length === 0 ? (
+                                                                <div className="h-full flex flex-col items-center justify-center text-slate-500">
+                                                                    <p>Schema 为空或解析失败</p>
+                                                                    <button
+                                                                        onClick={() => setEditMode('json')}
+                                                                        className="mt-2 text-indigo-400 hover:text-indigo-300 underline"
+                                                                    >
+                                                                        切换回 JSON 模式查看
+                                                                    </button>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="space-y-1">
+                                                                    {buildFieldTree(fieldConfigSelection).map(node => (
+                                                                        <FieldTreeItem
+                                                                            key={node.fullPath}
+                                                                            node={node}
+                                                                            level={0}
+                                                                            onUpdate={(path, updates) => {
+                                                                                const newSelection = {
+                                                                                    ...fieldConfigSelection,
+                                                                                    [path]: { ...fieldConfigSelection[path], ...updates }
+                                                                                };
+                                                                                setFieldConfigSelection(newSelection);
+
+                                                                                // Sync back to protocol schema
+                                                                                const newSchema = applyRequiredFields(generatedSchema, newSelection);
+                                                                                setNewProtocol(p => ({
+                                                                                    ...p,
+                                                                                    methods: {
+                                                                                        ...p.methods,
+                                                                                        [currentMethod]: {
+                                                                                            ...p.methods[currentMethod],
+                                                                                            schema: JSON.stringify(newSchema, null, 2)
+                                                                                        }
+                                                                                    }
+                                                                                }));
+                                                                            }}
+                                                                            onRename={(oldPath, newPath) => {
+                                                                                if (fieldConfigSelection[newPath]) {
+                                                                                    alert('Field name already exists');
+                                                                                    return;
+                                                                                }
+                                                                                const newSelection = { ...fieldConfigSelection };
+                                                                                // Rename entry and all children
+                                                                                Object.keys(newSelection).forEach(key => {
+                                                                                    if (key === oldPath || key.startsWith(oldPath + '.')) {
+                                                                                        const suffix = key.substring(oldPath.length);
+                                                                                        const newKey = newPath + suffix;
+                                                                                        newSelection[newKey] = newSelection[key];
+                                                                                        delete newSelection[key];
+                                                                                    }
+                                                                                });
+                                                                                setFieldConfigSelection(newSelection);
+                                                                                // Sync back
+                                                                                const newSchema = applyRequiredFields(generatedSchema, newSelection);
+                                                                                setNewProtocol(p => ({
+                                                                                    ...p,
+                                                                                    methods: {
+                                                                                        ...p.methods,
+                                                                                        [currentMethod]: {
+                                                                                            ...p.methods[currentMethod],
+                                                                                            schema: JSON.stringify(newSchema, null, 2)
+                                                                                        }
+                                                                                    }
+                                                                                }));
+                                                                            }}
+                                                                            onAdd={(parentPath) => {
+                                                                                let newName = 'newField';
+                                                                                let counter = 1;
+                                                                                while (fieldConfigSelection[`${parentPath}.${newName}`]) {
+                                                                                    newName = `newField${counter++}`;
+                                                                                }
+                                                                                const newPath = `${parentPath}.${newName}`;
+                                                                                const newSelection = {
+                                                                                    ...fieldConfigSelection,
+                                                                                    [newPath]: { required: false, type: 'string', value: '' }
+                                                                                };
+                                                                                setFieldConfigSelection(newSelection);
+                                                                                // Sync back
+                                                                                const newSchema = applyRequiredFields(generatedSchema, newSelection);
+                                                                                setNewProtocol(p => ({
+                                                                                    ...p,
+                                                                                    methods: {
+                                                                                        ...p.methods,
+                                                                                        [currentMethod]: {
+                                                                                            ...p.methods[currentMethod],
+                                                                                            schema: JSON.stringify(newSchema, null, 2)
+                                                                                        }
+                                                                                    }
+                                                                                }));
+                                                                            }}
+                                                                            onDelete={(path) => {
+                                                                                const newSelection = { ...fieldConfigSelection };
+                                                                                const deleteRecursive = (p: string) => {
+                                                                                    delete newSelection[p];
+                                                                                    Object.keys(newSelection).forEach(k => {
+                                                                                        if (k.startsWith(p + '.')) deleteRecursive(k);
+                                                                                    });
+                                                                                };
+                                                                                deleteRecursive(path);
+                                                                                setFieldConfigSelection(newSelection);
+
+                                                                                // Sync back to protocol schema
+                                                                                const newSchema = applyRequiredFields(generatedSchema, newSelection);
+                                                                                setNewProtocol(p => ({
+                                                                                    ...p,
+                                                                                    methods: {
+                                                                                        ...p.methods,
+                                                                                        [currentMethod]: {
+                                                                                            ...p.methods[currentMethod],
+                                                                                            schema: JSON.stringify(newSchema, null, 2)
+                                                                                        }
+                                                                                    }
+                                                                                }));
+                                                                            }}
+                                                                        />
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                         );
@@ -1813,6 +2126,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                 </div>
                             )}
                         </div>
+
 
                         {/* Footer */}
                         <div className="flex justify-between gap-3 mt-6 pt-4 border-t border-slate-800">
@@ -1858,281 +2172,298 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         </div>
                     </div>
                 </div>
-            )}
+            )
+            }
 
             {/* Report Export Modal */}
-            {showReportModal && currentRun && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[500px]">
-                        <h3 className="text-lg font-black text-white mb-4">导出测试报告</h3>
+            {
+                showReportModal && currentRun && (
+                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+                        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[500px]">
+                            <h3 className="text-lg font-black text-white mb-4">导出测试报告</h3>
 
-                        {/* Summary */}
-                        <div className="bg-slate-800/50 rounded-xl p-4 mb-4">
-                            <div className="text-sm font-bold text-white mb-2">{currentRun.suiteName}</div>
-                            <div className="text-xs text-slate-400 mb-3">
-                                Device: {currentRun.deviceName} · {new Date(currentRun.startTime).toLocaleString()}
-                            </div>
-                            <div className="flex gap-4 text-sm">
-                                <span className="text-emerald-400">{currentRun.summary.passed} Pass</span>
-                                <span className="text-red-400">{currentRun.summary.failed} Fail</span>
-                                <span className="text-amber-400">{currentRun.summary.timeout} Timeout</span>
-                            </div>
-                        </div>
-
-                        {/* Export Options */}
-                        <div className="space-y-3 mb-4">
-                            <button
-                                onClick={() => exportReport('json')}
-                                className="w-full p-3 bg-slate-800 hover:bg-slate-700 rounded-xl flex items-center gap-3 text-left"
-                            >
-                                <FileJson size={20} className="text-blue-400" />
-                                <div>
-                                    <div className="text-sm font-bold text-white">JSON 格式</div>
-                                    <div className="text-xs text-slate-400">完整的测试结果数据</div>
+                            {/* Summary */}
+                            <div className="bg-slate-800/50 rounded-xl p-4 mb-4">
+                                <div className="text-sm font-bold text-white mb-2">{currentRun.suiteName}</div>
+                                <div className="text-xs text-slate-400 mb-3">
+                                    Device: {currentRun.deviceName} · {new Date(currentRun.startTime).toLocaleString()}
                                 </div>
-                            </button>
-                            <button
-                                onClick={() => exportReport('junit')}
-                                className="w-full p-3 bg-slate-800 hover:bg-slate-700 rounded-xl flex items-center gap-3 text-left"
-                            >
-                                <FileJson size={20} className="text-emerald-400" />
-                                <div>
-                                    <div className="text-sm font-bold text-white">JUnit XML 格式</div>
-                                    <div className="text-xs text-slate-400">Jenkins 兼容格式</div>
+                                <div className="flex gap-4 text-sm">
+                                    <span className="text-emerald-400">{currentRun.summary.passed} Pass</span>
+                                    <span className="text-red-400">{currentRun.summary.failed} Fail</span>
+                                    <span className="text-amber-400">{currentRun.summary.timeout} Timeout</span>
                                 </div>
-                            </button>
-                        </div>
+                            </div>
 
-                        {/* Jenkins Upload */}
-                        <div className="border-t border-slate-700 pt-4">
-                            <div className="text-xs font-bold text-slate-400 uppercase mb-2">上报到 Jenkins</div>
-                            <div className="flex gap-2">
-                                <input
-                                    value={jenkinsUrl}
-                                    onChange={e => setJenkinsUrl(e.target.value)}
-                                    placeholder="Jenkins Webhook URL"
-                                    className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
-                                />
+                            {/* Export Options */}
+                            <div className="space-y-3 mb-4">
                                 <button
-                                    onClick={sendToJenkins}
-                                    className="px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white rounded-lg font-bold flex items-center gap-2"
+                                    onClick={() => exportReport('json')}
+                                    className="w-full p-3 bg-slate-800 hover:bg-slate-700 rounded-xl flex items-center gap-3 text-left"
                                 >
-                                    <Send size={14} /> 发送
+                                    <FileJson size={20} className="text-blue-400" />
+                                    <div>
+                                        <div className="text-sm font-bold text-white">JSON 格式</div>
+                                        <div className="text-xs text-slate-400">完整的测试结果数据</div>
+                                    </div>
+                                </button>
+                                <button
+                                    onClick={() => exportReport('junit')}
+                                    className="w-full p-3 bg-slate-800 hover:bg-slate-700 rounded-xl flex items-center gap-3 text-left"
+                                >
+                                    <FileJson size={20} className="text-emerald-400" />
+                                    <div>
+                                        <div className="text-sm font-bold text-white">JUnit XML 格式</div>
+                                        <div className="text-xs text-slate-400">Jenkins 兼容格式</div>
+                                    </div>
                                 </button>
                             </div>
-                        </div>
 
-                        <div className="flex justify-end mt-6">
-                            <button onClick={() => setShowReportModal(false)} className="px-4 py-2 text-slate-400 hover:text-white">关闭</button>
+                            {/* Jenkins Upload */}
+                            <div className="border-t border-slate-700 pt-4">
+                                <div className="text-xs font-bold text-slate-400 uppercase mb-2">上报到 Jenkins</div>
+                                <div className="flex gap-2">
+                                    <input
+                                        value={jenkinsUrl}
+                                        onChange={e => setJenkinsUrl(e.target.value)}
+                                        placeholder="Jenkins Webhook URL"
+                                        className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+                                    />
+                                    <button
+                                        onClick={sendToJenkins}
+                                        className="px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white rounded-lg font-bold flex items-center gap-2"
+                                    >
+                                        <Send size={14} /> 发送
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="flex justify-end mt-6">
+                                <button onClick={() => setShowReportModal(false)} className="px-4 py-2 text-slate-400 hover:text-white">关闭</button>
+                            </div>
                         </div>
                     </div>
-                </div>
-            )}
+                )
+            }
 
             {/* JSON Extract Modal (Payload / Schema) */}
-            {showJsonToSchemaModal && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60]">
-                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[600px]">
-                        <h3 className="text-lg font-black text-white mb-4">
-                            {jsonExtractMode === 'payload' ? '从 JSON 示例提取 Payload' : '从 JSON 示例生成 Schema'}
-                        </h3>
+            {
+                showJsonToSchemaModal && (
+                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60]">
+                        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[600px]">
+                            <h3 className="text-lg font-black text-white mb-4">
+                                {jsonExtractMode === 'payload' ? '从 JSON 示例提取 Payload' : '从 JSON 示例生成 Schema'}
+                            </h3>
 
-                        <p className="text-sm text-slate-400 mb-4">
-                            {jsonExtractMode === 'payload'
-                                ? '粘贴完整的协议消息 JSON，自动提取其中的 payload 部分。'
-                                : '粘贴协议文档中的 JSON 响应示例，可选择生成完整消息或仅 payload 的 Schema。'
-                            }
-                        </p>
+                            <p className="text-sm text-slate-400 mb-4">
+                                {jsonExtractMode === 'payload'
+                                    ? '粘贴完整的协议消息 JSON，自动提取其中的 payload 部分。'
+                                    : '粘贴协议文档中的 JSON 响应示例，可选择生成完整消息或仅 payload 的 Schema。'
+                                }
+                            </p>
 
-                        <textarea
-                            value={jsonExampleInput}
-                            onChange={e => setJsonExampleInput(e.target.value)}
-                            placeholder={'粘贴完整 JSON 示例，例如:\n{\n  "header": {"method": "GETACK", ...},\n  "payload": {"time": {"timestamp": 1234567890}}\n}'}
-                            className="w-full h-48 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-emerald-400 font-mono outline-none focus:border-indigo-500 resize-none"
-                        />
+                            <textarea
+                                value={jsonExampleInput}
+                                onChange={e => setJsonExampleInput(e.target.value)}
+                                placeholder={'粘贴完整 JSON 示例，例如:\n{\n  "header": {"method": "GETACK", ...},\n  "payload": {"time": {"timestamp": 1234567890}}\n}'}
+                                className="w-full h-48 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-emerald-400 font-mono outline-none focus:border-indigo-500 resize-none"
+                            />
 
-                        <div className="flex justify-end gap-3 mt-6">
-                            <button
-                                onClick={() => setShowJsonToSchemaModal(false)}
-                                className="px-4 py-2 text-slate-400 hover:text-white"
-                            >
-                                取消
-                            </button>
-                            <button
-                                onClick={() => {
-                                    try {
-                                        const parsed = JSON.parse(jsonExampleInput);
-                                        const methods = getEnabledMethods();
-                                        const currentMethod = methods[currentMethodIndex];
-
-                                        if (!currentMethod) {
-                                            alert('请先选择一个 Method');
-                                            return;
-                                        }
-
-                                        if (jsonExtractMode === 'payload') {
-                                            // 提取 payload 部分
-                                            const payloadData = parsed.payload !== undefined ? parsed.payload : parsed;
-                                            const payloadStr = JSON.stringify(payloadData, null, 2);
-
-                                            setNewProtocol(p => ({
-                                                ...p,
-                                                methods: {
-                                                    ...p.methods,
-                                                    [currentMethod]: {
-                                                        ...p.methods[currentMethod],
-                                                        payload: payloadStr
-                                                    }
-                                                }
-                                            }));
-                                            setShowJsonToSchemaModal(false);
-                                        } else {
-                                            // 生成 Schema - 第一步：解析并准备必填字段选择
-                                            const schema = generateSchemaFromJson(parsed, false); // 先不生成 required
-                                            const paths = extractFieldPaths(parsed);
-
-                                            // 默认所有字段都非必填，或者根据某种规则预选
-                                            const initialSelection: Record<string, FieldConfig> = {};
-                                            paths.forEach(p => {
-                                                initialSelection[p.path] = {
-                                                    required: false,
-                                                    type: p.type,
-                                                    value: p.sample
-                                                };
-                                            });
-
-                                            setGeneratedSchema(schema);
-                                            setFieldConfigSelection(initialSelection);
-
-                                            setShowJsonToSchemaModal(false);
-                                            setShowRequiredFieldsModal(true);
-                                        }
-                                    } catch (e) {
-                                        alert('JSON 解析失败，请检查格式是否正确');
-                                    }
-                                }}
-                                className={`px-6 py-2 ${jsonExtractMode === 'payload' ? 'bg-blue-600 hover:bg-blue-500' : 'bg-emerald-600 hover:bg-emerald-500'} text-white rounded-lg font-bold`}
-                            >
-                                {jsonExtractMode === 'payload' ? '提取 Payload' : '生成 Schema'}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Required Fields Selection Modal */}
-            {showRequiredFieldsModal && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[70]">
-                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[800px] max-h-[80vh] flex flex-col">
-                        <h3 className="text-lg font-black text-white mb-4">选择必填字段与类型</h3>
-                        <p className="text-sm text-slate-400 mb-4">
-                            Header 字段默认必填且已隐藏。请勾选 Payload 中需要标记为 <span className="text-red-400 font-bold">required</span> 的字段，并确认字段类型。
-                        </p>
-
-                        <div className="flex-1 overflow-y-auto custom-scrollbar border border-slate-700 rounded-lg bg-slate-950 p-2">
-                            {Object.keys(fieldConfigSelection).length === 0 ? (
-                                <div className="text-center text-slate-500 py-8">没有可供选择的字段</div>
-                            ) : (
-                                <div className="space-y-1">
-                                    {buildFieldTree(fieldConfigSelection).map(node => (
-                                        <FieldTreeItem
-                                            key={node.fullPath}
-                                            node={node}
-                                            level={0}
-                                            onUpdate={(path, updates) => {
-                                                setFieldConfigSelection(prev => ({
-                                                    ...prev,
-                                                    [path]: { ...prev[path], ...updates }
-                                                }));
-                                            }}
-                                            onDelete={(path) => {
-                                                setFieldConfigSelection(prev => {
-                                                    const next = { ...prev };
-                                                    const deleteRecursive = (p: string) => {
-                                                        delete next[p];
-                                                        Object.keys(next).forEach(k => {
-                                                            if (k.startsWith(p + '.')) {
-                                                                deleteRecursive(k);
-                                                            }
-                                                        });
-                                                    };
-                                                    deleteRecursive(path);
-                                                    return next;
-                                                });
-                                            }}
-                                        />
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="flex justify-between items-center mt-6">
-                            <div className="flex gap-2">
+                            <div className="flex justify-end gap-3 mt-6">
                                 <button
-                                    onClick={() => {
-                                        const allSelected: Record<string, FieldConfig> = {};
-                                        Object.keys(fieldConfigSelection).forEach(k => {
-                                            allSelected[k] = { ...fieldConfigSelection[k], required: true };
-                                        });
-                                        setFieldConfigSelection(allSelected);
-                                    }}
-                                    className="text-xs text-indigo-400 hover:text-indigo-300 font-bold"
-                                >
-                                    全选
-                                </button>
-                                <button
-                                    onClick={() => {
-                                        const noneSelected: Record<string, FieldConfig> = {};
-                                        Object.keys(fieldConfigSelection).forEach(k => {
-                                            noneSelected[k] = { ...fieldConfigSelection[k], required: false };
-                                        });
-                                        setFieldConfigSelection(noneSelected);
-                                    }}
-                                    className="text-xs text-slate-500 hover:text-slate-400"
-                                >
-                                    全不选
-                                </button>
-                            </div>
-                            <div className="flex gap-3">
-                                <button
-                                    onClick={() => setShowRequiredFieldsModal(false)}
+                                    onClick={() => setShowJsonToSchemaModal(false)}
                                     className="px-4 py-2 text-slate-400 hover:text-white"
                                 >
                                     取消
                                 </button>
                                 <button
                                     onClick={() => {
-                                        // Apply required fields and save
-                                        const finalSchema = applyRequiredFields(generatedSchema, fieldConfigSelection);
-                                        const schemaStr = JSON.stringify(finalSchema, null, 2);
+                                        try {
+                                            const parsed = JSON.parse(jsonExampleInput);
+                                            const methods = getEnabledMethods();
+                                            const currentMethod = methods[currentMethodIndex];
 
-                                        const methods = getEnabledMethods();
-                                        const currentMethod = methods[currentMethodIndex];
+                                            if (!currentMethod) {
+                                                alert('请先选择一个 Method');
+                                                return;
+                                            }
 
-                                        if (currentMethod) {
-                                            setNewProtocol(p => ({
-                                                ...p,
-                                                methods: {
-                                                    ...p.methods,
-                                                    [currentMethod]: {
-                                                        ...p.methods[currentMethod],
-                                                        schema: schemaStr
+                                            if (jsonExtractMode === 'payload') {
+                                                // 提取 payload 部分
+                                                const payloadData = parsed.payload !== undefined ? parsed.payload : parsed;
+                                                const payloadStr = JSON.stringify(payloadData, null, 2);
+
+                                                setNewProtocol(p => ({
+                                                    ...p,
+                                                    methods: {
+                                                        ...p.methods,
+                                                        [currentMethod]: {
+                                                            ...p.methods[currentMethod],
+                                                            payload: payloadStr
+                                                        }
                                                     }
-                                                }
-                                            }));
-                                        }
+                                                }));
+                                                setShowJsonToSchemaModal(false);
+                                            } else {
+                                                // 生成 Schema - 第一步：解析并准备必填字段选择
+                                                const schema = generateSchemaFromJson(parsed, false); // 先不生成 required
+                                                const paths = extractFieldPaths(parsed);
 
-                                        setShowRequiredFieldsModal(false);
+                                                // 默认所有字段都非必填，或者根据某种规则预选
+                                                const initialSelection: Record<string, FieldConfig> = {};
+                                                paths.forEach(p => {
+                                                    initialSelection[p.path] = {
+                                                        required: false,
+                                                        type: p.type,
+                                                        value: p.sample
+                                                    };
+                                                });
+
+                                                setGeneratedSchema(schema);
+                                                setFieldConfigSelection(initialSelection);
+
+                                                setShowJsonToSchemaModal(false);
+                                                setShowRequiredFieldsModal(true);
+                                            }
+                                        } catch (e) {
+                                            alert('JSON 解析失败，请检查格式是否正确');
+                                        }
                                     }}
-                                    className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold"
+                                    className={`px-6 py-2 ${jsonExtractMode === 'payload' ? 'bg-blue-600 hover:bg-blue-500' : 'bg-emerald-600 hover:bg-emerald-500'} text-white rounded-lg font-bold`}
                                 >
-                                    完成生成
+                                    {jsonExtractMode === 'payload' ? '提取 Payload' : '生成 Schema'}
                                 </button>
                             </div>
                         </div>
                     </div>
-                </div>
-            )}
-        </div>
+                )
+            }
+
+            {/* Required Fields Selection Modal */}
+            {
+                showRequiredFieldsModal && (
+                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[70]">
+                        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[800px] max-h-[80vh] flex flex-col">
+                            <h3 className="text-lg font-black text-white mb-4">选择必填字段与类型</h3>
+                            <p className="text-sm text-slate-400 mb-4">
+                                Header 字段默认必填且已隐藏。请勾选 Payload 中需要标记为 <span className="text-red-400 font-bold">required</span> 的字段，并确认字段类型。
+                            </p>
+
+                            <div className="flex-1 overflow-y-auto custom-scrollbar border border-slate-700 rounded-lg bg-slate-950 p-2">
+                                {Object.keys(fieldConfigSelection).length === 0 ? (
+                                    <div className="text-center text-slate-500 py-8">没有可供选择的字段</div>
+                                ) : (
+                                    <div className="space-y-1">
+                                        {buildFieldTree(fieldConfigSelection).map(node => (
+                                            <FieldTreeItem
+                                                key={node.fullPath}
+                                                node={node}
+                                                level={0}
+                                                onUpdate={(path, updates) => {
+                                                    setFieldConfigSelection(prev => ({
+                                                        ...prev,
+                                                        [path]: { ...prev[path], ...updates }
+                                                    }));
+                                                }}
+                                                onDelete={(path) => {
+                                                    setFieldConfigSelection(prev => {
+                                                        const next = { ...prev };
+                                                        const deleteRecursive = (p: string) => {
+                                                            delete next[p];
+                                                            Object.keys(next).forEach(k => {
+                                                                if (k.startsWith(p + '.')) {
+                                                                    deleteRecursive(k);
+                                                                }
+                                                            });
+                                                        };
+                                                        deleteRecursive(path);
+                                                        return next;
+                                                    });
+                                                }}
+                                            />
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex justify-between items-center mt-6">
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => {
+                                            const allSelected: Record<string, FieldConfig> = {};
+                                            Object.keys(fieldConfigSelection).forEach(k => {
+                                                allSelected[k] = { ...fieldConfigSelection[k], required: true };
+                                            });
+                                            setFieldConfigSelection(allSelected);
+                                        }}
+                                        className="text-xs text-indigo-400 hover:text-indigo-300 font-bold"
+                                    >
+                                        全选
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            const noneSelected: Record<string, FieldConfig> = {};
+                                            Object.keys(fieldConfigSelection).forEach(k => {
+                                                noneSelected[k] = { ...fieldConfigSelection[k], required: false };
+                                            });
+                                            setFieldConfigSelection(noneSelected);
+                                        }}
+                                        className="text-xs text-slate-500 hover:text-slate-400"
+                                    >
+                                        全不选
+                                    </button>
+                                </div>
+                                <div className="flex gap-3">
+                                    <button
+                                        onClick={() => setShowRequiredFieldsModal(false)}
+                                        className="px-4 py-2 text-slate-400 hover:text-white"
+                                    >
+                                        取消
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            // Apply required fields and save
+                                            const finalSchema = applyRequiredFields(generatedSchema, fieldConfigSelection);
+                                            const schemaStr = JSON.stringify(finalSchema, null, 2);
+
+                                            const methods = getEnabledMethods();
+                                            const currentMethod = methods[currentMethodIndex];
+
+                                            if (currentMethod) {
+                                                setNewProtocol(p => ({
+                                                    ...p,
+                                                    methods: {
+                                                        ...p.methods,
+                                                        [currentMethod]: {
+                                                            ...p.methods[currentMethod],
+                                                            schema: schemaStr
+                                                        }
+                                                    }
+                                                }));
+                                            }
+
+                                            setShowRequiredFieldsModal(false);
+                                        }}
+                                        className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold"
+                                    >
+                                        完成生成
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )
+            }
+
+            {/* Protocol Generator Modal (从 Ability + Confluence 自动生成) */}
+            <ProtocolGenerator
+                isOpen={showProtocolGenerator}
+                onClose={() => setShowProtocolGenerator(false)}
+                onGenerate={handleGeneratedProtocols}
+                generateSchema={generateSchemaFromJson}
+                deviceName={targetDevice?.name}
+                onFetchAbility={fetchDeviceAbility}
+            />
+        </div >
     );
 };

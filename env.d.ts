@@ -15,8 +15,34 @@ interface Window {
     scanBluetooth: () => Promise<any[]>;
     connectWifi: (args: { ssid: string, password?: string }) => Promise<boolean>;
 
-    // Native HTTP Request
-    nativeRequest: (args: { url: string; method?: string; headers?: Record<string, string>; body?: any }) => Promise<{ status: number; data: any }>;
+    // Native HTTP Request (支持自动重定向)
+    nativeRequest: (args: {
+      url: string;
+      method?: string;
+      headers?: Record<string, string>;
+      body?: any;
+      followRedirects?: boolean;  // 是否自动跟随重定向，默认 true
+      maxRedirects?: number;      // 最大重定向次数，默认 5
+    }) => Promise<{
+      status: number;
+      data: any;
+      text?: string;              // 原始响应文本
+      headers?: Record<string, string>;  // 响应头
+      finalUrl?: string;          // 最终 URL（重定向后）
+      error?: string;
+    }>;
+
+    // Confluence SSO Login
+    confluenceLogin: (args: { baseUrl: string }) => Promise<{ success: boolean; message: string; cookieCount?: number }>;
+    confluenceGetCookies: (args: { baseUrl: string }) => Promise<{ success: boolean; cookies: any[] }>;
+    confluenceClearCookies: (args: { baseUrl: string }) => Promise<{ success: boolean }>;
+    nativeRequestWithCookies: (args: {
+      url: string;
+      method?: string;
+      headers?: Record<string, string>;
+      body?: any;
+      cookies: any[];
+    }) => Promise<{ status: number; data: any; text?: string; headers?: any }>;
 
     // MQTT IPC 接口
     mqttConnect: (args: { host: string; port: number; clientId: string; username?: string; password?: string }) => Promise<{ success: boolean; message?: string }>;

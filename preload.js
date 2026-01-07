@@ -34,6 +34,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   connectWifi: (args) => ipcRenderer.invoke('wifi:connect', args),
   // 原生请求通道
   nativeRequest: (args) => ipcRenderer.invoke('http:request', args),
+  nativeRequestWithCookies: (args) => ipcRenderer.invoke('http:requestWithCookies', args),
+
+  // ===== Confluence SSO Login =====
+  confluenceLogin: (args) => ipcRenderer.invoke('confluence:login', args),
+  confluenceGetCookies: (args) => ipcRenderer.invoke('confluence:getCookies', args),
+  confluenceClearCookies: (args) => ipcRenderer.invoke('confluence:clearCookies', args),
 
   // ===== MQTT IPC 接口 =====
   mqttConnect: (args) => ipcRenderer.invoke('mqtt:connect', args),

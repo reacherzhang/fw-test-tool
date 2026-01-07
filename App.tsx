@@ -32,16 +32,11 @@ const App: React.FC = () => {
   const [isLogEnabled, setIsLogEnabled] = useState(false);
   const [isLogVisible, setIsLogVisible] = useState(false);
 
+
   // 新增的状态
   const selectedDevice = devices.find(d => d.id === selectedDeviceId) || null;
   const [editingDeviceNameId, setEditingDeviceNameId] = useState<string | null>(null);
   const [editingDeviceName, setEditingDeviceName] = useState('');
-
-  const updateDeviceName = (deviceId: string, newName: string) => {
-    if (!newName.trim()) return;
-    setDevices(prev => prev.map(d => d.id === deviceId ? { ...d, name: newName.trim() } : d));
-    setEditingDeviceNameId(null);
-  };
 
   const [globalLogs, setGlobalLogs] = useState<GlobalLogEntry[]>([]);
   const logScrollRef = useRef<HTMLDivElement>(null);
@@ -81,6 +76,13 @@ const App: React.FC = () => {
     return window.electronAPI.mqttPublish({ topic, message });
   }, []);
 
+  const handleMqttSubscribe = useCallback(async (topic: string) => {
+    if (!window.electronAPI?.mqttSubscribe) {
+      throw new Error('Electron API not available');
+    }
+    return window.electronAPI.mqttSubscribe({ topic });
+  }, []);
+
   // 封装请求数据包（复用 AuthScreen 中的逻辑）
   const encapsulatePacket = useCallback((paramsValues: any, userKey?: string) => {
     const key = IOT_CONSTANTS.APP_PRODUCT_KEY;
@@ -108,6 +110,114 @@ const App: React.FC = () => {
       params: params_b64_str
     };
   }, [session]);
+
+  const fetchDeviceCloudInfo = useCallback(async (deviceId: string) => {
+    if (!session || session.guid === 'PENDING') return;
+
+    const url = `https://${session.httpDomain}/v1/Device/devInfo`;
+    const packet = encapsulatePacket({ uuid: deviceId });
+    const bodyStr = new URLSearchParams(
+      Object.entries(packet).map(([k, v]) => [k, String(v)])
+    ).toString();
+
+    try {
+      recordGlobalLog({
+        type: 'HTTP',
+        direction: 'TX',
+        label: 'Fetch Device Info -> [devInfo]',
+        detail: `[URL]: ${url}\n[Body]: ${bodyStr}`
+      });
+
+      const resultObj = await window.electronAPI?.nativeRequest({
+        url,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': `Basic ${session.token}`
+        },
+        body: bodyStr
+      });
+
+      const result = resultObj?.data;
+
+      if (result?.apiStatus === 0 && result.data) {
+        const { devName } = result.data;
+        if (devName) {
+          setDevices(prev => prev.map(d => d.id === deviceId ? { ...d, name: devName } : d));
+          recordGlobalLog({
+            type: 'HTTP',
+            direction: 'RX',
+            label: 'Device Info Updated',
+            detail: `Updated name for ${deviceId} to "${devName}"`
+          });
+        }
+      }
+    } catch (e: any) {
+      console.error('Failed to fetch device info', e);
+    }
+  }, [session, encapsulatePacket, recordGlobalLog]);
+
+  const updateDeviceName = async (deviceId: string, newName: string) => {
+    if (!newName.trim()) return;
+
+    // Optimistic update
+    setDevices(prev => prev.map(d => d.id === deviceId ? { ...d, name: newName.trim() } : d));
+    setEditingDeviceNameId(null);
+
+    if (!session || session.guid === 'PENDING') return;
+
+    const url = `https://${session.httpDomain}/v1/Device/setDeviceName`;
+    const packet = encapsulatePacket({ uuid: deviceId, devName: newName.trim() });
+    const bodyStr = new URLSearchParams(
+      Object.entries(packet).map(([k, v]) => [k, String(v)])
+    ).toString();
+
+    try {
+      recordGlobalLog({
+        type: 'HTTP',
+        direction: 'TX',
+        label: 'Set Device Name -> [setDeviceName]',
+        detail: `[URL]: ${url}\n[Body]: ${bodyStr}`
+      });
+
+      const resultObj = await window.electronAPI?.nativeRequest({
+        url,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': `Basic ${session.token}`
+        },
+        body: bodyStr
+      });
+
+      const result = resultObj?.data;
+
+      if (result?.apiStatus !== 0) {
+        throw new Error(result?.info || 'API Error');
+      }
+
+      recordGlobalLog({
+        type: 'HTTP',
+        direction: 'RX',
+        label: 'Device Name Saved',
+        detail: `Successfully saved name "${newName}" for ${deviceId}`
+      });
+    } catch (e: any) {
+      recordGlobalLog({
+        type: 'HTTP',
+        direction: 'ERR',
+        label: 'Failed to Set Name',
+        detail: e.message
+      });
+    }
+  };
+
+  // Auto-fetch device info when selected
+  useEffect(() => {
+    if (selectedDeviceId) {
+      fetchDeviceCloudInfo(selectedDeviceId);
+    }
+  }, [selectedDeviceId, fetchDeviceCloudInfo]);
 
   // 向单个设备发送 MQTT 探测消息（带超时和重试）
   const probeDevice = useCallback(async (
@@ -1162,6 +1272,7 @@ const App: React.FC = () => {
                 mqttConnected={mqttConfig.isConnected}
                 appid={mqttConfig.appid}
                 onMqttPublish={handleMqttPublish}
+                onMqttSubscribe={handleMqttSubscribe}
                 onLog={recordGlobalLog}
                 lastMqttMessage={lastMqttMessage}
               />
