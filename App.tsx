@@ -774,7 +774,8 @@ const App: React.FC = () => {
 
         // 保存最新消息用于 ProtocolAudit (添加时间戳确保每次都是新引用)
         console.log('[App.tsx] Setting lastMqttMessage:', parsed.header?.namespace, parsed.header?.method);
-        setLastMqttMessage({ ...parsed, _receivedAt: Date.now() });
+        // ProtocolAudit expects { topic, message, timestamp }
+        setLastMqttMessage({ topic: data.topic, message: data.message, timestamp: Date.now() });
 
         // 自动更新设备 IP 和信息
         if (parsed.header?.namespace === 'Appliance.System.All' && parsed.header?.method === 'GETACK') {
@@ -1267,13 +1268,13 @@ const App: React.FC = () => {
             {/* AUDIT VIEW */}
             {currentView === 'AUDIT' && (
               <ProtocolAudit
-                session={session}
+                session={session!}
                 devices={devices}
                 mqttConnected={mqttConfig.isConnected}
-                appid={mqttConfig.appid}
+                appid={mqttConfig.appid || ''}
                 onMqttPublish={handleMqttPublish}
                 onMqttSubscribe={handleMqttSubscribe}
-                onLog={recordGlobalLog}
+                onLog={(msg) => recordGlobalLog({ type: 'CUSTOM', direction: 'SYS', label: 'Protocol Audit', detail: msg })}
                 lastMqttMessage={lastMqttMessage}
               />
             )}
