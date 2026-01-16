@@ -4,15 +4,18 @@ import {
     CheckCircle, XCircle, AlertTriangle, Edit3, FolderOpen,
     RefreshCw, Copy, Zap, ArrowRight, Download, Upload, FileJson,
     Package, Clock, History, Send, Check, X, Wand2, BarChart3, FileText, MoreVertical, Settings, Search,
-    CheckCircle2, HelpCircle, AlertCircle, Circle, Info
+    CheckCircle2, HelpCircle, AlertCircle, Circle, Info, Activity, ArrowDownCircle, Save, Bell, AlignLeft
 } from 'lucide-react';
 import Ajv from 'ajv';
 import { CloudSession, Device } from '../types';
 import { md5 } from './AuthScreen';
 import { ProtocolGenerator } from './ProtocolGenerator';
-import { TestResultViewer, BatchTestSummaryPanel, DetailedTestResult, TestRequest, TestResponse, SchemaValidationError, BatchTestResult, SideBySideDiff } from './TestResultViewer';
+import { TestResultViewer, DetailedTestResult, TestRequest, TestResponse, SchemaValidationError, BatchTestResult } from './TestResultViewer';
 import { TestStatisticsDashboard, TestRunHistory } from './TestStatisticsDashboard';
 import { TestCaseEditor, TestCase } from './TestCaseEditor';
+import * as AuditStorage from '../services/auditStorageService';
+import * as AuditDB from '../services/auditDatabaseService';
+import { databaseConfig } from '../services/auditDatabaseConfig';
 
 // --- Types & Interfaces ---
 
@@ -29,10 +32,24 @@ interface ProtocolDefinition {
     namespace: string;
     name: string;
     description?: string;
+    category?: string; // New: Derived from namespace
+    docUrl?: string;   // New: Link to Confluence
     methods: {
         [key in RequestMethod]?: MethodTest;
     };
     reviewStatus?: 'UNVERIFIED' | 'VERIFIED';
+}
+
+interface AuditProject {
+    id: string;
+    name: string;
+    deviceId?: string;
+    targetDeviceName?: string;
+    protocols: ProtocolDefinition[];
+    createdAt: number;
+    updatedAt: number;
+    status: 'ACTIVE' | 'ARCHIVED';
+    progress: number;
 }
 
 type RequestMethod = 'GET' | 'SET' | 'PUSH' | 'SYNC' | 'DELETE';
@@ -86,6 +103,48 @@ const DEFAULT_EXECUTION_CONFIG: TestExecutionConfig = {
     stopOnFail: false
 };
 
+// Helper to infer schema from JSON data
+const inferSchemaFromData = (data: any): any => {
+    if (data === null) return { type: 'null' };
+
+    const type = typeof data;
+    if (type === 'number' || type === 'string' || type === 'boolean') {
+        return { type };
+    }
+
+    if (Array.isArray(data)) {
+        return {
+            type: 'array',
+            items: data.length > 0 ? inferSchemaFromData(data[0]) : {}
+        };
+    }
+
+    if (type === 'object') {
+        const properties: Record<string, any> = {};
+        const required: string[] = [];
+
+        Object.entries(data).forEach(([key, value]) => {
+            properties[key] = inferSchemaFromData(value);
+            required.push(key);
+        });
+
+        return {
+            type: 'object',
+            properties,
+            required: required.length > 0 ? required : undefined
+        };
+    }
+
+    return {};
+};
+
+// Helper to check if an object looks like a JSON Schema
+const isLikelySchema = (obj: any): boolean => {
+    if (!obj || typeof obj !== 'object') return false;
+    const schemaKeywords = ['$schema', 'type', 'properties', 'items', 'required', 'allOf', 'anyOf', 'oneOf', 'not', 'enum', 'const'];
+    return schemaKeywords.some(k => k in obj) || Object.keys(obj).length === 0;
+};
+
 interface ProtocolTestSuite {
     id: string;
     name: string;
@@ -94,6 +153,7 @@ interface ProtocolTestSuite {
     createdAt: number;
     updatedAt: number;
     executionConfig?: TestExecutionConfig;
+    testRuns?: BatchTestResult[];
 }
 
 interface TestRun {
@@ -309,23 +369,7 @@ const generateSchemaFromJson = (json: any, includeRequired: boolean = true): any
     return { type: typeof json };
 };
 
-const extractFieldPaths = (obj: any, prefix = ''): FieldPath[] => {
-    let paths: FieldPath[] = [];
-    for (const key in obj) {
-        const newPath = prefix ? `${prefix}.${key}` : key;
-        const value = obj[key];
-        if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-            paths = paths.concat(extractFieldPaths(value, newPath));
-        } else {
-            paths.push({
-                path: newPath,
-                type: Array.isArray(value) ? 'array' : typeof value,
-                sample: value
-            });
-        }
-    }
-    return paths;
-};
+
 
 const analyzeSchemaError = (error: any, data: any): string => {
     const path = error.instancePath || 'root';
@@ -366,209 +410,540 @@ const analyzeSchemaErrors = (errors: any[], data: any): string[] => {
     return errors.map(err => analyzeSchemaError(err, data));
 };
 
-const buildFieldTree = (selection: Record<string, FieldConfig>, prefix = ''): FieldTreeNode[] => {
-    // Group paths by first segment
-    const groups: Record<string, string[]> = {};
-    Object.keys(selection).forEach(path => {
-        if (prefix && !path.startsWith(prefix + '.')) return;
-        const relativePath = prefix ? path.slice(prefix.length + 1) : path;
-        const firstSegment = relativePath.split('.')[0];
-        if (!firstSegment) return;
-        const fullPath = prefix ? `${prefix}.${firstSegment}` : firstSegment;
-        if (!groups[firstSegment]) groups[firstSegment] = [];
-        groups[firstSegment].push(path);
-    });
 
-    return Object.entries(groups).map(([key, paths]) => {
-        const fullPath = prefix ? `${prefix}.${key}` : key;
-        const directPath = paths.find(p => p === fullPath);
-        const config = directPath ? selection[directPath] : undefined;
-        const hasChildren = paths.some(p => p.startsWith(fullPath + '.'));
-        return {
-            key,
-            path: fullPath,
-            fullPath,
-            value: config?.value,
-            config,
-            children: hasChildren ? buildFieldTree(selection, fullPath) : undefined
-        };
-    });
-};
 
-const applyRequiredFields = (schema: any, selection: any): any => {
-    if (!schema || typeof schema !== 'object') return schema;
-    // Placeholder: Return schema as is for now to prevent crash
-    return schema;
-};
+// --- New Components for Redesign ---
 
-// --- Components ---
-
-// FieldTreeItem - supports both simple and extended usage
-interface FieldTreeNode {
-    key: string;
-    path: string;
-    fullPath: string;
-    value: any;
-    config?: FieldConfig;
-    children?: FieldTreeNode[];
-}
-
-interface FieldTreeItemProps {
-    // Simple mode props
-    item?: any;
-    onSelect?: (path: string, value: any) => void;
-    // Extended mode props
-    node?: FieldTreeNode;
-    level?: number;
-    onUpdate?: (path: string, updates: Partial<FieldConfig>) => void;
-    onDelete?: (path: string) => void;
-    onRename?: (oldPath: string, newPath: string) => void;
-    onAdd?: (parentPath: string) => void;
-}
-
-const FieldTreeItem: React.FC<FieldTreeItemProps> = (props) => {
-    const [expanded, setExpanded] = useState(true);
-    const [isRenaming, setIsRenaming] = useState(false);
-    const [tempName, setTempName] = useState('');
-
-    // Simple mode
-    if (props.item && props.onSelect) {
-        const { item, onSelect } = props;
-        return (
-            <div className="ml-2">
-                <div className="flex items-center gap-1 hover:bg-slate-800 rounded px-1 py-0.5 cursor-pointer" onClick={() => {
-                    if (item.children) setExpanded(!expanded);
-                    else onSelect(item.path, item.value);
-                }}>
-                    {item.children ? (
-                        expanded ? <ChevronDown size={12} className="text-slate-500" /> : <ChevronRight size={12} className="text-slate-500" />
-                    ) : <div className="w-3" />}
-                    <span className="text-xs font-mono text-indigo-300">{item.key}</span>
-                    {!item.children && (
-                        <span className="text-xs font-mono text-slate-500 ml-2 truncate max-w-[100px]">{JSON.stringify(item.value)}</span>
-                    )}
+const ProjectDashboard: React.FC<{
+    projects: AuditProject[];
+    onSelect: (project: AuditProject) => void;
+    onCreate: () => void;
+    onDelete: (id: string) => void;
+}> = ({ projects, onSelect, onCreate, onDelete }) => {
+    return (
+        <div className="p-6 space-y-6 h-full overflow-y-auto custom-scrollbar">
+            <div className="flex justify-between items-center">
+                <div>
+                    <h2 className="text-2xl font-bold text-white">Project Dashboard</h2>
+                    <p className="text-slate-400">Manage your protocol audit projects</p>
                 </div>
-                {expanded && item.children && (
-                    <div className="border-l border-slate-700 ml-1.5">
-                        {item.children.map((child: any) => (
-                            <FieldTreeItem key={child.path} item={child} onSelect={onSelect} />
-                        ))}
+                <button
+                    onClick={onCreate}
+                    className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-lg shadow-blue-900/20"
+                >
+                    <Plus size={18} /> New Project
+                </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {projects.map(project => (
+                    <div
+                        key={project.id}
+                        onClick={() => onSelect(project)}
+                        className="bg-slate-900 border border-slate-800 rounded-xl p-6 cursor-pointer hover:border-blue-500/50 hover:bg-slate-800/50 transition-all group relative overflow-hidden"
+                    >
+                        <div className="absolute top-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                                onClick={(e) => { e.stopPropagation(); onDelete(project.id); }}
+                                className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
+                            >
+                                <Trash2 size={16} />
+                            </button>
+                        </div>
+
+                        <div className="flex justify-between items-start mb-4">
+                            <div className="p-3 bg-blue-500/10 rounded-lg text-blue-400 group-hover:bg-blue-500 group-hover:text-white transition-colors">
+                                <Package size={24} />
+                            </div>
+                        </div>
+
+                        <h3 className="text-lg font-bold text-white mb-1">{project.name}</h3>
+                        <p className="text-sm text-slate-400 mb-4 flex items-center gap-2">
+                            {project.targetDeviceName ? (
+                                <><Zap size={12} className="text-amber-400" /> {project.targetDeviceName}</>
+                            ) : (
+                                'No device bound'
+                            )}
+                        </p>
+
+                        <div className="space-y-2">
+                            <div className="flex justify-between text-xs text-slate-400">
+                                <span>Progress</span>
+                                <span className={project.progress === 100 ? 'text-emerald-400' : 'text-blue-400'}>{project.progress}%</span>
+                            </div>
+                            <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                                <div
+                                    className={`h-full transition-all duration-500 ${project.progress === 100 ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                                    style={{ width: `${project.progress}%` }}
+                                />
+                            </div>
+                        </div>
+
+                        <div className="mt-4 pt-4 border-t border-slate-800 flex justify-between items-center text-xs text-slate-500">
+                            <div className="flex items-center gap-1">
+                                <Clock size={12} />
+                                <span>{new Date(project.updatedAt).toLocaleDateString()}</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <ShieldCheck size={12} />
+                                <span>{project.protocols.length} Protocols</span>
+                            </div>
+                        </div>
                     </div>
-                )}
+                ))}
+
+                {/* Create New Placeholder */}
+                <div
+                    onClick={onCreate}
+                    className="bg-slate-900/30 border-2 border-dashed border-slate-800 rounded-xl p-6 flex flex-col items-center justify-center gap-4 cursor-pointer hover:border-blue-500/50 hover:bg-slate-800/50 transition-all text-slate-500 hover:text-blue-400 min-h-[200px]"
+                >
+                    <div className="p-4 bg-slate-800 rounded-full">
+                        <Plus size={24} />
+                    </div>
+                    <span className="font-medium">Create New Project</span>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const TestPlanPanel: React.FC<{
+    suites: ProtocolTestSuite[];
+    selectedSuiteId: string | null;
+    selectedProtocolId: string | null;
+    onSelectSuite: (id: string) => void;
+    onSelectProtocol: (protocol: ProtocolDefinition) => void;
+    searchTerm: string;
+    onSearchChange: (term: string) => void;
+    expandedSuites: Set<string>;
+    toggleSuiteExpand: (id: string) => void;
+    selectedProtocols: Set<string>;
+    onToggleProtocolSelection: (id: string, selected: boolean) => void;
+    onToggleSuiteSelection: (suite: ProtocolTestSuite, selected: boolean) => void;
+    onSelectAllProtocols: (selected: boolean) => void;
+    verificationErrorSuiteId: string | null;
+    getProtocolStatus: (p: ProtocolDefinition) => any;
+    STATUS_CONFIG: any;
+    onQuickRun: (p: ProtocolDefinition) => void;
+    runningTest: string | null;
+    onAddSuite: () => void;
+    onImportSuite: (e: any) => void;
+    onAutoGen: () => void;
+    mqttConnected: boolean;
+    targetDevice: any;
+    devices: any[];
+    targetDeviceId: string;
+    setTargetDeviceId: (id: string) => void;
+    onShowStats: () => void;
+    onEditSuite: (s: ProtocolTestSuite) => void;
+    onExportSuite: (s: ProtocolTestSuite) => void;
+    onDeleteSuite: (id: string) => void;
+    onDeleteProtocol: (id: string) => void;
+}> = ({
+    suites, selectedSuiteId, selectedProtocolId, onSelectSuite, onSelectProtocol,
+    searchTerm, onSearchChange, expandedSuites, toggleSuiteExpand,
+    selectedProtocols, onToggleProtocolSelection, onToggleSuiteSelection,
+    verificationErrorSuiteId, getProtocolStatus, STATUS_CONFIG, onQuickRun, runningTest,
+    onAddSuite, onImportSuite, onAutoGen, mqttConnected, targetDevice, devices, targetDeviceId, setTargetDeviceId,
+    onShowStats, onEditSuite, onExportSuite, onDeleteSuite, onDeleteProtocol
+}) => {
+        return (
+            <div className="w-80 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0 overflow-hidden h-full">
+                {/* Toolbar */}
+                <div className="p-3 border-b border-slate-800 flex gap-2">
+                    <button onClick={onAddSuite} className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors" title="New Suite"><Plus size={16} /></button>
+                    <label className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors cursor-pointer" title="Import Suite">
+                        <Upload size={16} />
+                        <input type="file" accept=".json" className="hidden" onChange={onImportSuite} />
+                    </label>
+                    <button onClick={onAutoGen} disabled={!mqttConnected || !targetDevice} className="flex-1 px-3 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                        <Wand2 size={14} /> Auto Gen
+                    </button>
+                </div>
+
+                {/* Device Selector */}
+                <div className="px-3 py-2 border-b border-slate-800">
+                    <select value={targetDeviceId} onChange={(e) => setTargetDeviceId(e.target.value)} className="w-full bg-slate-800 text-white text-sm rounded-lg px-3 py-2 outline-none border border-slate-700 focus:border-indigo-500">
+                        <option value="">Select Device...</option>
+                        {devices.map(d => <option key={d.id} value={d.id}>{d.name} ({d.ip})</option>)}
+                    </select>
+                </div>
+
+                {/* Search */}
+                <div className="px-3 py-2 border-b border-slate-800">
+                    <div className="relative">
+                        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                        <input value={searchTerm} onChange={e => onSearchChange(e.target.value)} placeholder="Search protocols..." className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-300 outline-none focus:border-indigo-500 transition-colors" />
+                        {searchTerm && <button onClick={() => onSearchChange('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"><XCircle size={12} /></button>}
+                    </div>
+                </div>
+
+                {/* Tree View */}
+                <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
+                    <div className="flex items-center justify-between px-2 py-1 mb-1">
+                        <div className="text-[10px] font-bold text-slate-500 uppercase">Test Suites</div>
+                    </div>
+                    {suites.map(suite => {
+                        const isSuiteMatch = !searchTerm || suite.name.toLowerCase().includes(searchTerm.toLowerCase());
+                        const matchingProtocols = suite.protocols.filter(p => !searchTerm || p.namespace.toLowerCase().includes(searchTerm.toLowerCase()) || p.name.toLowerCase().includes(searchTerm.toLowerCase()));
+                        const displayProtocols = isSuiteMatch ? suite.protocols : matchingProtocols;
+
+                        if (!isSuiteMatch && matchingProtocols.length === 0) return null;
+
+                        const isError = verificationErrorSuiteId === suite.id;
+                        const isExpanded = expandedSuites.has(suite.id) || isError || !!searchTerm;
+                        const isSelected = selectedSuiteId === suite.id && !selectedProtocolId;
+
+                        return (
+                            <div key={suite.id} className="select-none">
+                                <div className={`group flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${isSelected ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white'} ${isError ? 'ring-1 ring-red-500 bg-red-500/10' : ''}`}
+                                    onClick={() => onSelectSuite(suite.id)}>
+                                    <button onClick={(e) => { e.stopPropagation(); toggleSuiteExpand(suite.id); }} className={`p-0.5 rounded hover:bg-white/10 ${isSelected ? 'text-white' : 'text-slate-500'}`}>
+                                        {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                    </button>
+                                    <div onClick={e => e.stopPropagation()} className="flex items-center">
+                                        <input type="checkbox" checked={suite.protocols.length > 0 && suite.protocols.every(p => selectedProtocols.has(p.id))}
+                                            onChange={(e) => onToggleSuiteSelection(suite, e.target.checked)}
+                                            className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-indigo-500 cursor-pointer" />
+                                    </div>
+                                    <FolderOpen size={16} className={isSelected ? 'text-white' : 'text-indigo-400'} />
+                                    <span className="flex-1 text-sm font-medium truncate">{suite.name}</span>
+                                    <div className={`flex items-center opacity-0 group-hover:opacity-100 transition-opacity ${isSelected ? 'text-white' : 'text-slate-400'}`}>
+                                        <button onClick={(e) => { e.stopPropagation(); onEditSuite(suite); }} className="p-1 hover:text-indigo-300"><Edit3 size={12} /></button>
+                                        <button onClick={(e) => { e.stopPropagation(); onExportSuite(suite); }} className="p-1 hover:text-emerald-300"><Download size={12} /></button>
+                                        <button onClick={(e) => { e.stopPropagation(); onDeleteSuite(suite.id); }} className="p-1 hover:text-red-300"><Trash2 size={12} /></button>
+                                    </div>
+                                </div>
+                                {isExpanded && (
+                                    <div className="ml-4 pl-2 border-l border-slate-800 mt-1 space-y-0.5">
+                                        {displayProtocols.map(protocol => {
+                                            const isProtoSelected = selectedProtocolId === protocol.id;
+                                            const protoStatus = getProtocolStatus(protocol);
+                                            const statusCfg = STATUS_CONFIG[protoStatus];
+                                            const statusIconMap: Record<string, typeof Circle> = { 'verified_passed': CheckCircle2, 'verified_failed': AlertCircle, 'unverified': AlertTriangle, 'never_tested': CheckCircle2 };
+                                            const StatusIcon = statusIconMap[protoStatus] || Circle;
+                                            const statusColorMap: Record<string, string> = { 'verified_passed': 'text-emerald-500', 'verified_failed': 'text-red-500', 'unverified': 'text-red-500', 'never_tested': 'text-emerald-500' };
+                                            const statusColor = statusColorMap[protoStatus] || 'text-slate-600';
+
+                                            return (
+                                                <div key={protocol.id} className={`group/proto flex items-center gap-2 px-2 py-2 rounded-md cursor-pointer transition-colors ${isProtoSelected ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : `text-slate-400 ${statusCfg.bgHover} hover:text-slate-200 border border-transparent`}`}
+                                                    onClick={(e) => { e.stopPropagation(); onSelectProtocol(protocol); }}>
+                                                    <div onClick={e => e.stopPropagation()} className="flex items-center">
+                                                        <input type="checkbox" checked={selectedProtocols.has(protocol.id)} onChange={(e) => onToggleProtocolSelection(protocol.id, e.target.checked)} className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-indigo-500 cursor-pointer" />
+                                                    </div>
+                                                    <StatusIcon size={14} className={`${statusColor} shrink-0`} />
+                                                    <span className="flex-1 text-sm font-mono truncate" title={protocol.name || protocol.namespace}>{protocol.name || protocol.namespace}</span>
+                                                    <div className="flex items-center opacity-0 group-hover/proto:opacity-100 transition-opacity">
+                                                        <button onClick={(e) => { e.stopPropagation(); onQuickRun(protocol); }} className="p-1 text-slate-500 hover:text-emerald-400 transition-all" title="Quick Run">
+                                                            {runningTest?.startsWith(protocol.id) ? <RefreshCw size={12} className="animate-spin" /> : <Play size={12} />}
+                                                        </button>
+                                                        <button onClick={(e) => { e.stopPropagation(); onDeleteProtocol(protocol.id); }} className="p-1 text-slate-500 hover:text-red-400 transition-all" title="Delete Protocol">
+                                                            <Trash2 size={12} />
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                        {suite.protocols.length === 0 && <div className="text-[10px] text-slate-600 italic px-2 py-1">No protocols</div>}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+                <div className="p-2 border-t border-slate-800">
+                    <button onClick={onShowStats} className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-colors">
+                        <BarChart3 size={14} /> Statistics Report
+                    </button>
+                </div>
             </div>
         );
-    }
+    };
 
-    // Extended mode
-    const { node, level = 0, onUpdate, onDelete, onRename, onAdd } = props;
-    if (!node) return null;
+const InspectionPanel: React.FC<{
+    logs: DetailedTestLog[];
+    onClearLogs: () => void;
+    autoScroll: boolean;
+    setAutoScroll: (enabled: boolean) => void;
+    logFilter: 'all' | 'TX' | 'RX' | 'ERROR' | 'INFO';
 
-    const hasChildren = node.children && node.children.length > 0;
-    const config = node.config || { required: false, type: 'any', value: null };
+    setLogFilter: (filter: any) => void;
+    headerActions?: React.ReactNode;
+}> = ({ logs, onClearLogs, autoScroll, setAutoScroll, logFilter, setLogFilter, headerActions }) => {
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
 
-    const handleRename = () => {
-        if (isRenaming && tempName.trim() && tempName !== node.key && onRename) {
-            const pathParts = node.fullPath.split('.');
-            pathParts[pathParts.length - 1] = tempName.trim();
-            const newPath = pathParts.join('.');
-            onRename(node.fullPath, newPath);
+    // Auto-scroll and Auto-select latest log
+    useEffect(() => {
+        if (autoScroll && logs.length > 0) {
+            if (scrollRef.current) {
+                scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            }
+            // Auto-select the latest log to keep the JSON viewer alive
+            setSelectedLogId(logs[logs.length - 1].id);
         }
-        setIsRenaming(false);
+    }, [logs, autoScroll]);
+
+    const filteredLogs = logs.filter(l => logFilter === 'all' || l.type === logFilter);
+    const selectedLog = logs.find(l => l.id === selectedLogId) || (logs.length > 0 ? logs[logs.length - 1] : null);
+
+    return (
+        <div className="w-96 bg-slate-900 border-l border-slate-800 flex flex-col shrink-0 h-full">
+            {/* Top Pane: JSON Inspector */}
+            <div className="h-1/2 flex flex-col border-b border-slate-800 bg-slate-950">
+                <div className="p-2 border-b border-slate-800 flex justify-between items-center bg-slate-900 h-10">
+                    <div className="font-bold text-slate-300 flex items-center gap-2 text-sm"><FileJson size={16} /> JSON Inspector</div>
+                    <div className="flex items-center gap-2">
+                        {headerActions}
+                        {selectedLog && (
+                            <span className="text-xs font-mono text-slate-500 border-l border-slate-700 pl-2 ml-2">{selectedLog.timeStr}</span>
+                        )}
+                    </div>
+                </div>
+                <div className="flex-1 overflow-hidden relative">
+                    {selectedLog ? (
+                        <div className="absolute inset-0 overflow-auto custom-scrollbar p-3">
+                            {selectedLog.details?.responsePayload ? (
+                                <div>
+                                    <div className="text-xs font-bold text-emerald-400 mb-2">Response Payload</div>
+                                    <pre className="font-mono text-xs text-emerald-300 whitespace-pre-wrap break-all">
+                                        {JSON.stringify(selectedLog.details.responsePayload, null, 2)}
+                                    </pre>
+                                </div>
+                            ) : selectedLog.details?.requestPayload ? (
+                                <div>
+                                    <div className="text-xs font-bold text-blue-400 mb-2">Request Payload</div>
+                                    <pre className="font-mono text-xs text-blue-300 whitespace-pre-wrap break-all">
+                                        {JSON.stringify(selectedLog.details.requestPayload, null, 2)}
+                                    </pre>
+                                </div>
+                            ) : (
+                                <div className="text-slate-500 text-xs font-mono whitespace-pre-wrap">{selectedLog.message}</div>
+                            )}
+                        </div>
+                    ) : (
+                        <div className="flex items-center justify-center h-full text-slate-600 text-xs">
+                            Select a log entry to view details
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Bottom Pane: Traffic Log */}
+            <div className="h-1/2 flex flex-col bg-slate-900">
+                <div className="p-2 border-b border-slate-800 flex justify-between items-center bg-slate-900">
+                    <div className="font-bold text-slate-300 flex items-center gap-2 text-sm"><Activity size={14} /> Traffic Log</div>
+                    <div className="flex gap-2">
+                        <button onClick={() => setAutoScroll(!autoScroll)} className={`p-1 rounded ${autoScroll ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-500 hover:text-slate-300'}`} title="Auto Scroll"><ArrowDownCircle size={14} /></button>
+                        <button onClick={onClearLogs} className="p-1 text-slate-500 hover:text-red-400 rounded" title="Clear Logs"><Trash2 size={14} /></button>
+                    </div>
+                </div>
+                {/* Filter Bar */}
+                <div className="px-2 py-1 border-b border-slate-800 flex gap-1 bg-slate-900 overflow-x-auto">
+                    {(['all', 'TX', 'RX', 'ERROR'] as const).map(f => (
+                        <button key={f} onClick={() => setLogFilter(f)} className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${logFilter === f ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-500 hover:bg-slate-700'}`}>{f}</button>
+                    ))}
+                </div>
+                {/* Log List */}
+                <div ref={scrollRef} className="flex-1 overflow-y-auto custom-scrollbar bg-slate-950">
+                    {filteredLogs.map(log => (
+                        <LogItem
+                            key={log.id}
+                            log={log}
+                            selected={selectedLogId === log.id}
+                            onSelect={() => {
+                                setSelectedLogId(log.id);
+                                setAutoScroll(false);
+                            }}
+                        />
+                    ))}
+                    {filteredLogs.length === 0 && <div className="text-center text-slate-600 py-8 text-xs">No logs captured</div>}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const WorkbenchPanel: React.FC<{
+    children: React.ReactNode;
+}> = ({ children }) => {
+    return (
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-slate-950 relative">
+            {children}
+        </div>
+    );
+};
+
+
+// --- Enhanced Tree Components ---
+
+interface SchemaNode {
+    id: string;
+    key: string;
+    type: 'string' | 'number' | 'boolean' | 'object' | 'array' | 'null' | 'any';
+    value: any;
+    required?: boolean;
+    children?: SchemaNode[];
+    parentType?: 'object' | 'array';
+}
+
+const getTypeColor = (type: string) => {
+    switch (type) {
+        case 'string': return 'text-emerald-400';
+        case 'number': return 'text-blue-400';
+        case 'boolean': return 'text-purple-400';
+        case 'object': return 'text-amber-400';
+        case 'array': return 'text-orange-400';
+        default: return 'text-slate-400';
+    }
+};
+
+const SchemaTreeItem: React.FC<{
+    node: SchemaNode;
+    level: number;
+    isLast: boolean;
+    mode: 'payload' | 'schema';
+    onUpdate: (id: string, updates: Partial<SchemaNode>) => void;
+    onDelete: (id: string) => void;
+    onAddChild: (id: string, type: SchemaNode['type']) => void;
+}> = ({ node, level, isLast, mode, onUpdate, onDelete, onAddChild }) => {
+    const [expanded, setExpanded] = useState(true);
+    const [isHovered, setIsHovered] = useState(false);
+
+    const handleValueChange = (val: string) => {
+        let newValue: any = val;
+        if (node.type === 'number') newValue = Number(val);
+        if (node.type === 'boolean') newValue = val === 'true';
+        onUpdate(node.id, { value: newValue });
     };
 
     return (
-        <div className={`${level > 0 ? 'ml-4 border-l border-slate-700/50' : ''}`}>
-            <div className={`flex items-center gap-2 p-1.5 rounded hover:bg-slate-800/50 group ${level > 0 ? 'ml-1' : ''}`}>
+        <div className="font-mono text-sm select-none">
+            <div
+                className={`flex items-center gap-2 py-1 px-2 hover:bg-slate-800/50 rounded group relative ${isHovered ? 'bg-slate-800/50' : ''}`}
+                onMouseEnter={() => setIsHovered(true)}
+                onMouseLeave={() => setIsHovered(false)}
+                style={{ paddingLeft: `${level * 16 + 8}px` }}
+            >
+                {/* Indent Guides */}
+                {level > 0 && <div className="absolute left-0 top-0 bottom-0 border-l border-slate-800" style={{ left: `${level * 16}px` }} />}
+
                 {/* Expand/Collapse */}
-                <button
-                    onClick={() => setExpanded(!expanded)}
-                    className={`shrink-0 ${hasChildren ? 'text-slate-500 hover:text-slate-300' : 'invisible'}`}
-                >
-                    {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                </button>
+                {(node.type === 'object' || node.type === 'array') ? (
+                    <button onClick={() => setExpanded(!expanded)} className="p-0.5 hover:text-white text-slate-500 transition-colors">
+                        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                    </button>
+                ) : <div className="w-3.5" />}
 
-                {/* Key Name */}
-                {isRenaming ? (
-                    <input
-                        className="bg-slate-900 border border-indigo-500 rounded px-1 text-xs font-mono text-white outline-none w-24"
-                        value={tempName}
-                        onChange={e => setTempName(e.target.value)}
-                        onBlur={handleRename}
-                        onKeyDown={e => e.key === 'Enter' && handleRename()}
-                        autoFocus
-                    />
-                ) : (
-                    <span
-                        className="text-xs font-mono text-indigo-300 cursor-pointer hover:text-indigo-200"
-                        onDoubleClick={() => {
-                            setTempName(node.key);
-                            setIsRenaming(true);
-                        }}
-                    >
-                        {node.key}
-                    </span>
-                )}
-
-                {/* Type Badge */}
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 shrink-0">
-                    {config.type}
-                </span>
-
-                {/* Required Checkbox */}
-                {onUpdate && !hasChildren && (
-                    <label className="flex items-center gap-1 text-[10px] text-slate-500">
+                {/* Key (Editable if parent is object) */}
+                {node.parentType !== 'array' ? (
+                    <div className="flex items-center gap-1">
                         <input
-                            type="checkbox"
-                            checked={config.required}
-                            onChange={e => onUpdate(node.fullPath, { required: e.target.checked })}
-                            className="w-3 h-3 accent-indigo-500"
+                            value={node.key}
+                            onChange={e => onUpdate(node.id, { key: e.target.value })}
+                            className="bg-transparent text-indigo-300 outline-none w-auto min-w-[20px] max-w-[120px] border-b border-transparent focus:border-indigo-500 hover:border-slate-700 transition-colors"
+                            placeholder="key"
                         />
-                        必填
-                    </label>
+                        <span className="text-slate-500">:</span>
+                    </div>
+                ) : (
+                    <span className="text-slate-500 mr-1">-</span>
                 )}
 
-                {/* Value Preview */}
-                {!hasChildren && config.value !== undefined && (
-                    <span className="text-[10px] text-slate-500 truncate max-w-[80px]">
-                        {JSON.stringify(config.value)}
-                    </span>
-                )}
+                {/* Value / Type Editor */}
+                <div className="flex items-center gap-2 flex-1">
+                    {/* Required Checkbox (Schema Mode) - Always Visible */}
+                    {mode === 'schema' && node.parentType !== 'array' && (
+                        <div className="flex items-center" title="Mark as Required">
+                            <input
+                                type="checkbox"
+                                checked={node.required}
+                                onChange={e => onUpdate(node.id, { required: e.target.checked })}
+                                className="w-4 h-4 rounded border-slate-600 bg-slate-800 accent-red-500 cursor-pointer"
+                            />
+                        </div>
+                    )}
+
+
+                    <div className="relative group/type">
+                        <select
+                            value={node.type}
+                            onChange={e => {
+                                const newType = e.target.value as any;
+                                let newValue = node.value;
+                                if (newType === 'object') newValue = {};
+                                if (newType === 'array') newValue = [];
+                                if (newType === 'boolean') newValue = false;
+                                if (newType === 'number') newValue = 0;
+                                if (newType === 'string') newValue = '';
+                                onUpdate(node.id, { type: newType, value: newValue });
+                            }}
+                            className={`bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-sm focus:outline-none focus:border-indigo-500 cursor-pointer appearance-none ${getTypeColor(node.type)}`}
+                            style={{ paddingRight: '1.5em' }} // Space for arrow if needed, or just keep it simple
+                        >
+                            <option value="string" className="text-emerald-400 bg-slate-900">string</option>
+                            <option value="number" className="text-blue-400 bg-slate-900">number</option>
+                            <option value="boolean" className="text-amber-400 bg-slate-900">boolean</option>
+                            <option value="object" className="text-purple-400 bg-slate-900">object</option>
+                            <option value="array" className="text-cyan-400 bg-slate-900">array</option>
+                            <option value="null" className="text-slate-400 bg-slate-900">null</option>
+                            <option value="any" className="text-slate-300 bg-slate-900">any</option>
+                        </select>
+                    </div>
+
+                    {/* Value Input (for primitives) */}
+                    {node.type !== 'object' && node.type !== 'array' && node.type !== 'null' && (
+                        <div className="flex-1 min-w-[100px]">
+                            {node.type === 'boolean' ? (
+                                <select
+                                    value={String(node.value)}
+                                    onChange={e => handleValueChange(e.target.value)}
+                                    className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-emerald-400 outline-none"
+                                >
+                                    <option value="true">true</option>
+                                    <option value="false">false</option>
+                                </select>
+                            ) : (
+                                <input
+                                    value={String(node.value)}
+                                    onChange={e => handleValueChange(e.target.value)}
+                                    className="w-full bg-transparent text-emerald-400 outline-none border-b border-transparent focus:border-emerald-500 hover:border-slate-700 transition-colors"
+                                    placeholder="value"
+                                />
+                            )}
+                        </div>
+                    )}
+
+
+
+                </div>
 
                 {/* Actions */}
-                <div className="ml-auto flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {hasChildren && onAdd && (
-                        <button
-                            onClick={() => onAdd(node.fullPath)}
-                            className="text-emerald-400 hover:text-emerald-300 p-0.5"
-                            title="添加子字段"
-                        >
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity ml-2">
+                    {(node.type === 'object' || node.type === 'array') && (
+                        <button onClick={() => onAddChild(node.id, 'string')} className="p-1 text-slate-500 hover:text-emerald-400 rounded hover:bg-slate-700" title="Add Child">
                             <Plus size={12} />
                         </button>
                     )}
-                    {onDelete && (
-                        <button
-                            onClick={() => onDelete(node.fullPath)}
-                            className="text-red-400 hover:text-red-300 p-0.5"
-                            title="删除字段"
-                        >
-                            <Trash2 size={12} />
-                        </button>
-                    )}
+                    <button onClick={() => onDelete(node.id)} className="p-1 text-slate-500 hover:text-red-400 rounded hover:bg-slate-700" title="Delete">
+                        <Trash2 size={12} />
+                    </button>
                 </div>
             </div>
 
             {/* Children */}
-            {expanded && hasChildren && (
+            {expanded && node.children && (
                 <div>
-                    {node.children!.map(child => (
-                        <FieldTreeItem
-                            key={child.fullPath}
+                    {node.children.map((child, idx) => (
+                        <SchemaTreeItem
+                            key={child.id}
                             node={child}
                             level={level + 1}
+                            isLast={idx === node.children!.length - 1}
+                            mode={mode}
                             onUpdate={onUpdate}
                             onDelete={onDelete}
-                            onRename={onRename}
-                            onAdd={onAdd}
+                            onAddChild={onAddChild}
                         />
                     ))}
                 </div>
@@ -577,201 +952,301 @@ const FieldTreeItem: React.FC<FieldTreeItemProps> = (props) => {
     );
 };
 
-const KeyValueEditor: React.FC<{ value: string, onChange: (val: string) => void }> = ({ value, onChange }) => {
-    const [pairs, setPairs] = useState<{ key: string, value: string, type: 'string' | 'number' | 'boolean' | 'object' }[]>([]);
+const PayloadEditor: React.FC<{
+    value: string;
+    onChange: (val: string) => void;
+    mode: 'payload' | 'schema';
+    protocol?: ProtocolDefinition;
+    method?: string;
+    session?: CloudSession;
+}> = ({ value, onChange, mode, protocol, method, session }) => {
+    const [view, setView] = useState<'tree' | 'json'>('tree');
+    const [nodes, setNodes] = useState<SchemaNode[]>([]);
+    const [parseError, setParseError] = useState<string | null>(null);
+    const [jsonContent, setJsonContent] = useState('');
+    const isInternalChange = useRef(false);
 
-    useEffect(() => {
-        try {
-            const json = JSON.parse(value || '{}');
-            const newPairs = Object.entries(json).map(([k, v]) => ({
-                key: k,
-                value: typeof v === 'object' ? JSON.stringify(v) : String(v),
-                type: typeof v === 'object' ? 'object' : typeof v as any
-            }));
-            setPairs(newPairs);
-        } catch (e) {
-            // Invalid JSON, ignore
-        }
-    }, [value]);
-
-    const updateJson = (newPairs: typeof pairs) => {
-        const obj: any = {};
-        newPairs.forEach(p => {
-            if (!p.key) return;
-            if (p.type === 'number') obj[p.key] = Number(p.value);
-            else if (p.type === 'boolean') obj[p.key] = p.value === 'true';
-            else if (p.type === 'object') {
-                try { obj[p.key] = JSON.parse(p.value); } catch { obj[p.key] = p.value; }
-            }
-            else obj[p.key] = p.value;
+    // Convert JSON to Nodes
+    const jsonToNodes = (data: any, parentType: 'object' | 'array' = 'object'): SchemaNode[] => {
+        if (typeof data !== 'object' || data === null) return [];
+        return Object.entries(data).map(([key, val]) => {
+            const id = Math.random().toString(36).substr(2, 9);
+            const type = Array.isArray(val) ? 'array' : val === null ? 'null' : typeof val;
+            return {
+                id,
+                key,
+                type: type as any,
+                value: (type === 'object' || type === 'array') ? null : val,
+                required: true, // Default to true (Select All by default)
+                parentType,
+                children: (type === 'object' || type === 'array') ? jsonToNodes(val, type as any) : undefined
+            };
         });
-        onChange(JSON.stringify(obj, null, 2));
     };
 
-    const addPair = () => {
-        const newPairs = [...pairs, { key: '', value: '', type: 'string' as const }];
-        setPairs(newPairs);
-        updateJson(newPairs);
+    // Convert Nodes to JSON
+    const nodesToJson = (nodes: SchemaNode[], parentType: 'object' | 'array'): any => {
+        if (parentType === 'array') {
+            return nodes.map(node => {
+                if (node.type === 'object' || node.type === 'array') {
+                    return nodesToJson(node.children || [], node.type);
+                }
+                return node.value;
+            });
+        } else {
+            const obj: any = {};
+            nodes.forEach(node => {
+                if (node.type === 'object' || node.type === 'array') {
+                    obj[node.key] = nodesToJson(node.children || [], node.type);
+                } else {
+                    obj[node.key] = node.value;
+                }
+            });
+            return obj;
+        }
     };
 
-    const removePair = (index: number) => {
-        const newPairs = pairs.filter((_, i) => i !== index);
-        setPairs(newPairs);
-        updateJson(newPairs);
+    // Helper: Construct Full Message
+    const getWrappedMessage = (payloadVal: any) => {
+        if (mode === 'schema') return payloadVal; // Schema mode shows raw schema
+        const header = {
+            messageId: 'preview-uuid-1234',
+            namespace: protocol?.namespace || 'Appliance.System.All',
+            method: method || 'GET',
+            payloadVersion: 1,
+            from: `/app/${session?.uid || '0'}-preview/subscribe`,
+            timestamp: Math.floor(Date.now() / 1000),
+            sign: 'preview-signature-md5'
+        };
+        return { header, payload: payloadVal };
     };
 
-    const updatePair = (index: number, field: 'key' | 'value' | 'type', val: string) => {
-        const newPairs = [...pairs];
-        (newPairs[index] as any)[field] = val;
-        setPairs(newPairs);
-        updateJson(newPairs);
+    // Helper: Extract Payload from Full Message
+    const extractPayload = (fullMsg: any) => {
+        if (mode === 'schema') return fullMsg;
+        // If it has a payload property, use it. Otherwise assume the whole thing is payload (fallback)
+        return fullMsg.payload !== undefined ? fullMsg.payload : fullMsg;
     };
+
+    // Initialize Nodes from Value & Sync JSON Content
+    useEffect(() => {
+        if (isInternalChange.current) {
+            isInternalChange.current = false;
+            return;
+        }
+        try {
+            const parsed = JSON.parse(value || '{}');
+            setNodes(jsonToNodes(parsed));
+            setParseError(null);
+
+            // Sync JSON content for JSON view
+            const wrapped = getWrappedMessage(parsed);
+            setJsonContent(JSON.stringify(wrapped, null, 2));
+        } catch (e) {
+            setParseError('Invalid JSON');
+            setJsonContent(value); // Fallback
+        }
+    }, [value, mode, protocol, method, session]);
+
+    const handleJsonChange = (newJson: string) => {
+        setJsonContent(newJson);
+        try {
+            const parsed = JSON.parse(newJson);
+            const payload = extractPayload(parsed);
+            isInternalChange.current = true;
+            onChange(JSON.stringify(payload, null, 2));
+            setParseError(null);
+        } catch {
+            // Invalid JSON, don't update parent yet
+            setParseError('Invalid JSON');
+        }
+    };
+
+    const handleViewSwitch = (newView: 'tree' | 'json') => {
+        if (newView === 'json') {
+            // Refresh JSON content when switching to JSON view to ensure it's up to date
+            try {
+                const parsed = JSON.parse(value || '{}');
+                const wrapped = getWrappedMessage(parsed);
+                setJsonContent(JSON.stringify(wrapped, null, 2));
+            } catch {
+                setJsonContent(value);
+            }
+        }
+        setView(newView);
+    }; // Only re-parse if value changes externally or we switch views? 
+    // Actually we should only sync when switching TO tree view or init.
+    // But for now, simple sync is fine if we debounce or handle carefully.
+    // To avoid loop, we rely on the fact that nodesToJson produces stable output if nodes don't change.
+
+    const handleTreeUpdate = (newNodes: SchemaNode[]) => {
+        isInternalChange.current = true;
+        setNodes(newNodes);
+        const json = nodesToJson(newNodes, 'object');
+        onChange(JSON.stringify(json, null, 2));
+    };
+
+    // Node Operations
+    const updateNode = (id: string, updates: Partial<SchemaNode>) => {
+        const updateRecursive = (currentNodes: SchemaNode[]): SchemaNode[] => {
+            return currentNodes.map(node => {
+                if (node.id === id) {
+                    // Apply updates
+                    const updatedNode = { ...node, ...updates };
+
+                    // Cascading Selection: If 'required' is updated, apply to all children recursively
+                    if (updates.required !== undefined && updatedNode.children) {
+                        const setChildrenRequired = (children: SchemaNode[], isRequired: boolean): SchemaNode[] => {
+                            return children.map(child => ({
+                                ...child,
+                                required: isRequired,
+                                children: child.children ? setChildrenRequired(child.children, isRequired) : undefined
+                            }));
+                        };
+                        updatedNode.children = setChildrenRequired(updatedNode.children, updates.required);
+                    }
+                    return updatedNode;
+                }
+                if (node.children) {
+                    return { ...node, children: updateRecursive(node.children) };
+                }
+                return node;
+            });
+        };
+        handleTreeUpdate(updateRecursive(nodes));
+    };
+
+    const deleteNode = (id: string) => {
+        const deleteRecursive = (currentNodes: SchemaNode[]): SchemaNode[] => {
+            return currentNodes.filter(node => node.id !== id).map(node => {
+                if (node.children) {
+                    return { ...node, children: deleteRecursive(node.children) };
+                }
+                return node;
+            });
+        };
+        handleTreeUpdate(deleteRecursive(nodes));
+    };
+
+    const addChild = (parentId: string, type: SchemaNode['type']) => {
+        const addRecursive = (currentNodes: SchemaNode[]): SchemaNode[] => {
+            return currentNodes.map(node => {
+                if (node.id === parentId) {
+                    const newChild: SchemaNode = {
+                        id: Math.random().toString(36).substr(2, 9),
+                        key: node.type === 'array' ? '' : 'newField',
+                        type: 'string',
+                        value: '',
+                        parentType: node.type as any,
+                        required: false
+                    };
+                    return { ...node, children: [...(node.children || []), newChild] };
+                }
+                if (node.children) {
+                    return { ...node, children: addRecursive(node.children) };
+                }
+                return node;
+            });
+        };
+        handleTreeUpdate(addRecursive(nodes));
+    };
+
+    const addRootItem = () => {
+        const newNode: SchemaNode = {
+            id: Math.random().toString(36).substr(2, 9),
+            key: 'newField',
+            type: 'string',
+            value: '',
+            parentType: 'object',
+            required: false
+        };
+        handleTreeUpdate([...nodes, newNode]);
+    };
+
+
 
     return (
-        <div className="space-y-2">
-            {pairs.map((pair, i) => (
-                <div key={i} className="flex gap-2 items-center">
-                    <input
-                        value={pair.key}
-                        onChange={e => updatePair(i, 'key', e.target.value)}
-                        placeholder="Key"
-                        className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white outline-none focus:border-indigo-500"
-                    />
-                    <select
-                        value={pair.type}
-                        onChange={e => updatePair(i, 'type', e.target.value)}
-                        className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-400 outline-none"
+        <div className="flex flex-col h-full bg-slate-950">
+            {/* Toolbar */}
+            <div className="flex items-center justify-between px-2 py-1 bg-slate-900 border-b border-slate-800 shrink-0">
+                <div className="flex bg-slate-800 rounded p-0.5">
+                    <button
+                        onClick={() => handleViewSwitch('tree')}
+                        className={`px-3 py-1 text-xs font-bold rounded flex items-center gap-1 ${view === 'tree' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
                     >
-                        <option value="string">String</option>
-                        <option value="number">Number</option>
-                        <option value="boolean">Boolean</option>
-                        <option value="object">Object</option>
-                    </select>
-                    <input
-                        value={pair.value}
-                        onChange={e => updatePair(i, 'value', e.target.value)}
-                        placeholder="Value"
-                        className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white outline-none focus:border-indigo-500"
-                    />
-                    <button onClick={() => removePair(i)} className="text-slate-500 hover:text-red-400">
-                        <Trash2 size={14} />
+                        <FolderOpen size={12} /> Tree
+                    </button>
+                    <button
+                        onClick={() => handleViewSwitch('json')}
+                        className={`px-3 py-1 text-xs font-bold rounded flex items-center gap-1 ${view === 'json' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                    >
+                        <FileJson size={12} /> JSON
                     </button>
                 </div>
-            ))}
-            <button onClick={addPair} className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
-                <Plus size={12} /> Add Field
-            </button>
+                {mode === 'payload' && view === 'json' && (
+                    <span className="text-[10px] text-slate-500 font-mono flex items-center gap-1">
+                        <Edit3 size={10} /> Full Message Mode
+                    </span>
+                )}
+            </div>
+
+            {/* Editor Area */}
+            <div className="flex-1 overflow-hidden relative">
+                {view === 'tree' ? (
+                    <div className="absolute inset-0 overflow-auto custom-scrollbar p-2 space-y-1">
+                        {nodes.length === 0 && (
+                            <div className="text-center py-8 text-slate-600 text-xs">
+                                Empty {mode}. <button onClick={addRootItem} className="text-indigo-400 hover:underline">Add Field</button>
+                            </div>
+                        )}
+                        {nodes.map((node, idx) => (
+                            <SchemaTreeItem
+                                key={node.id}
+                                node={node}
+                                level={0}
+                                isLast={idx === nodes.length - 1}
+                                mode={mode}
+                                onUpdate={updateNode}
+                                onDelete={deleteNode}
+                                onAddChild={addChild}
+                            />
+                        ))}
+                        {nodes.length > 0 && (
+                            <button onClick={addRootItem} className="mt-2 ml-2 text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 opacity-50 hover:opacity-100 transition-opacity">
+                                <Plus size={12} /> Add Field
+                            </button>
+                        )}
+                    </div>
+                ) : (
+                    <textarea
+                        value={jsonContent}
+                        onChange={e => handleJsonChange(e.target.value)}
+                        className="w-full h-full bg-slate-950 text-emerald-400 font-mono text-sm p-3 outline-none resize-none"
+                        spellCheck={false}
+                    />
+                )}
+            </div>
         </div>
     );
 };
 
-// Log Item Component
-const LogItem: React.FC<{ log: DetailedTestLog }> = ({ log }) => {
-    const [expanded, setExpanded] = useState(false);
-    const hasDetails = !!log.details;
-
+// Log Item Component (Compact Row)
+const LogItem: React.FC<{ log: DetailedTestLog; selected: boolean; onSelect: () => void }> = ({ log, selected, onSelect }) => {
     return (
-        <div className="border-b border-slate-800 last:border-0">
-            <div
-                className={`flex items-start gap-3 p-2 font-mono text-xs cursor-pointer hover:bg-slate-800/50 transition-colors ${expanded ? 'bg-slate-800/30' : ''}`}
-                onClick={() => hasDetails && setExpanded(!expanded)}
-            >
-                <div className={`mt-0.5 shrink-0 ${hasDetails ? 'text-slate-500' : 'opacity-0'}`}>
-                    {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                </div>
-                <div className="text-slate-500 shrink-0 select-none">{log.timeStr}</div>
-                <div className={`font-bold shrink-0 w-12 ${log.type === 'TX' ? 'text-blue-400' : log.type === 'RX' ? 'text-emerald-400' : log.type === 'ERROR' ? 'text-red-400' : 'text-slate-400'}`}>
-                    {log.type}
-                </div>
-                <div className="flex-1 break-all text-slate-300">
-                    {log.message}
-                </div>
-                {log.details?.status && (
-                    <div className={`shrink-0 px-2 py-0.5 rounded text-[10px] font-bold ${log.details.status === 'PASS' ? 'bg-emerald-500/20 text-emerald-400' : log.details.status === 'FAIL' ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'}`}>
-                        {log.details.status}
-                    </div>
-                )}
+        <div
+            className={`flex items-center gap-2 p-2 font-mono text-xs cursor-pointer border-b border-slate-800 last:border-0 transition-colors ${selected ? 'bg-indigo-900/30 border-indigo-500/30' : 'hover:bg-slate-800/50'}`}
+            onClick={onSelect}
+        >
+            <div className="text-slate-500 shrink-0 select-none w-16 truncate">{log.timeStr.split(' ')[1] || log.timeStr}</div>
+            <div className={`font-bold shrink-0 w-10 ${log.type === 'TX' ? 'text-blue-400' : log.type === 'RX' ? 'text-emerald-400' : log.type === 'ERROR' ? 'text-red-400' : 'text-slate-400'}`}>
+                {log.type}
             </div>
-
-            {expanded && log.details && (
-                <div className="pl-12 pr-4 pb-3 text-xs">
-                    <div className="bg-slate-950 rounded-lg border border-slate-800 overflow-hidden">
-                        {/* Summary Grid */}
-                        <div className="grid grid-cols-2 gap-4 p-3 border-b border-slate-800 bg-slate-900/50">
-                            {log.details.protocol && (
-                                <div>
-                                    <span className="text-slate-500 block mb-1">Protocol</span>
-                                    <span className="text-slate-300 font-mono">{log.details.protocol}</span>
-                                </div>
-                            )}
-                            {log.details.method && (
-                                <div>
-                                    <span className="text-slate-500 block mb-1">Method</span>
-                                    <span className="text-slate-300 font-mono">{log.details.method}</span>
-                                </div>
-                            )}
-                            {log.details.duration !== undefined && (
-                                <div>
-                                    <span className="text-slate-500 block mb-1">Duration</span>
-                                    <span className="text-slate-300 font-mono">{log.details.duration}ms</span>
-                                </div>
-                            )}
-                            {log.details.error && (
-                                <div className="col-span-2">
-                                    <span className="text-slate-500 block mb-1">Error</span>
-                                    <span className="text-red-400 font-mono">{log.details.error}</span>
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Payloads & Diff */}
-                        {log.details.status === 'FAIL' && log.details.requestPayload && log.details.responsePayload ? (
-                            <div className="p-3">
-                                <div className="text-slate-500 mb-2 font-bold">Diff (Expected vs Actual)</div>
-                                <SideBySideDiff
-                                    leftJson={log.details.requestPayload}
-                                    rightJson={log.details.responsePayload}
-                                    leftTitle="Request (Expected Structure)"
-                                    rightTitle="Response (Actual)"
-                                />
-                            </div>
-                        ) : (
-                            <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-slate-800">
-                                {log.details.requestPayload && (
-                                    <div className="p-3">
-                                        <div className="text-slate-500 mb-2 font-bold">Request Payload</div>
-                                        <pre className="font-mono text-[10px] text-blue-300 overflow-x-auto custom-scrollbar">
-                                            {JSON.stringify(log.details.requestPayload, null, 2)}
-                                        </pre>
-                                    </div>
-                                )}
-                                {log.details.responsePayload && (
-                                    <div className="p-3">
-                                        <div className="text-slate-500 mb-2 font-bold">Response Payload</div>
-                                        <pre className="font-mono text-[10px] text-emerald-300 overflow-x-auto custom-scrollbar">
-                                            {JSON.stringify(log.details.responsePayload, null, 2)}
-                                        </pre>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-
-                        {/* Schema Errors */}
-                        {log.details.schemaErrors && log.details.schemaErrors.length > 0 && (
-                            <div className="p-3 border-t border-slate-800 bg-red-500/5">
-                                <div className="text-red-400 mb-2 font-bold flex items-center gap-2">
-                                    <AlertTriangle size={14} /> Schema Validation Errors
-                                </div>
-                                <div className="space-y-2">
-                                    {log.details.schemaErrors.map((err: any, idx: number) => (
-                                        <div key={idx} className="text-red-300 font-mono text-[10px] bg-red-500/10 p-2 rounded border border-red-500/20">
-                                            {typeof err === 'string' ? err : JSON.stringify(err)}
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                    </div>
+            <div className="flex-1 truncate text-slate-300">
+                {log.message}
+            </div>
+            {log.details?.status && (
+                <div className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold ${log.details.status === 'PASS' ? 'bg-emerald-500/20 text-emerald-400' : log.details.status === 'FAIL' ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                    {log.details.status}
                 </div>
             )}
         </div>
@@ -789,15 +1264,108 @@ interface ProtocolAuditProps {
     lastMqttMessage?: { topic: string; message: string; timestamp: number };
 }
 
+
+
 export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     session, devices, mqttConnected, appid, onMqttPublish, onMqttSubscribe, onLog, lastMqttMessage
 }) => {
     // State
+    const [viewMode, setViewMode] = useState<'DASHBOARD' | 'WORKSPACE'>('DASHBOARD');
+    const [projects, setProjects] = useState<AuditProject[]>([]);
+    const [activeProject, setActiveProject] = useState<AuditProject | null>(null);
+
+    // Legacy state mapping (to be refactored)
+    const [selectedProtocolId, setSelectedProtocolId] = useState<string | null>(null);
+    const [isAddingSuite, setIsAddingSuite] = useState(false); // Reused for "Adding Project" modal
+    const [editingSuiteId, setEditingSuiteId] = useState<string | null>(null);
+
+    // Load initial projects from localStorage
+    useEffect(() => {
+        // 执行旧数据迁移
+        AuditStorage.migrateOldStorage();
+
+        // 加载存储的项目
+        const savedProjects = AuditStorage.loadProjects();
+        if (savedProjects.length > 0) {
+            setProjects(savedProjects);
+
+            // 恢复上次活动的项目
+            const activeId = AuditStorage.loadActiveProjectId();
+            if (activeId) {
+                const activeProj = savedProjects.find(p => p.id === activeId);
+                if (activeProj) {
+                    setActiveProject(activeProj);
+                    setViewMode('WORKSPACE');
+                }
+            }
+        }
+
+        // 加载目标设备ID
+        const savedDeviceId = AuditStorage.loadTargetDeviceId();
+        if (savedDeviceId) {
+            setTargetDeviceId(savedDeviceId);
+        }
+
+        // 加载测试历史
+        const savedHistory = AuditStorage.loadTestHistory();
+        if (savedHistory.length > 0) {
+            setTestHistory(savedHistory as TestRun[]);
+        }
+    }, []);
+
+    const handleCreateProject = () => {
+        const newProject: AuditProject = {
+            id: `proj_${Date.now()}`,
+            name: `New Project ${projects.length + 1}`,
+            protocols: [],
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            status: 'ACTIVE',
+            progress: 0
+        };
+        setProjects([...projects, newProject]);
+        setActiveProject(newProject);
+        setViewMode('WORKSPACE');
+    };
+
+    const handleDeleteProject = (id: string) => {
+        setProjects(projects.filter(p => p.id !== id));
+        // 同时清理该项目的测试历史
+        setTestHistory(prev => prev.filter(h => h.suiteId !== id));
+        if (activeProject?.id === id) {
+            setActiveProject(null);
+            setViewMode('DASHBOARD');
+        }
+    };
+
+    const handleSelectProject = (project: AuditProject) => {
+        setActiveProject(project);
+        setViewMode('WORKSPACE');
+    };
+
+    // Sync activeProject to legacy suites state for Phase 1 compatibility
+    useEffect(() => {
+        if (activeProject) {
+            const legacySuite: ProtocolTestSuite = {
+                id: activeProject.id,
+                name: activeProject.name,
+                description: '',
+                protocols: activeProject.protocols,
+                createdAt: activeProject.createdAt,
+                updatedAt: activeProject.updatedAt,
+                executionConfig: DEFAULT_EXECUTION_CONFIG
+            };
+            setSuites([legacySuite]);
+            setSelectedSuiteId(legacySuite.id);
+        }
+    }, [activeProject]);
+
+    // --- Render ---
+
+
+
     const [suites, setSuites] = useState<ProtocolTestSuite[]>([DEFAULT_SUITE]);
     const [selectedSuiteId, setSelectedSuiteId] = useState<string | null>(DEFAULT_SUITE.id);
-    const [selectedProtocolId, setSelectedProtocolId] = useState<string | null>(null);
-    const [isAddingSuite, setIsAddingSuite] = useState(false);
-    const [editingSuiteId, setEditingSuiteId] = useState<string | null>(null);
     const [isAddingProtocol, setIsAddingProtocol] = useState(false);
     const [newSuiteName, setNewSuiteName] = useState('');
     const [newSuite, setNewSuite] = useState<{ name: string; description: string }>({ name: '', description: '' });
@@ -818,9 +1386,9 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     const [wizardStep, setWizardStep] = useState(1);
     const [editMode, setEditMode] = useState<'json' | 'keyvalue'>('json');
     const [showResultViewer, setShowResultViewer] = useState(false);
-    const [viewingResult, setViewingResult] = useState<{ result: DetailedTestResult, namespace: string, method: string, protocolId: string } | null>(null);
+    const [viewingResult, setViewingResult] = useState<{ result?: DetailedTestResult, batchResult?: BatchTestResult, namespace?: string, method?: string, protocolId?: string } | null>(null);
     const [viewingFromBatch, setViewingFromBatch] = useState(false);
-    const [showBatchSummary, setShowBatchSummary] = useState(false);
+
     const [batchTestResult, setBatchTestResult] = useState<BatchTestResult | null>(null);
     const [testHistory, setTestHistory] = useState<TestRun[]>([]);
     const [showStatsDashboard, setShowStatsDashboard] = useState(false);
@@ -856,16 +1424,17 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     // JSON Extract
     const [showJsonToSchemaModal, setShowJsonToSchemaModal] = useState(false);
     const [jsonExampleInput, setJsonExampleInput] = useState('');
-    const [jsonExtractMode, setJsonExtractMode] = useState<'payload' | 'schema'>('payload');
+    const [jsonExtractMode, setJsonExtractMode] = useState<'payload' | 'schema' | 'schema_payload'>('payload');
 
     // Required Fields Selection
     const [showRequiredFieldsModal, setShowRequiredFieldsModal] = useState(false);
     const [generatedSchema, setGeneratedSchema] = useState<any>(null);
     const [selectedRequiredFields, setSelectedRequiredFields] = useState<Set<string>>(new Set());
+    const [showSchemaPreview, setShowSchemaPreview] = useState(false);
 
     // Search
     const [searchTerm, setSearchTerm] = useState('');
-    const [fieldConfigSelection, setFieldConfigSelection] = useState<Record<string, any>>({});
+
 
     // Phase 1 Optimization: Template Category Filter
     const [templateCategory, setTemplateCategory] = useState<'all' | 'control' | 'system' | 'config' | 'ota' | 'sensor'>('all');
@@ -879,6 +1448,38 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     const [autoScroll, setAutoScroll] = useState(true);
     const [rightPanelTab, setRightPanelTab] = useState<'overview' | 'edit' | 'results' | 'review'>('overview');
     const [viewingRunId, setViewingRunId] = useState<string | null>(null);
+    const [editingMethod, setEditingMethod] = useState<RequestMethod>('GET');
+
+    // Copy Protocol
+    const [showCopyProtocolModal, setShowCopyProtocolModal] = useState(false);
+    const [copyTargetSuiteId, setCopyTargetSuiteId] = useState<string>('');
+
+    const handleCopyProtocol = () => {
+        if (!selectedSuiteId || !newProtocol || !copyTargetSuiteId) return;
+
+        setSuites(prev => prev.map(s => {
+            if (s.id === copyTargetSuiteId) {
+                const copiedProtocol = {
+                    ...newProtocol,
+                    id: Math.random().toString(36).substr(2, 9),
+                    namespace: `${newProtocol.namespace}_copy`,
+                    name: `${newProtocol.name}_copy`,
+                    reviewStatus: 'UNVERIFIED' as const,
+                    lastRun: undefined
+                };
+                return {
+                    ...s,
+                    protocols: [...s.protocols, copiedProtocol],
+                    updatedAt: Date.now()
+                };
+            }
+            return s;
+        }));
+
+        // showToast('Protocol copied successfully', 'success');
+        setShowCopyProtocolModal(false);
+        setCopyTargetSuiteId('');
+    };
 
     // Protocol Status Helper
     type ProtocolStatus = 'verified_passed' | 'verified_failed' | 'unverified' | 'never_tested';
@@ -934,18 +1535,65 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         }, ...prev].slice(0, 100));
     }, []);
 
-    // Load/Save
-    useEffect(() => {
-        const saved = localStorage.getItem('iot_nexus_test_suites');
-        if (saved) {
-            try {
-                setSuites(JSON.parse(saved));
-            } catch (e) { }
-        }
-    }, []);
+    // ==================== Persistence: Save on Change ====================
 
+    // Save projects when they change (local + remote sync)
     useEffect(() => {
-        localStorage.setItem('iot_nexus_test_suites', JSON.stringify(suites));
+        if (projects.length > 0) {
+            // 保存到本地缓存
+            AuditStorage.saveProjects(projects);
+
+            // 异步同步到后端数据库（如果已启用）
+            if (databaseConfig.enabled) {
+                AuditDB.saveAllProjectsToDB(projects).catch(err => {
+                    console.warn('[Audit] Database sync failed:', err);
+                });
+            }
+        }
+    }, [projects]);
+
+    // Save active project ID when it changes
+    useEffect(() => {
+        AuditStorage.saveActiveProjectId(activeProject?.id || null);
+    }, [activeProject]);
+
+    // Save test history when it changes (local + remote sync)
+    useEffect(() => {
+        if (testHistory.length > 0) {
+            // 保存到本地缓存
+            AuditStorage.saveTestHistory(testHistory);
+
+            // 异步同步最新一条到后端数据库（如果已启用）
+            if (databaseConfig.enabled && testHistory[0]) {
+                AuditDB.saveTestRunToDB(testHistory[0]).catch(err => {
+                    console.warn('[Audit] Database sync failed:', err);
+                });
+            }
+        }
+    }, [testHistory]);
+
+    // Save target device ID when it changes
+    useEffect(() => {
+        if (targetDeviceId) {
+            AuditStorage.saveTargetDeviceId(targetDeviceId);
+        }
+    }, [targetDeviceId]);
+
+    // Sync suites to projects for persistence (keep legacy compatibility)
+    useEffect(() => {
+        if (activeProject && suites.length > 0) {
+            const currentSuite = suites.find(s => s.id === activeProject.id);
+            if (currentSuite && currentSuite.protocols !== activeProject.protocols) {
+                // Update the active project with the latest protocols
+                const updatedProject = {
+                    ...activeProject,
+                    protocols: currentSuite.protocols,
+                    updatedAt: Date.now()
+                };
+                setActiveProject(updatedProject);
+                setProjects(prev => prev.map(p => p.id === updatedProject.id ? updatedProject : p));
+            }
+        }
     }, [suites]);
 
     // Auto Scroll Log
@@ -989,9 +1637,10 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             protocols: [],
             createdAt: Date.now(),
             updatedAt: Date.now(),
-            executionConfig: DEFAULT_EXECUTION_CONFIG
+            executionConfig: DEFAULT_EXECUTION_CONFIG,
+            testRuns: []
         };
-        setSuites([...suites, suite]);
+        setSuites(prev => [...prev, suite]);
         setNewSuite({ name: '', description: '' });
         setIsAddingSuite(false);
         setSelectedSuiteId(suite.id);
@@ -1002,7 +1651,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             id: '',
             namespace: '',
             name: '',
-            methods: ALL_METHODS.reduce((acc, m) => ({ ...acc, [m]: { enabled: false, requestPayload: {}, responseSchema: {} } }), {} as any)
+            methods: ALL_METHODS.reduce((acc, m) => ({ ...acc, [m]: { enabled: false, payload: '{}', schema: '{}' } }), {} as any)
         });
         setWizardStep(1);
         setCurrentMethodIndex(0);
@@ -1060,33 +1709,53 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             return;
         }
 
-        setSuites(suites.map(s => {
+        // Determine if Update or Create
+        const existingProtocol = selectedSuite?.protocols.find(p => p.id === newProtocol.id);
+        const isUpdate = !!existingProtocol && newProtocol.id !== '';
+
+        // Generate a truly unique ID for new protocols
+        const protocolId = isUpdate ? newProtocol.id : `proto_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+        setSuites(prevSuites => prevSuites.map(s => {
             if (s.id !== selectedSuiteId) return s;
-            const exists = s.protocols.find(p => p.id === newProtocol.id);
-            if (exists) {
-                // Check if meaningful changes occurred to reset verification status
-                // Exclude reviewStatus from comparison to avoid circular logic if we were to include it
-                const { reviewStatus: r1, ...p1 } = exists;
-                const { reviewStatus: r2, ...p2 } = newProtocol;
-                const hasChanges = JSON.stringify(p1) !== JSON.stringify(p2);
 
-                const updatedProtocol = {
-                    ...newProtocol,
-                    reviewStatus: hasChanges ? 'UNVERIFIED' : newProtocol.reviewStatus
-                };
+            if (isUpdate) {
+                const exists = s.protocols.find(p => p.id === newProtocol.id);
+                if (exists) {
+                    // Check if meaningful changes occurred to reset verification status
+                    const { reviewStatus: r1, ...p1 } = exists;
+                    const { reviewStatus: r2, ...p2 } = newProtocol;
+                    const hasChanges = JSON.stringify(p1) !== JSON.stringify(p2);
 
+                    const updatedProtocol = {
+                        ...newProtocol,
+                        reviewStatus: hasChanges ? 'UNVERIFIED' : newProtocol.reviewStatus
+                    };
+
+                    return {
+                        ...s,
+                        protocols: s.protocols.map(p => p.id === newProtocol.id ? updatedProtocol : p)
+                    };
+                }
+                return s;
+            } else {
+                // Ensure we're adding a new protocol with a unique ID
                 return {
                     ...s,
-                    protocols: s.protocols.map(p => p.id === newProtocol.id ? updatedProtocol : p)
+                    protocols: [...s.protocols, { ...newProtocol, id: protocolId, reviewStatus: 'UNVERIFIED' }]
                 };
             }
-            return {
-                ...s,
-                protocols: [...s.protocols, { ...newProtocol, id: `proto_${Date.now()}`, reviewStatus: 'UNVERIFIED' }]
-            };
         }));
-        setRightPanelTab('overview');
-        setNewProtocol({ id: '', namespace: '', name: '', methods: {} });
+
+        if (isUpdate) {
+            showToast('success', '协议已保存');
+            // Stay on page
+        } else {
+            showToast('success', '协议已创建');
+            setSelectedProtocolId(protocolId);
+            setRightPanelTab('edit');
+            setNewProtocol(prev => ({ ...prev, id: protocolId }));
+        }
     };
 
     const startEditingProtocol = (protocol: ProtocolDefinition) => {
@@ -1266,6 +1935,13 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             return { status: 'FAIL', duration: 0, error: 'Invalid JSON payload' };
         }
 
+        // Check if payload is a full message (has header and payload)
+        // This supports the case where the user pasted the full example from Confluence
+        let actualPayload = payload;
+        if (payload && typeof payload === 'object' && payload.header && payload.payload) {
+            actualPayload = payload.payload;
+        }
+
         // Prepare Request
         // Use standard messageId format (md5 of random uuid)
         const requestId = md5(Math.random().toString(36)).toLowerCase();
@@ -1293,7 +1969,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                 timestampMs: Date.now(),
                 sign: sign
             },
-            payload: payload
+            payload: actualPayload
         };
 
         addTestLog('TX', `Sending ${methodName} to ${protocol.namespace}`, {
@@ -1387,18 +2063,69 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                 let errorMsg = undefined;
 
                 if (methodConfig.schema) {
+                    let schemaObj;
                     try {
-                        const schema = JSON.parse(methodConfig.schema);
-                        const validate = new Ajv().compile(schema);
-                        const valid = validate(response);
-                        if (!valid) {
-                            status = 'FAIL';
-                            schemaErrors = validate.errors || [];
-                            errorMsg = 'Schema validation failed';
-                        }
+                        schemaObj = JSON.parse(methodConfig.schema);
                     } catch (e) {
                         status = 'FAIL';
-                        errorMsg = 'Invalid schema definition';
+                        errorMsg = 'Invalid JSON in Expected Schema';
+                    }
+
+
+
+                    if (schemaObj) {
+                        try {
+                            let validate;
+                            let activeSchema = schemaObj;
+
+                            // Check if it's a Schema or Data
+                            if (!isLikelySchema(schemaObj)) {
+                                console.log('[ProtocolAudit] Detected JSON Payload Example, inferring schema...');
+                                activeSchema = inferSchemaFromData(schemaObj);
+                                validate = new Ajv({ allErrors: true }).compile(activeSchema);
+                            } else {
+                                try {
+                                    // Try compiling as Schema
+                                    validate = new Ajv({ allErrors: true }).compile(schemaObj);
+                                } catch (e) {
+                                    // Fallback to inference if compilation fails
+                                    console.log('[ProtocolAudit] Schema compilation failed, falling back to inference...', e);
+                                    activeSchema = inferSchemaFromData(schemaObj);
+                                    validate = new Ajv({ allErrors: true }).compile(activeSchema);
+                                }
+                            }
+
+                            // Determine validation target: Full Response vs Payload
+                            // If schema doesn't explicitly define 'header' or 'payload' properties,
+                            // and the response has a 'payload' property, we assume the schema is for the payload.
+                            let targetData = response;
+                            // Use activeSchema (which might be inferred) to check structure
+                            const isFullSchema = activeSchema.properties && ('header' in activeSchema.properties || 'payload' in activeSchema.properties);
+
+                            if (!isFullSchema && response && typeof response === 'object' && 'payload' in response) {
+                                targetData = response.payload;
+                            }
+
+                            console.log('[ProtocolAudit] Validation Debug:', {
+                                schema: activeSchema,
+                                targetData: targetData,
+                                isFullSchema,
+                                responseKeys: Object.keys(response || {})
+                            });
+
+                            const valid = validate(targetData);
+                            if (!valid) {
+                                console.warn('[ProtocolAudit] Validation Failed:', validate.errors);
+                                status = 'FAIL';
+                                schemaErrors = validate.errors || [];
+                                errorMsg = 'Schema validation failed';
+                            } else {
+                                console.log('[ProtocolAudit] Validation Passed');
+                            }
+                        } catch (e: any) {
+                            status = 'FAIL';
+                            errorMsg = `Invalid schema: ${e.message || 'Unknown error'}`;
+                        }
                     }
                 }
 
@@ -1413,7 +2140,11 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         topic,
                         payload: finalPayload,
                         timestamp: startTime
-                    }
+                    },
+                    expectedSchema: methodConfig.schema ? JSON.parse(methodConfig.schema) : undefined,
+                    namespace: protocol.namespace,
+                    method: methodName,
+                    protocolId: protocol.id
                 };
 
                 addTestLog(status === 'PASS' ? 'RX' : 'ERROR', status === 'PASS' ? `Received ${methodName} response` : `Validation failed for ${protocol.namespace}`, {
@@ -1452,7 +2183,10 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                     lastResult = {
                         status: isTimeout ? 'TIMEOUT' : 'FAIL',
                         duration,
-                        error: e.message
+                        error: e.message,
+                        namespace: protocol.namespace,
+                        method: methodName,
+                        protocolId: protocol.id
                     };
                 }
 
@@ -1474,7 +2208,14 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             break;
         }
 
-        return lastResult || { status: 'FAIL', duration: 0, error: 'Unknown error' };
+        return lastResult || {
+            status: 'FAIL',
+            duration: 0,
+            error: 'Unknown error',
+            namespace: protocol.namespace,
+            method: methodName,
+            protocolId: protocol.id
+        };
     };
     const stopTests = () => {
         stopTestRef.current = true;
@@ -1483,7 +2224,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         showToast('info', '测试已停止');
     };
 
-    const runAllTests = async () => {
+    const runAllTests = async (protocolsOverride?: any) => {
         if (!selectedSuite || !targetDevice || !mqttConnected) {
             showToast('warning', '请选择测试库、目标设备并确保 MQTT 已连接');
             return;
@@ -1492,9 +2233,14 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         stopTestRef.current = false;
 
         // Determine protocols to run
-        const protocolsToRun = selectedProtocols.size > 0
-            ? selectedSuite.protocols.filter(p => selectedProtocols.has(p.id))
-            : selectedSuite.protocols;
+        let protocolsToRun: ProtocolDefinition[] = [];
+        if (Array.isArray(protocolsOverride)) {
+            protocolsToRun = protocolsOverride;
+        } else {
+            protocolsToRun = selectedProtocols.size > 0
+                ? selectedSuite.protocols.filter(p => selectedProtocols.has(p.id))
+                : selectedSuite.protocols;
+        }
 
         if (protocolsToRun.length === 0) {
             showToast('warning', '没有可运行的协议');
@@ -1534,6 +2280,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             id: run.id,
             suiteId: selectedSuite.id,
             suiteName: selectedSuite.name,
+            deviceId: targetDevice.id,
             deviceName: targetDevice.name,
             startTime: Date.now(),
             status: 'RUNNING',
@@ -1715,7 +2462,21 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
         setCurrentRun(run);
         setBatchTestResult(batchResult);
-        setTestHistory(prev => [...prev, run]);
+
+        // Save to Suite History
+        setSuites(prev => prev.map(s => {
+            if (s.id === selectedSuite.id) {
+                return {
+                    ...s,
+                    testRuns: [batchResult, ...(s.testRuns || [])]
+                };
+            }
+            return s;
+        }));
+
+        // 添加到测试历史（用于持久化存储）
+        setTestHistory(prev => [run, ...prev].slice(0, 100));
+
         setRunningTest(null);
         setIsRunning(false);
         setTestProgress(null); // 清除进度追踪
@@ -1723,7 +2484,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         addTestLog('INFO', `测试完成: ${run.summary.passed}/${run.summary.total} 通过`);
 
         // Show summary panel
-        setShowBatchSummary(true);
+        setViewingResult({ batchResult: batchResult });
+        setShowResultViewer(true);
     };
 
     // --- Report Export ---
@@ -1906,2102 +2668,1524 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         }
     };
 
+    if (viewMode === 'DASHBOARD') {
+        return (
+            <ProjectDashboard
+                projects={projects}
+                onSelect={handleSelectProject}
+                onCreate={handleCreateProject}
+                onDelete={handleDeleteProject}
+            />
+        );
+    }
+
     return (
-        <div className="flex flex-col h-full overflow-hidden">
-            {/* Toast Message */}
-            {toastMessage.show && (
-                <div className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[200] flex items-center gap-3 px-6 py-4 rounded-xl shadow-2xl border transition-all duration-300 ${toastMessage.type === 'error' ? 'bg-red-900/95 border-red-500/50 text-red-100' :
-                    toastMessage.type === 'success' ? 'bg-emerald-900/90 border-emerald-500/50 text-emerald-100' :
-                        toastMessage.type === 'warning' ? 'bg-amber-900/90 border-amber-500/50 text-amber-100' :
-                            'bg-blue-900/90 border-blue-500/50 text-blue-100'
-                    }`}>
-                    {toastMessage.type === 'error' && <AlertTriangle size={18} />}
-                    {toastMessage.type === 'success' && <CheckCircle2 size={18} />}
-                    {toastMessage.type === 'warning' && <AlertTriangle size={18} />}
-                    {toastMessage.type === 'info' && <Info size={18} />}
-                    <span className="text-sm font-medium">{toastMessage.message}</span>
-                    <button onClick={() => setToastMessage(prev => ({ ...prev, show: false }))} className="ml-2 opacity-70 hover:opacity-100">
-                        <X size={16} />
+        <div className="flex h-full flex-col bg-slate-950">
+            {/* Workspace Header */}
+            <div className="h-12 border-b border-slate-800 flex items-center px-4 justify-between bg-slate-900 shrink-0">
+                <div className="flex items-center gap-3">
+                    <button
+                        onClick={() => setViewMode('DASHBOARD')}
+                        className="text-slate-400 hover:text-white flex items-center gap-1 text-sm"
+                    >
+                        <ChevronLeft size={16} /> Dashboard
+                    </button>
+                    <div className="h-4 w-px bg-slate-700"></div>
+                    <span className="font-bold text-white">{activeProject?.name}</span>
+                    <span className="text-xs text-slate-500 px-2 py-0.5 bg-slate-800 rounded-full">
+                        {activeProject?.targetDeviceName || 'No Device'}
+                    </span>
+                </div>
+
+                {/* Header Actions */}
+                <div className="flex items-center gap-2">
+                    {/* Config */}
+                    <button
+                        onClick={() => {
+                            setTempExecutionConfig(selectedSuite?.executionConfig || DEFAULT_EXECUTION_CONFIG);
+                            setShowExecutionConfigModal(true);
+                        }}
+                        className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg flex items-center gap-1 border border-slate-700 transition-colors"
+                        title={`超时: ${(selectedSuite?.executionConfig?.timeout || DEFAULT_EXECUTION_CONFIG.timeout) / 1000}s`}
+                    >
+                        <span className="text-xs text-slate-400 font-bold">
+                            {(selectedSuite?.executionConfig?.timeout || DEFAULT_EXECUTION_CONFIG.timeout) / 1000}s
+                        </span>
+                    </button>
+                    {/* Run/Stop */}
+                    {!selectedProtocolId && (
+                        isRunning ? (
+                            <button onClick={stopTests} className="p-2 bg-red-600 hover:bg-red-500 text-white rounded-lg shadow-lg shadow-red-900/20 transition-all" title="Stop">
+                                <XCircle size={18} />
+                            </button>
+                        ) : (
+                            <button
+                                onClick={() => runAllTests()}
+                                disabled={!mqttConnected || !selectedSuite || selectedSuite.protocols.length === 0 || selectedProtocols.size === 0}
+                                className="p-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-900/20 transition-all"
+                                title={selectedProtocols.size > 0 ? `Run (${selectedProtocols.size})` : 'Run'}
+                            >
+                                <Play size={18} />
+                            </button>
+                        )
+                    )}
+                    {/* Report */}
+                    {currentRun && (
+                        <button onClick={() => setShowReportModal(true)} className="p-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-lg shadow-blue-900/20 transition-all" title="Report">
+                            <FileJson size={18} />
+                        </button>
+                    )}
+                    {/* Add Protocol */}
+                    <button onClick={() => {
+                        resetProtocolWizard();
+                        setIsAddingProtocol(true);
+                    }} className="p-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg shadow-lg shadow-indigo-900/20 transition-all" title="Add Protocol">
+                        <Plus size={18} />
                     </button>
                 </div>
-            )}
-            {/* Main Content Area */}
-            {/* Main Content Area */}
-            <div className="flex-1 flex gap-4 p-4 min-h-0 overflow-hidden">
-                {/* Left Panel - Tree View - Full Height */}
-                <div className="w-96 bg-slate-900 border border-slate-700 rounded-2xl flex flex-col shrink-0 overflow-hidden h-full">
-                    {/* Toolbar */}
-                    <div className="p-3 border-b border-slate-800 flex gap-2">
-                        <button
-                            onClick={() => setIsAddingSuite(true)}
-                            className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors"
-                            title="New Suite"
-                        >
-                            <Plus size={16} />
-                        </button>
-                        <label className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors cursor-pointer" title="Import Suite">
-                            <Upload size={16} />
-                            <input type="file" accept=".json" className="hidden" onChange={importSuite} />
-                        </label>
-                        <button
-                            onClick={() => setShowProtocolGenerator(true)}
-                            disabled={!mqttConnected || !targetDevice}
-                            className="flex-1 px-3 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                            title="Auto Generate from Device Ability"
-                        >
-                            <Wand2 size={14} /> Auto Gen
+            </div>
+
+            <div className="flex flex-col flex-1 overflow-hidden relative">
+                {/* Toast Message */}
+                {toastMessage.show && (
+                    <div className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[200] flex items-center gap-3 px-6 py-4 rounded-xl shadow-2xl border transition-all duration-300 ${toastMessage.type === 'error' ? 'bg-red-900/95 border-red-500/50 text-red-100' :
+                        toastMessage.type === 'success' ? 'bg-emerald-900/90 border-emerald-500/50 text-emerald-100' :
+                            toastMessage.type === 'warning' ? 'bg-amber-900/90 border-amber-500/50 text-amber-100' :
+                                'bg-blue-900/90 border-blue-500/50 text-blue-100'
+                        }`}>
+                        {toastMessage.type === 'error' && <AlertTriangle size={18} />}
+                        {toastMessage.type === 'success' && <CheckCircle2 size={18} />}
+                        {toastMessage.type === 'warning' && <AlertTriangle size={18} />}
+                        {toastMessage.type === 'info' && <Info size={18} />}
+                        <span className="text-sm font-medium">{toastMessage.message}</span>
+                        <button onClick={() => setToastMessage(prev => ({ ...prev, show: false }))} className="ml-2 opacity-70 hover:opacity-100">
+                            <X size={16} />
                         </button>
                     </div>
-
-                    {/* Device Selector - Moved from right panel */}
-                    <div className="px-3 py-2 border-b border-slate-800">
-                        <select
-                            value={targetDeviceId}
-                            onChange={(e) => setTargetDeviceId(e.target.value)}
-                            className="w-full bg-slate-800 text-white text-sm rounded-lg px-3 py-2 outline-none border border-slate-700 focus:border-indigo-500"
-                        >
-                            <option value="">Select Device...</option>
-                            {devices.map(d => (
-                                <option key={d.id} value={d.id}>{d.name} ({d.ip})</option>
-                            ))}
-                        </select>
-                    </div>
-
-                    {/* P1 优化: Tree View 搜索框 */}
-                    <div className="px-3 py-2 border-b border-slate-800">
-                        <div className="relative">
-                            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-                            <input
-                                value={searchTerm}
-                                onChange={e => setSearchTerm(e.target.value)}
-                                placeholder="搜索协议..."
-                                className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-300 outline-none focus:border-indigo-500 transition-colors"
-                            />
-                            {searchTerm && (
-                                <button
-                                    onClick={() => setSearchTerm('')}
-                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
-                                >
-                                    <XCircle size={12} />
-                                </button>
-                            )}
-                        </div>
-                    </div>
-
-                    {/* Tree View */}
-                    <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
-                        <div className="text-[10px] font-bold text-slate-500 uppercase px-2 py-1 mb-1">Test Suites</div>
-                        {suites.map(suite => {
-                            // P1 优化: 搜索过滤逻辑
-                            const isSuiteMatch = !searchTerm || suite.name.toLowerCase().includes(searchTerm.toLowerCase());
-                            const matchingProtocols = suite.protocols.filter(p =>
-                                !searchTerm ||
-                                p.namespace.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                                p.name.toLowerCase().includes(searchTerm.toLowerCase())
-                            );
-
-                            // 如果 Suite 匹配，显示所有协议；否则只显示匹配的协议
-                            const displayProtocols = isSuiteMatch ? suite.protocols : matchingProtocols;
-
-                            // 如果 Suite 不匹配且没有匹配的协议，则隐藏
-                            if (!isSuiteMatch && matchingProtocols.length === 0) {
-                                return null;
-                            }
-
-                            const isError = verificationErrorSuiteId === suite.id;
-                            // 如果有搜索词，默认展开所有匹配的 Suite
-                            const isExpanded = expandedSuites.has(suite.id) || isError || !!searchTerm;
-                            const isSelected = selectedSuiteId === suite.id && !selectedProtocolId;
-
-                            return (
-                                <div key={suite.id} className="select-none">
-                                    {/* Suite Node */}
-                                    <div
-                                        className={`group flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${isSelected ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white'} ${isError ? 'ring-1 ring-red-500 bg-red-500/10' : ''}`}
-                                        onClick={() => {
-                                            setSelectedSuiteId(suite.id);
-                                            setSelectedProtocolId(null);
-                                            // Auto select all protocols in suite
-                                            const newSelected = new Set<string>();
-                                            suite.protocols.forEach(p => newSelected.add(p.id));
-                                            setSelectedProtocols(newSelected);
-
-                                            // Auto expand on click
-                                            setExpandedSuites(prev => {
-                                                const next = new Set(prev);
-                                                next.add(suite.id);
-                                                return next;
-                                            });
-                                        }}
-                                    >
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                setExpandedSuites(prev => {
-                                                    const next = new Set(prev);
-                                                    if (next.has(suite.id)) next.delete(suite.id);
-                                                    else next.add(suite.id);
-                                                    return next;
-                                                });
-                                            }}
-                                            className={`p-0.5 rounded hover:bg-white/10 ${isSelected ? 'text-white' : 'text-slate-500'}`}
-                                        >
-                                            {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                                        </button>
-
-                                        {/* Batch Select All for Suite */}
-                                        <div onClick={e => e.stopPropagation()} className="flex items-center">
-                                            <input
-                                                type="checkbox"
-                                                checked={suite.protocols.length > 0 && suite.protocols.every(p => selectedProtocols.has(p.id))}
-                                                onChange={(e) => {
-                                                    const newSelected = new Set(selectedProtocols);
-                                                    if (e.target.checked) {
-                                                        suite.protocols.forEach(p => newSelected.add(p.id));
-                                                    } else {
-                                                        suite.protocols.forEach(p => newSelected.delete(p.id));
-                                                    }
-                                                    setSelectedProtocols(newSelected);
-                                                }}
-                                                className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-indigo-500 cursor-pointer"
-                                            />
-                                        </div>
-
-                                        <FolderOpen size={16} className={isSelected ? 'text-white' : 'text-indigo-400'} />
-
-                                        <span className="flex-1 text-sm font-medium truncate">{suite.name}</span>
-
-                                        {/* Suite Actions (Hover) */}
-                                        <div className={`flex items-center opacity-0 group-hover:opacity-100 transition-opacity ${isSelected ? 'text-white' : 'text-slate-400'}`}>
-                                            <button onClick={(e) => { e.stopPropagation(); startEditingSuite(suite); }} className="p-1 hover:text-indigo-300" title="Edit">
-                                                <Edit3 size={12} />
-                                            </button>
-                                            <button onClick={(e) => { e.stopPropagation(); exportSuite(suite); }} className="p-1 hover:text-emerald-300" title="Export">
-                                                <Download size={12} />
-                                            </button>
-                                            <button onClick={(e) => { e.stopPropagation(); deleteSuite(suite.id); }} className="p-1 hover:text-red-300" title="Delete">
-                                                <Trash2 size={12} />
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    {/* Protocols (Children) */}
-                                    {isExpanded && (
-                                        <div className="ml-4 pl-2 border-l border-slate-800 mt-1 space-y-0.5">
-                                            {displayProtocols.map(protocol => {
-                                                const isProtoSelected = selectedProtocolId === protocol.id;
-                                                const protoStatus = getProtocolStatus(protocol);
-                                                const statusCfg = STATUS_CONFIG[protoStatus];
-
-                                                const StatusIcon = {
-                                                    'verified_passed': CheckCircle2,
-                                                    'verified_failed': AlertCircle,
-                                                    'unverified': AlertTriangle,
-                                                    'never_tested': CheckCircle2 // Changed to CheckCircle2 for verified
-                                                }[protoStatus] || Circle;
-
-                                                const statusColor = {
-                                                    'verified_passed': 'text-emerald-500',
-                                                    'verified_failed': 'text-red-500',
-                                                    'unverified': 'text-red-500',
-                                                    'never_tested': 'text-emerald-500' // Changed to green for verified but untested
-                                                }[protoStatus] || 'text-slate-600';
-
-                                                return (
-                                                    <div
-                                                        key={protocol.id}
-                                                        className={`group/proto flex items-center gap-2 px-2 py-2 rounded-md cursor-pointer transition-colors ${isProtoSelected ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : `text-slate-400 ${statusCfg.bgHover} hover:text-slate-200 border border-transparent`
-                                                            }`}
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setSelectedSuiteId(suite.id);
-                                                            startEditingProtocol(protocol);
-                                                        }}
-                                                    >
-                                                        {/* Batch Selection Checkbox */}
-                                                        <div onClick={e => e.stopPropagation()} className="flex items-center">
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={selectedProtocols.has(protocol.id)}
-                                                                onChange={(e) => {
-                                                                    const newSelected = new Set(selectedProtocols);
-                                                                    if (e.target.checked) newSelected.add(protocol.id);
-                                                                    else newSelected.delete(protocol.id);
-                                                                    setSelectedProtocols(newSelected);
-                                                                }}
-                                                                className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-indigo-500 cursor-pointer"
-                                                            />
-                                                        </div>
-
-                                                        <StatusIcon size={14} className={`${statusColor} shrink-0`} />
-                                                        {/* <FileText size={14} /> Removed generic icon, status icon is enough */}
-                                                        <span className="flex-1 text-sm font-mono truncate" title={protocol.namespace}>{protocol.namespace}</span>
-                                                        {/* Quick Run Button */}
-                                                        <button
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                if (targetDevice && mqttConnected) {
-                                                                    REQUEST_METHODS.forEach(async (m) => {
-                                                                        if (protocol.methods[m]?.enabled) {
-                                                                            setRunningTest(`${protocol.id}:${m}`);
-                                                                            await runSingleTest(protocol, m, true);
-                                                                            setRunningTest(null);
-                                                                        }
-                                                                    });
-                                                                } else {
-                                                                    addTestLog('ERROR', 'Please connect device first');
-                                                                }
-                                                            }}
-                                                            className="opacity-0 group-hover/proto:opacity-100 p-1 text-slate-500 hover:text-emerald-400 transition-all"
-                                                            title="Quick Run Test"
-                                                        >
-                                                            {runningTest?.startsWith(protocol.id) ? (
-                                                                <RefreshCw size={12} className="animate-spin" />
-                                                            ) : (
-                                                                <Play size={12} />
-                                                            )}
-                                                        </button>
-                                                    </div>
-                                                );
-                                            })}
-                                            {suite.protocols.length === 0 && (
-                                                <div className="text-[10px] text-slate-600 italic px-2 py-1">No protocols</div>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            );
+                )}
+                {/* Main Content Area */}
+                {/* Main Content Area */}
+                <div className="flex-1 flex min-h-0 overflow-hidden">
+                    <TestPlanPanel
+                        suites={suites}
+                        selectedSuiteId={selectedSuiteId}
+                        selectedProtocolId={selectedProtocolId}
+                        onSelectSuite={(id) => {
+                            setSelectedSuiteId(id);
+                            setSelectedProtocolId(null);
+                            setRightPanelTab('overview');
+                        }}
+                        onSelectProtocol={(p) => {
+                            setSelectedSuiteId(suites.find(s => s.protocols.some(proto => proto.id === p.id))?.id || null);
+                            startEditingProtocol(p);
+                        }}
+                        searchTerm={searchTerm}
+                        onSearchChange={setSearchTerm}
+                        expandedSuites={expandedSuites}
+                        toggleSuiteExpand={(id) => setExpandedSuites(prev => {
+                            const next = new Set(prev);
+                            if (next.has(id)) next.delete(id); else next.add(id);
+                            return next;
                         })}
-                    </div>
+                        selectedProtocols={selectedProtocols}
+                        onToggleProtocolSelection={(id, selected) => {
+                            const newSelected = new Set(selectedProtocols);
+                            if (selected) newSelected.add(id); else newSelected.delete(id);
+                            setSelectedProtocols(newSelected);
+                        }}
+                        onToggleSuiteSelection={(suite, selected) => {
+                            const newSelected = new Set(selectedProtocols);
+                            if (selected) suite.protocols.forEach(p => newSelected.add(p.id));
+                            else suite.protocols.forEach(p => newSelected.delete(p.id));
+                            setSelectedProtocols(newSelected);
+                        }}
+                        onSelectAllProtocols={(selected) => {
+                            if (selected) {
+                                const allIds = suites.flatMap(s => s.protocols.map(p => p.id));
+                                setSelectedProtocols(new Set(allIds));
+                            } else {
+                                setSelectedProtocols(new Set());
+                            }
+                        }}
+                        verificationErrorSuiteId={verificationErrorSuiteId}
+                        getProtocolStatus={getProtocolStatus}
+                        STATUS_CONFIG={STATUS_CONFIG}
+                        onQuickRun={(p) => runAllTests([p])}
+                        runningTest={runningTest}
+                        onAddSuite={() => setIsAddingSuite(true)}
+                        onImportSuite={importSuite}
+                        onAutoGen={() => setShowProtocolGenerator(true)}
+                        mqttConnected={mqttConnected}
+                        targetDevice={targetDevice}
+                        devices={devices}
+                        targetDeviceId={targetDeviceId}
+                        setTargetDeviceId={setTargetDeviceId}
+                        onShowStats={() => setShowStatsDashboard(true)}
+                        onEditSuite={startEditingSuite}
+                        onExportSuite={exportSuite}
+                        onDeleteSuite={deleteSuite}
+                        onDeleteProtocol={deleteProtocol}
+                    />
 
-                    {/* Footer Actions */}
-                    <div className="p-2 border-t border-slate-800">
-                        <button
-                            onClick={() => setShowStatsDashboard(true)}
-                            className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-colors"
-                        >
-                            <BarChart3 size={14} /> Statistics Report
-                        </button>
-                    </div>
-                </div>
+                    <WorkbenchPanel>
+                        <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-slate-900 border-x border-slate-800">
+                            {/* Top Section: Editor/Results */}
+                            <div className="flex-1 overflow-hidden flex flex-col">
+                                {selectedSuite ? (
+                                    <>
+                                        {/* Header */}
 
-                {/* Right Panel - Editor & Results & Log */}
-                <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-slate-900 border border-slate-700 rounded-2xl">
-                    {/* Top Section: Editor/Results */}
-                    <div className="flex-1 overflow-hidden flex flex-col">
-                        {selectedSuite ? (
-                            <>
-                                {/* Header */}
-                                <div className="flex justify-between items-start shrink-0 p-4">
-                                    <div>
-                                        <h1 className="text-xl font-black text-white">{selectedSuite.name}</h1>
-                                        {selectedSuite.description && <p className="text-sm text-slate-500 mt-1">{selectedSuite.description}</p>}
-                                    </div>
-                                    <div className="flex gap-2">
-                                        {/* 测试配置按钮 */}
-                                        <button
-                                            onClick={() => {
-                                                setTempExecutionConfig(selectedSuite.executionConfig || DEFAULT_EXECUTION_CONFIG);
-                                                setShowExecutionConfigModal(true);
-                                            }}
-                                            className="p-2 bg-slate-700 hover:bg-slate-600 text-white rounded-xl flex items-center gap-1"
-                                            title={`超时: ${(selectedSuite.executionConfig?.timeout || DEFAULT_EXECUTION_CONFIG.timeout) / 1000}s, 重试: ${selectedSuite.executionConfig?.retryCount || 0}次`}
-                                        >
-                                            <Settings size={16} />
-                                            <span className="text-xs text-slate-400">
-                                                {(selectedSuite.executionConfig?.timeout || DEFAULT_EXECUTION_CONFIG.timeout) / 1000}s
-                                                {(selectedSuite.executionConfig?.retryCount || 0) > 0 && ` ×${selectedSuite.executionConfig?.retryCount}`}
-                                            </span>
-                                        </button>
+
+                                        {/* Test History Table - Always show when no protocol is selected */}
                                         {!selectedProtocolId && (
-                                            isRunning ? (
-                                                <button onClick={stopTests} className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-bold uppercase flex items-center gap-2">
-                                                    <XCircle size={14} /> Stop
-                                                </button>
-                                            ) : (
-                                                <button
-                                                    onClick={runAllTests}
-                                                    disabled={!mqttConnected || selectedSuite.protocols.length === 0 || selectedProtocols.size === 0}
-                                                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold uppercase flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                                                >
-                                                    <Play size={14} /> {selectedProtocols.size > 0 ? `Run Selected (${selectedProtocols.size})` : 'Select Protocols'}
-                                                </button>
-                                            )
-                                        )}
-                                        {currentRun && (
-                                            <button onClick={() => setShowReportModal(true)} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold uppercase flex items-center gap-2">
-                                                <FileJson size={14} /> Export Report
-                                            </button>
-                                        )}
-                                        <button onClick={() => setIsAddingProtocol(true)} className="p-2 bg-slate-700 hover:bg-slate-600 text-white rounded-xl"><Plus size={18} /></button>
-                                    </div>
-                                </div>
-
-                                {/* Tab Bar - Dynamic based on selection */}
-                                <div className="flex gap-1 px-4 border-b border-slate-800 mb-2 shrink-0">
-                                    {selectedProtocolId ? (
-                                        // Protocol selected - Only show Edit tab
-                                        <button
-                                            className="px-4 py-2 border-b-2 border-indigo-500 text-indigo-400 text-sm font-bold"
-                                        >
-                                            Edit Protocol
-                                        </button>
-                                    ) : (
-                                        // Suite selected - Show Overview and Results
-                                        <>
-                                            {(['overview', 'results'] as const).map(tab => (
-                                                <button
-                                                    key={tab}
-                                                    onClick={() => setRightPanelTab(tab)}
-                                                    className={`px-4 py-2 border-b-2 transition-colors text-sm font-bold ${rightPanelTab === tab ? 'border-indigo-500 text-indigo-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}
-                                                >
-                                                    {tab.charAt(0).toUpperCase() + tab.slice(1)}
-                                                </button>
-                                            ))}
-                                        </>
-                                    )}
-                                </div>
-
-                                {/* Overview Tab */}
-                                {rightPanelTab === 'overview' && (
-                                    <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">
-                                        {/* Current Run Summary */}
-                                        {currentRun && (
-                                            <div className={`p-4 rounded-xl border flex items-center justify-between ${currentRun.status === 'COMPLETED' ? 'bg-emerald-500/10 border-emerald-500/30' : currentRun.status === 'FAILED' ? 'bg-red-500/10 border-red-500/30' : 'bg-blue-500/10 border-blue-500/30'}`}>
-                                                <div className="flex items-center gap-4">
-                                                    {currentRun.status === 'COMPLETED' && <CheckCircle size={24} className="text-emerald-400" />}
-                                                    {currentRun.status === 'FAILED' && <XCircle size={24} className="text-red-400" />}
-                                                    {currentRun.status === 'RUNNING' && <RefreshCw size={24} className="text-blue-400 animate-spin" />}
-                                                    <div>
-                                                        <div className="text-base font-bold text-white">{currentRun.status === 'RUNNING' ? 'Testing...' : currentRun.status === 'COMPLETED' ? 'All Tests Passed' : 'Some Tests Failed'}</div>
-                                                        <div className="text-xs text-slate-400">Device: {currentRun.deviceName}</div>
-                                                        {/* Progress */}
-                                                        {testProgress && currentRun.status === 'RUNNING' && (
-                                                            <div className="mt-2">
-                                                                <div className="flex items-center gap-2 text-xs text-slate-300">
-                                                                    <span className="font-mono">{testProgress.current}/{testProgress.total}</span>
-                                                                    <span className="text-slate-500">|</span>
-                                                                    <span className="truncate max-w-[200px]">{testProgress.currentProtocol}</span>
-                                                                    {testProgress.current > 0 && (
-                                                                        <>
-                                                                            <span className="text-slate-500">|</span>
-                                                                            <span className="text-slate-400">
-                                                                                ~{Math.ceil(((Date.now() - testProgress.startTime) / testProgress.current) * (testProgress.total - testProgress.current) / 1000)}s 剩余
+                                            <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">
+                                                {/* Current Run Summary */}
+                                                {/* Test History Table */}
+                                                <div className="flex-1 overflow-auto custom-scrollbar">
+                                                    <table className="w-full text-left border-collapse">
+                                                        <thead className="bg-slate-950 sticky top-0 z-10">
+                                                            <tr>
+                                                                <th className="p-4 text-sm font-bold text-slate-300 uppercase border-b border-slate-800">ID</th>
+                                                                <th className="p-4 text-sm font-bold text-slate-300 uppercase border-b border-slate-800">协议库名称</th>
+                                                                <th className="p-4 text-sm font-bold text-slate-300 uppercase border-b border-slate-800">设备标识 (UUID)</th>
+                                                                <th className="p-4 text-sm font-bold text-slate-300 uppercase border-b border-slate-800">执行状态</th>
+                                                                <th className="p-4 text-sm font-bold text-slate-300 uppercase border-b border-slate-800">测试内容</th>
+                                                                <th className="p-4 text-sm font-bold text-slate-300 uppercase border-b border-slate-800">创建时间</th>
+                                                                <th className="p-4 text-sm font-bold text-slate-300 uppercase border-b border-slate-800 text-right">操作</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody className="divide-y divide-slate-800">
+                                                            {(selectedSuite.testRuns || []).length === 0 ? (
+                                                                <tr>
+                                                                    <td colSpan={7} className="p-8 text-center text-slate-500 text-sm">
+                                                                        暂无测试记录
+                                                                    </td>
+                                                                </tr>
+                                                            ) : (
+                                                                (selectedSuite.testRuns || []).map((run, index) => (
+                                                                    <tr key={run.id} className="hover:bg-slate-800/30 transition-colors select-text group">
+                                                                        <td className="p-4 text-sm text-slate-400">{index + 1}</td>
+                                                                        <td className="p-4 text-sm font-medium text-white">{run.suiteName}</td>
+                                                                        <td className="p-4 text-sm text-slate-400">{run.deviceId}</td>
+                                                                        <td className="p-4">
+                                                                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold ${run.status === 'COMPLETED'
+                                                                                ? run.summary.failed === 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'
+                                                                                : 'bg-blue-500/10 text-blue-400'
+                                                                                }`}>
+                                                                                {run.status === 'COMPLETED'
+                                                                                    ? run.summary.failed === 0 ? '成功' : '失败'
+                                                                                    : run.status}
                                                                             </span>
-                                                                        </>
-                                                                    )}
-                                                                </div>
-                                                                <div className="w-full bg-slate-700 rounded-full h-1.5 mt-1.5">
-                                                                    <div
-                                                                        className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
-                                                                        style={{ width: `${(testProgress.current / testProgress.total) * 100}%` }}
-                                                                    />
-                                                                </div>
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                                <div className="flex items-center gap-4 text-sm">
-                                                    <span className="text-emerald-400 font-bold">{currentRun.summary.passed} Pass</span>
-                                                    <span className="text-red-400 font-bold">{currentRun.summary.failed} Fail</span>
-                                                    <span className="text-amber-400 font-bold">{currentRun.summary.timeout} Timeout</span>
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {/* Suite Overview Cards */}
-                                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                                            {/* Total Protocols */}
-                                            <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
-                                                <div className="text-3xl font-black text-white">{selectedSuite.protocols.length}</div>
-                                                <div className="text-xs text-slate-400 mt-1">Total Protocols</div>
-                                            </div>
-
-                                            {/* Verified Count */}
-                                            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4">
-                                                <div className="text-3xl font-black text-emerald-400">
-                                                    {selectedSuite.protocols.filter(p => p.reviewStatus === 'VERIFIED').length}
-                                                </div>
-                                                <div className="text-xs text-emerald-400/70 mt-1">Verified</div>
-                                            </div>
-
-                                            {/* Unverified Count */}
-                                            <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4">
-                                                <div className="text-3xl font-black text-amber-400">
-                                                    {selectedSuite.protocols.filter(p => p.reviewStatus !== 'VERIFIED').length}
-                                                </div>
-                                                <div className="text-xs text-amber-400/70 mt-1">Pending Review</div>
-                                            </div>
-
-                                            {/* Test Pass Rate */}
-                                            <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-xl p-4">
-                                                <div className="text-3xl font-black text-indigo-400">
-                                                    {(() => {
-                                                        const tested = selectedSuite.protocols.filter(p =>
-                                                            Object.values(p.methods).some(m => m?.lastResult !== undefined)
-                                                        );
-                                                        if (tested.length === 0) return '--';
-                                                        const passed = tested.filter(p =>
-                                                            Object.values(p.methods).every(m => !m?.enabled || m?.lastResult?.status === 'PASS')
-                                                        ).length;
-                                                        return Math.round((passed / tested.length) * 100) + '%';
-                                                    })()}
-                                                </div>
-                                                <div className="text-xs text-indigo-400/70 mt-1">Pass Rate</div>
-                                            </div>
-                                        </div>
-
-                                        {/* Method Distribution */}
-                                        <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
-                                            <h4 className="text-sm font-bold text-slate-300 mb-3">Method Distribution</h4>
-                                            <div className="flex gap-6">
-                                                {ALL_METHODS.map(method => {
-                                                    const count = selectedSuite.protocols.filter(p => p.methods[method]?.enabled).length;
-                                                    return (
-                                                        <div key={method} className="flex items-center gap-2">
-                                                            <div className={`w-3 h-3 rounded ${METHOD_COLORS[method]?.bg || 'bg-slate-500'}`} />
-                                                            <span className="text-sm font-bold text-white">{method}</span>
-                                                            <span className="text-sm text-slate-400">({count})</span>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </div>
-
-                                        {/* Empty State */}
-                                        {selectedSuite.protocols.length === 0 && (
-                                            <div className="flex-1 flex flex-col items-center justify-center text-slate-500 py-12">
-                                                <FolderOpen size={48} className="mb-4 opacity-30" />
-                                                <p className="text-sm">This test suite has no protocols yet</p>
-                                                <p className="text-xs mt-2 text-slate-600">Click "Auto Gen" or "+" to add protocols</p>
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-
-                                {/* Protocol Edit/Review Panel - Only show when a protocol is selected */}
-                                {selectedProtocolId && (
-                                    <div className="flex-1 overflow-hidden flex flex-col bg-slate-900/50 rounded-xl m-4 border border-slate-800 relative">
-                                        {/* Consolidated Header & Tabs */}
-                                        <div className="flex items-center justify-between px-4 border-b border-slate-800 shrink-0 h-12 bg-slate-900/50">
-                                            {/* Left: Tabs */}
-                                            <div className="flex gap-1 h-full">
-                                                {(['edit', 'review'] as const).map(tab => (
-                                                    <button
-                                                        key={tab}
-                                                        onClick={() => setRightPanelTab(tab)}
-                                                        className={`px-5 h-full border-b-2 transition-colors text-sm font-bold uppercase tracking-wider ${(rightPanelTab === tab || (rightPanelTab === 'overview' && tab === 'edit'))
-                                                            ? 'border-indigo-500 text-indigo-400'
-                                                            : 'border-transparent text-slate-500 hover:text-slate-300'
-                                                            }`}
-                                                    >
-                                                        {tab === 'edit' ? 'Edit' : 'Review & Run'}
-                                                    </button>
-                                                ))}
-                                            </div>
-
-                                            {/* Right: Protocol Info & Close */}
-                                            <div className="flex items-center gap-4">
-                                                <span className="text-sm font-mono text-slate-400">{newProtocol.namespace || 'Protocol'}</span>
-                                                <span className={`text-xs font-bold px-2 py-1 rounded ${newProtocol.reviewStatus === 'VERIFIED' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
-                                                    {newProtocol.reviewStatus === 'VERIFIED' ? 'Verified' : 'Pending'}
-                                                </span>
-                                                <div className="w-px h-4 bg-slate-700" />
-                                                <button
-                                                    onClick={() => {
-                                                        setSelectedProtocolId(null);
-                                                        setRightPanelTab('overview');
-                                                    }}
-                                                    className="text-slate-500 hover:text-white transition-colors"
-                                                    title="Close"
-                                                >
-                                                    <X size={18} />
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        {/* Edit Content */}
-                                        {(rightPanelTab === 'edit' || rightPanelTab === 'overview') && (
-                                            <div className="flex-1 overflow-hidden flex flex-col p-4">
-                                                {/* Step Progress */}
-                                                {/* Step Progress & Actions */}
-                                                <div className="flex items-center justify-between gap-4 mb-2 shrink-0 bg-slate-900/30 p-2 rounded-lg border border-slate-800/50">
-                                                    {/* Steps */}
-                                                    <div className="flex items-center gap-2">
-                                                        <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${wizardStep >= 1 ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-400'}`}>1</div>
-                                                        <div className={`w-8 h-0.5 rounded ${wizardStep >= 2 ? 'bg-indigo-600' : 'bg-slate-700'}`} />
-                                                        <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${wizardStep >= 2 ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-400'}`}>2</div>
-                                                    </div>
-
-                                                    {/* Actions */}
-                                                    <div className="flex items-center gap-3">
-                                                        {/* Cancel button removed */}
-                                                        {wizardStep > 1 && (
-                                                            <button
-                                                                onClick={() => setWizardStep(s => s - 1)}
-                                                                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-bold uppercase"
-                                                            >
-                                                                Back
-                                                            </button>
-                                                        )}
-                                                        {wizardStep === 1 ? (
-                                                            <button
-                                                                onClick={() => {
-                                                                    if (!newProtocol.namespace.trim()) {
-                                                                        setErrorMessage('请输入 Namespace');
-                                                                        return;
-                                                                    }
-                                                                    if (!getEnabledMethods().length) {
-                                                                        setErrorMessage('请至少选择一个 Method');
-                                                                        return;
-                                                                    }
-                                                                    setWizardStep(2);
-                                                                    setCurrentMethodIndex(0);
-                                                                }}
-                                                                className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-bold uppercase"
-                                                            >
-                                                                Next
-                                                            </button>
-                                                        ) : (
-                                                            <button
-                                                                onClick={addProtocolToSuite}
-                                                                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-bold uppercase"
-                                                            >
-                                                                {newProtocol.id ? 'Save' : 'Create'}
-                                                            </button>
-                                                        )}
-                                                    </div>
-                                                </div>
-
-                                                {errorMessage && (
-                                                    <div className="bg-red-500/10 border border-red-500/50 p-4 mb-4 rounded-lg flex items-center justify-between mx-1">
-                                                        <div className="flex items-center gap-2 text-red-400">
-                                                            <AlertTriangle size={20} />
-                                                            <span className="font-bold">{errorMessage}</span>
-                                                        </div>
-                                                        <button onClick={() => setErrorMessage(null)} className="text-red-400 hover:text-red-300">
-                                                            <X size={20} />
-                                                        </button>
-                                                    </div>
-                                                )}
-
-                                                <div className="flex-1 overflow-y-auto custom-scrollbar">
-                                                    {/* Step 1: Basic Info & Method Selection */}
-                                                    {wizardStep === 1 && (
-                                                        <div className="space-y-4">
-                                                            <div>
-                                                                <label className="text-xs font-bold text-slate-400 uppercase mb-1 block">Namespace *</label>
-                                                                <div className="flex gap-2">
-                                                                    <input
-                                                                        value={newProtocol.namespace}
-                                                                        onChange={e => setNewProtocol(p => ({ ...p, namespace: e.target.value }))}
-                                                                        placeholder="例如：Appliance.Control.ToggleX"
-                                                                        className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white font-mono outline-none focus:border-indigo-500"
-                                                                    />
-                                                                    {/* P1 优化: 智能校验提示 */}
-                                                                    {!/^[A-Z][a-zA-Z0-9]*(\.[A-Z][a-zA-Z0-9]*)+$/.test(newProtocol.namespace) && newProtocol.namespace && (
-                                                                        <div className="absolute left-0 -bottom-6 text-xs text-amber-500 flex items-center gap-1">
-                                                                            <AlertTriangle size={12} />
-                                                                            <span>Namespace 格式建议: Appliance.Module.Function (大驼峰命名)</span>
-                                                                        </div>
-                                                                    )}
-                                                                    {/* P1 优化: 模板选择按钮 */}
-                                                                    <div className="relative group">
-                                                                        <button className="h-full px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-2 text-sm font-bold transition-colors">
-                                                                            <FolderOpen size={16} /> 模板
-                                                                        </button>
-                                                                        <div className="absolute right-0 top-full mt-2 w-80 bg-slate-900 border border-slate-700 rounded-xl shadow-xl overflow-hidden hidden group-hover:block z-50">
-                                                                            {/* Phase 1: Category Tabs */}
-                                                                            <div className="p-2 bg-slate-800/50 border-b border-slate-700">
-                                                                                <div className="text-xs font-bold text-slate-400 uppercase mb-2">选择协议模板</div>
-                                                                                <div className="flex gap-1 flex-wrap">
-                                                                                    {(['all', 'control', 'system', 'config', 'ota', 'sensor'] as const).map(cat => (
-                                                                                        <button
-                                                                                            key={cat}
-                                                                                            onClick={(e) => { e.stopPropagation(); setTemplateCategory(cat); }}
-                                                                                            className={`px-2 py-1 text-[10px] rounded ${templateCategory === cat
-                                                                                                ? 'bg-indigo-600 text-white'
-                                                                                                : 'bg-slate-700 text-slate-400 hover:text-white'
-                                                                                                }`}
-                                                                                        >
-                                                                                            {cat === 'all' ? '全部' : cat.toUpperCase()}
-                                                                                        </button>
-                                                                                    ))}
-                                                                                </div>
-                                                                            </div>
-                                                                            <div className="max-h-64 overflow-y-auto custom-scrollbar p-1">
-                                                                                {PROTOCOL_TEMPLATES
-                                                                                    .filter(tpl => templateCategory === 'all' || tpl.category === templateCategory)
-                                                                                    .map(tpl => {
-                                                                                        const catColors: Record<string, string> = {
-                                                                                            control: 'bg-blue-500',
-                                                                                            system: 'bg-emerald-500',
-                                                                                            config: 'bg-amber-500',
-                                                                                            ota: 'bg-purple-500',
-                                                                                            sensor: 'bg-cyan-500'
-                                                                                        };
-                                                                                        return (
-                                                                                            <button
-                                                                                                key={tpl.namespace}
-                                                                                                onClick={() => {
-                                                                                                    const methods: any = {};
-                                                                                                    ALL_METHODS.forEach(m => {
-                                                                                                        if (tpl.methods.includes(m)) {
-                                                                                                            const preset = tpl.presets?.[m];
-                                                                                                            methods[m] = {
-                                                                                                                enabled: true,
-                                                                                                                payload: preset?.payload || '{}',
-                                                                                                                schema: preset?.schema || '{}'
-                                                                                                            };
-                                                                                                        } else {
-                                                                                                            methods[m] = { enabled: false, payload: '{}', schema: '{}' };
-                                                                                                        }
-                                                                                                    });
-                                                                                                    setNewProtocol(p => ({
-                                                                                                        ...p,
-                                                                                                        namespace: tpl.namespace,
-                                                                                                        name: tpl.namespace,
-                                                                                                        description: tpl.description,
-                                                                                                        methods
-                                                                                                    }));
-                                                                                                    addTestLog('INFO', `Applied template: ${tpl.name}`);
-                                                                                                }}
-                                                                                                className="w-full text-left p-2 hover:bg-slate-800 rounded-lg group/item"
-                                                                                            >
-                                                                                                <div className="flex items-center gap-2">
-                                                                                                    <span className={`w-2 h-2 rounded-full ${catColors[tpl.category]}`} />
-                                                                                                    <span className="text-sm font-bold text-white group-hover/item:text-indigo-400">{tpl.name}</span>
-                                                                                                </div>
-                                                                                                <div className="text-xs text-slate-500 font-mono truncate ml-4">{tpl.namespace}</div>
-                                                                                            </button>
-                                                                                        );
-                                                                                    })}
-                                                                            </div>
-                                                                        </div>
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                            {/* Display Name field removed as per user request */}
-                                                            <div>
-                                                                <label className="text-xs font-bold text-slate-400 uppercase mb-2 block">选择支持的 Methods *</label>
-                                                                <div className="flex flex-wrap gap-3">
-                                                                    {ALL_METHODS.map(method => {
-                                                                        const methodDesc: Record<RequestMethod, string> = {
-                                                                            GET: '查询 → GETACK',
-                                                                            SET: '设置 → SETACK',
-                                                                            PUSH: '设备推送',
-                                                                            SYNC: '同步 → SYNCACK',
-                                                                            DELETE: '删除 → DELETEACK'
-                                                                        };
-                                                                        const isEnabled = newProtocol.methods[method]?.enabled || false;
-                                                                        return (
-                                                                            <label
-                                                                                key={method}
-                                                                                className={`inline-flex items-center gap-2.5 px-3 py-2 rounded-lg border cursor-pointer transition-all ${isEnabled
-                                                                                    ? `${METHOD_COLORS[method]?.bgLight} border-current ${METHOD_COLORS[method]?.text}`
-                                                                                    : 'bg-slate-800/50 border-slate-700 hover:border-slate-500 text-slate-400'
-                                                                                    }`}
-                                                                            >
-                                                                                <input
-                                                                                    type="checkbox"
-                                                                                    checked={isEnabled}
-                                                                                    onChange={e => setNewProtocol(p => ({
-                                                                                        ...p,
-                                                                                        methods: {
-                                                                                            ...p.methods,
-                                                                                            [method]: { ...(p.methods[method] || { requestPayload: {}, responseSchema: {} }), enabled: e.target.checked }
-                                                                                        }
-                                                                                    }))}
-                                                                                    className="w-4 h-4 rounded accent-current"
-                                                                                />
-                                                                                <span className="text-sm font-bold">{method}</span>
-                                                                                <span className="text-xs opacity-70">{methodDesc[method]}</span>
-                                                                            </label>
-                                                                        );
-                                                                    })}
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    )}
-
-                                                    {/* Step 2: Configure Each Method */}
-                                                    {wizardStep === 2 && (
-                                                        <div className="min-h-full flex flex-col">
-                                                            {/* Method Tabs */}
-                                                            <div className="sticky top-0 z-20 bg-slate-900 flex gap-2 border-b border-slate-700 pb-2 mb-4 pt-1">
-                                                                {getEnabledMethods().map((method, idx) => (
-                                                                    <button
-                                                                        key={method}
-                                                                        onClick={() => setCurrentMethodIndex(idx)}
-                                                                        className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${currentMethodIndex === idx
-                                                                            ? getMethodActiveTabClasses(method)
-                                                                            : 'bg-slate-800 text-slate-400 hover:text-white'
-                                                                            }`}
-                                                                    >
-                                                                        {method}
-                                                                    </button>
-                                                                ))}
-                                                            </div>
-
-                                                            {/* Current Method Config */}
-                                                            {(() => {
-                                                                const methods = getEnabledMethods();
-                                                                const currentMethod = methods[currentMethodIndex];
-                                                                if (!currentMethod) return null;
-                                                                const methodConfig = newProtocol.methods[currentMethod];
-                                                                if (!methodConfig) return null;
-
-                                                                return (
-                                                                    <div className="flex-1 flex flex-col gap-4">
-                                                                        {/* Edit Mode Toggle */}
-                                                                        <div className="flex items-center gap-2">
-                                                                            <span className="text-xs text-slate-500">编辑模式:</span>
-                                                                            <button
-                                                                                onClick={() => setEditMode('json')}
-                                                                                className={`px-3 py-1 text-xs rounded-lg ${editMode === 'json' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
-                                                                            >
-                                                                                JSON
-                                                                            </button>
-                                                                            <button
-                                                                                onClick={() => setEditMode('keyvalue')}
-                                                                                className={`px-3 py-1 text-xs rounded-lg ${editMode === 'keyvalue' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
-                                                                            >
-                                                                                Key-Value
-                                                                            </button>
-                                                                        </div>
-
-                                                                        {/* Request Payload - 仅对非 PUSH 方法显示 */}
-                                                                        {currentMethod !== 'PUSH' ? (
-                                                                            <div className="w-full flex flex-col">
-                                                                                <div className="flex items-center justify-between mb-2 shrink-0">
-                                                                                    <label className="text-xs font-bold text-slate-400 uppercase">
-                                                                                        Request Payload
-                                                                                        <span className="text-slate-600 font-normal ml-2">(发送给设备的数据)</span>
-                                                                                    </label>
-                                                                                    <button
-                                                                                        onClick={() => {
-                                                                                            setJsonExampleInput('');
-                                                                                            setJsonExtractMode('payload');
-                                                                                            setShowJsonToSchemaModal(true);
-                                                                                        }}
-                                                                                        className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1"
-                                                                                    >
-                                                                                        <Copy size={12} /> 从示例提取 Payload
-                                                                                    </button>
-                                                                                </div>
-                                                                                {editMode === 'json' ? (
-                                                                                    <div className="relative w-full">
-                                                                                        <textarea
-                                                                                            value={methodConfig.payload}
-                                                                                            onChange={e => setNewProtocol(p => ({
-                                                                                                ...p,
-                                                                                                methods: {
-                                                                                                    ...p.methods,
-                                                                                                    [currentMethod]: { ...p.methods[currentMethod], payload: e.target.value }
-                                                                                                }
-                                                                                            }))}
-                                                                                            placeholder='{"key": "value"}'
-                                                                                            rows={Math.min(Math.max((methodConfig.payload || '').split('\n').length, 2), 20)}
-                                                                                            className={`w-full bg-slate-950 border rounded-lg px-4 py-3 text-sm font-mono outline-none resize-y ${(() => { try { JSON.parse(methodConfig.payload); return 'border-slate-700 text-emerald-400 focus:border-indigo-500'; } catch { return 'border-red-500/50 text-red-400 focus:border-red-500'; } })()}`}
-                                                                                        />
-                                                                                        {(() => {
-                                                                                            try { JSON.parse(methodConfig.payload); return null; }
-                                                                                            catch {
-                                                                                                return (
-                                                                                                    <div className="absolute right-4 bottom-4 text-red-500 text-xs flex items-center gap-1 bg-slate-900/90 px-2 py-1 rounded border border-red-500/30 pointer-events-none">
-                                                                                                        <AlertTriangle size={12} /> JSON 格式错误
-                                                                                                    </div>
-                                                                                                );
-                                                                                            }
-                                                                                        })()}
-                                                                                    </div>
-                                                                                ) : (
-                                                                                    <div className="min-h-[100px] max-h-[500px] bg-slate-950 border border-slate-700 rounded-lg p-3 space-y-2 overflow-y-auto custom-scrollbar resize-y">
-                                                                                        <KeyValueEditor
-                                                                                            value={methodConfig.payload}
-                                                                                            onChange={(v) => setNewProtocol(p => ({
-                                                                                                ...p,
-                                                                                                methods: {
-                                                                                                    ...p.methods,
-                                                                                                    [currentMethod]: { ...p.methods[currentMethod], payload: v }
-                                                                                                }
-                                                                                            }))}
-                                                                                        />
-                                                                                    </div>
-                                                                                )}
-                                                                            </div>
-                                                                        ) : (
-                                                                            <div className="bg-purple-500/10 border border-purple-500/30 rounded-lg p-4">
-                                                                                <p className="text-sm text-purple-300">
-                                                                                    <span className="font-bold">PUSH</span> 是设备主动推送的消息类型，不需要配置 Request Payload。
-                                                                                </p>
-                                                                                <p className="text-xs text-purple-400 mt-2">
-                                                                                    只需配置 Expected Response Schema 来验证设备推送的消息格式。
-                                                                                </p>
-                                                                            </div>
-                                                                        )}
-
-                                                                        {/* Expected Response Schema */}
-                                                                        <div className="w-full flex flex-col">
-                                                                            <div className="flex items-center justify-between mb-2 shrink-0">
-                                                                                <label className="text-xs font-bold text-slate-400 uppercase">
-                                                                                    Expected Response Schema
-                                                                                    <span className="text-slate-600 font-normal ml-2">(用于验证设备响应)</span>
-                                                                                </label>
+                                                                        </td>
+                                                                        <td className="p-4 text-sm text-slate-400">
+                                                                            {run.results.length === 1 && run.results[0]
+                                                                                ? <span className="text-slate-300" title={`${run.results[0].namespace || '?'} ${run.results[0].method || ''}`}>
+                                                                                    {run.results[0].namespace ? run.results[0].namespace.split('.').pop() : 'Unknown'} {run.results[0].method}
+                                                                                </span>
+                                                                                : <span>{run.results.length} 个用例</span>
+                                                                            }
+                                                                        </td>
+                                                                        <td className="p-4 text-sm text-slate-400">
+                                                                            {new Date(run.startTime).toLocaleString()}
+                                                                        </td>
+                                                                        <td className="p-4 text-right">
+                                                                            <div className="flex items-center justify-end gap-2">
                                                                                 <button
                                                                                     onClick={() => {
-                                                                                        setJsonExampleInput('');
-                                                                                        setJsonExtractMode('schema');
-                                                                                        setShowJsonToSchemaModal(true);
+                                                                                        setViewingResult({ batchResult: run });
+                                                                                        setShowResultViewer(true);
                                                                                     }}
-                                                                                    className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1"
+                                                                                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded transition-colors"
                                                                                 >
-                                                                                    <Zap size={12} /> 从 JSON 示例生成
+                                                                                    详情
+                                                                                </button>
+                                                                                <button
+                                                                                    onClick={() => {
+                                                                                        const data = JSON.stringify(run, null, 2);
+                                                                                        const blob = new Blob([data], { type: 'application/json' });
+                                                                                        const url = URL.createObjectURL(blob);
+                                                                                        const a = document.createElement('a');
+                                                                                        a.href = url;
+                                                                                        a.download = `test_run_${run.id}.json`;
+                                                                                        a.click();
+                                                                                        URL.revokeObjectURL(url);
+                                                                                    }}
+                                                                                    className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded transition-colors"
+                                                                                >
+                                                                                    导出
                                                                                 </button>
                                                                             </div>
-                                                                            {editMode === 'json' ? (
-                                                                                <div className="relative w-full">
-                                                                                    <textarea
-                                                                                        value={methodConfig.schema}
-                                                                                        onChange={e => setNewProtocol(p => ({
-                                                                                            ...p,
-                                                                                            methods: {
-                                                                                                ...p.methods,
-                                                                                                [currentMethod]: { ...p.methods[currentMethod], schema: e.target.value }
-                                                                                            }
-                                                                                        }))}
-                                                                                        placeholder='{"type": "object", "required": ["header", "payload"]}'
-                                                                                        rows={Math.min(Math.max((methodConfig.schema || '').split('\n').length, 2), 20)}
-                                                                                        className={`w-full bg-slate-950 border rounded-lg px-4 py-3 text-sm font-mono outline-none resize-y ${(() => { try { JSON.parse(methodConfig.schema); return 'border-slate-700 text-emerald-400 focus:border-indigo-500'; } catch { return 'border-red-500/50 text-red-400 focus:border-red-500'; } })()}`}
-                                                                                    />
-                                                                                    {(() => {
-                                                                                        try { JSON.parse(methodConfig.schema); return null; }
-                                                                                        catch {
-                                                                                            return (
-                                                                                                <div className="absolute right-4 bottom-4 text-red-500 text-xs flex items-center gap-1 bg-slate-900/90 px-2 py-1 rounded border border-red-500/30 pointer-events-none">
-                                                                                                    <AlertTriangle size={12} /> JSON 格式错误
-                                                                                                </div>
-                                                                                            );
-                                                                                        }
-                                                                                    })()}
-                                                                                    <p className="text-[10px] text-slate-600 mt-1 shrink-0 absolute bottom-[-20px] left-0">
-                                                                                        💡 提示：点击「从 JSON 示例生成」，粘贴协议文档中的响应 JSON 即可自动生成 Schema
-                                                                                    </p>
-                                                                                </div>
-                                                                            ) : (
-                                                                                <div className="min-h-[100px] max-h-[500px] bg-slate-950 border border-slate-700 rounded-lg p-3 overflow-y-auto custom-scrollbar resize-y">
-                                                                                    {Object.keys(fieldConfigSelection).length === 0 ? (
-                                                                                        <div className="h-full flex flex-col items-center justify-center text-slate-500">
-                                                                                            <p>Schema 为空或解析失败</p>
-                                                                                            <button
-                                                                                                onClick={() => setEditMode('json')}
-                                                                                                className="mt-2 text-indigo-400 hover:text-indigo-300 underline"
-                                                                                            >
-                                                                                                切换回 JSON 模式查看
-                                                                                            </button>
-                                                                                        </div>
-                                                                                    ) : (
-                                                                                        <div className="space-y-1">
-                                                                                            {buildFieldTree(fieldConfigSelection).map(node => (
-                                                                                                <FieldTreeItem
-                                                                                                    key={node.fullPath}
-                                                                                                    node={node}
-                                                                                                    level={0}
-                                                                                                    onUpdate={(path, updates) => {
-                                                                                                        const newSelection = {
-                                                                                                            ...fieldConfigSelection,
-                                                                                                            [path]: { ...fieldConfigSelection[path], ...updates }
-                                                                                                        };
-                                                                                                        setFieldConfigSelection(newSelection);
-
-                                                                                                        // Sync back to protocol schema
-                                                                                                        const newSchema = applyRequiredFields(generatedSchema, newSelection);
-                                                                                                        setNewProtocol(p => ({
-                                                                                                            ...p,
-                                                                                                            methods: {
-                                                                                                                ...p.methods,
-                                                                                                                [currentMethod]: {
-                                                                                                                    ...p.methods[currentMethod],
-                                                                                                                    schema: JSON.stringify(newSchema, null, 2)
-                                                                                                                }
-                                                                                                            }
-                                                                                                        }));
-                                                                                                    }}
-                                                                                                    onRename={(oldPath, newPath) => {
-                                                                                                        if (fieldConfigSelection[newPath]) {
-                                                                                                            showToast('warning', 'Field name already exists');
-                                                                                                            return;
-                                                                                                        }
-                                                                                                        const newSelection = { ...fieldConfigSelection };
-                                                                                                        // Rename entry and all children
-                                                                                                        Object.keys(newSelection).forEach(key => {
-                                                                                                            if (key === oldPath || key.startsWith(oldPath + '.')) {
-                                                                                                                const suffix = key.substring(oldPath.length);
-                                                                                                                const newKey = newPath + suffix;
-                                                                                                                newSelection[newKey] = newSelection[key];
-                                                                                                                delete newSelection[key];
-                                                                                                            }
-                                                                                                        });
-                                                                                                        setFieldConfigSelection(newSelection);
-                                                                                                        // Sync back
-                                                                                                        const newSchema = applyRequiredFields(generatedSchema, newSelection);
-                                                                                                        setNewProtocol(p => ({
-                                                                                                            ...p,
-                                                                                                            methods: {
-                                                                                                                ...p.methods,
-                                                                                                                [currentMethod]: {
-                                                                                                                    ...p.methods[currentMethod],
-                                                                                                                    schema: JSON.stringify(newSchema, null, 2)
-                                                                                                                }
-                                                                                                            }
-                                                                                                        }));
-                                                                                                    }}
-                                                                                                    onAdd={(parentPath) => {
-                                                                                                        let newName = 'newField';
-                                                                                                        let counter = 1;
-                                                                                                        while (fieldConfigSelection[`${parentPath}.${newName}`]) {
-                                                                                                            newName = `newField${counter++}`;
-                                                                                                        }
-                                                                                                        const newPath = `${parentPath}.${newName}`;
-                                                                                                        const newSelection = {
-                                                                                                            ...fieldConfigSelection,
-                                                                                                            [newPath]: { required: false, type: 'string', value: '' }
-                                                                                                        };
-                                                                                                        setFieldConfigSelection(newSelection);
-                                                                                                        // Sync back
-                                                                                                        const newSchema = applyRequiredFields(generatedSchema, newSelection);
-                                                                                                        setNewProtocol(p => ({
-                                                                                                            ...p,
-                                                                                                            methods: {
-                                                                                                                ...p.methods,
-                                                                                                                [currentMethod]: {
-                                                                                                                    ...p.methods[currentMethod],
-                                                                                                                    schema: JSON.stringify(newSchema, null, 2)
-                                                                                                                }
-                                                                                                            }
-                                                                                                        }));
-                                                                                                    }}
-                                                                                                    onDelete={(path) => {
-                                                                                                        const newSelection = { ...fieldConfigSelection };
-                                                                                                        const deleteRecursive = (p: string) => {
-                                                                                                            delete newSelection[p];
-                                                                                                            Object.keys(newSelection).forEach(k => {
-                                                                                                                if (k.startsWith(p + '.')) deleteRecursive(k);
-                                                                                                            });
-                                                                                                        };
-                                                                                                        deleteRecursive(path);
-                                                                                                        setFieldConfigSelection(newSelection);
-
-                                                                                                        // Sync back to protocol schema
-                                                                                                        const newSchema = applyRequiredFields(generatedSchema, newSelection);
-                                                                                                        setNewProtocol(p => ({
-                                                                                                            ...p,
-                                                                                                            methods: {
-                                                                                                                ...p.methods,
-                                                                                                                [currentMethod]: {
-                                                                                                                    ...p.methods[currentMethod],
-                                                                                                                    schema: JSON.stringify(newSchema, null, 2)
-                                                                                                                }
-                                                                                                            }
-                                                                                                        }));
-                                                                                                    }}
-                                                                                                />
-                                                                                            ))}
-                                                                                        </div>
-                                                                                    )
-                                                                                    }
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                    </div>
-                                                                );
-                                                            })()}
-                                                        </div>
-                                                    )
-                                                    }
+                                                                        </td>
+                                                                    </tr>
+                                                                ))
+                                                            )}
+                                                        </tbody>
+                                                    </table>
                                                 </div>
 
+                                                {/* Suite Overview Cards */}
 
+
+                                                {/* Method Distribution */}
+
+
+                                                {/* Empty State */}
 
                                             </div>
                                         )}
 
-                                        {/* Review & Run Tab Content */}
-                                        {rightPanelTab === 'review' && (
-                                            <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">
-                                                {/* Verification Status Card */}
-                                                <div className={`p-4 rounded-xl border ${newProtocol.reviewStatus === 'VERIFIED' ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-amber-500/10 border-amber-500/30'}`}>
-                                                    <div className="flex items-center justify-between">
-                                                        <div className="flex items-center gap-3">
-                                                            {newProtocol.reviewStatus === 'VERIFIED' ? (
-                                                                <ShieldCheck size={24} className="text-emerald-400" />
-                                                            ) : (
-                                                                <AlertTriangle size={24} className="text-amber-400" />
-                                                            )}
-                                                            <div>
-                                                                <div className={`text-lg font-bold ${newProtocol.reviewStatus === 'VERIFIED' ? 'text-emerald-400' : 'text-amber-400'}`}>
-                                                                    {newProtocol.reviewStatus === 'VERIFIED' ? 'Protocol Verified' : 'Pending Review'}
-                                                                </div>
-                                                                <div className="text-xs text-slate-400">
-                                                                    {newProtocol.reviewStatus === 'VERIFIED'
-                                                                        ? '此协议已通过审核，可以运行测试'
-                                                                        : '请审核协议配置后标记为已验证'}
+
+
+                                        {/* Protocol Edit/Review Panel - Only show when a protocol is selected */}
+                                        {selectedProtocolId && (
+                                            <div className="flex-1 overflow-hidden flex flex-col bg-slate-900/50 rounded-xl m-2 mt-1 border border-slate-800 relative">
+                                                {/* Consolidated Header & Tabs */}
+                                                <div className="flex items-center justify-between px-4 border-b border-slate-800 shrink-0 h-10 bg-slate-900/50">
+                                                    {/* Left: Tabs */}
+                                                    <div className="flex gap-1 h-full">
+                                                        {(['edit', 'review'] as const).map(tab => (
+                                                            <button
+                                                                key={tab}
+                                                                onClick={() => setRightPanelTab(tab)}
+                                                                className={`px-5 h-full border-b-2 transition-colors text-sm font-bold uppercase tracking-wider ${(rightPanelTab === tab || (rightPanelTab === 'overview' && tab === 'edit'))
+                                                                    ? 'border-indigo-500 text-indigo-400'
+                                                                    : 'border-transparent text-slate-500 hover:text-slate-300'
+                                                                    }`}
+                                                            >
+                                                                {tab === 'edit' ? 'Edit' : 'Workbench'}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+
+                                                    {/* Right: Protocol Info & Actions */}
+                                                    <div className="flex items-center gap-3">
+                                                        <span className="text-sm font-mono text-slate-400">{newProtocol.namespace || 'Protocol'}</span>
+                                                        <span className={`text-xs font-bold px-2 py-1 rounded ${newProtocol.reviewStatus === 'VERIFIED' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}`}>
+                                                            {newProtocol.reviewStatus === 'VERIFIED' ? 'Verified' : 'Unverified'}
+                                                        </span>
+
+                                                        {/* Protocol Actions (Moved from below) */}
+                                                        <div className="flex items-center gap-2 ml-2 pl-2 border-l border-slate-700">
+                                                            <button
+                                                                onClick={() => setShowCopyProtocolModal(true)}
+                                                                className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-2 text-xs font-bold transition-colors"
+                                                                title="Copy Protocol"
+                                                            >
+                                                                <Copy size={14} /> 复制
+                                                            </button>
+                                                            <div className="relative group">
+                                                                <button className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-2 text-xs font-bold transition-colors">
+                                                                    <FolderOpen size={14} /> 模板
+                                                                </button>
+                                                                <div className="absolute right-0 top-full mt-2 w-72 bg-slate-900 border border-slate-700 rounded-xl shadow-xl overflow-hidden hidden group-hover:block z-50">
+                                                                    <div className="p-2 bg-slate-800/50 border-b border-slate-700">
+                                                                        <div className="text-xs font-bold text-slate-400 uppercase mb-1">选择协议模板</div>
+                                                                        <div className="flex gap-1 flex-wrap">
+                                                                            {(['all', 'control', 'system', 'config', 'ota', 'sensor'] as const).map(cat => (
+                                                                                <button key={cat} onClick={(e) => { e.stopPropagation(); setTemplateCategory(cat); }}
+                                                                                    className={`px-2 py-0.5 text-xs rounded ${templateCategory === cat ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-400 hover:text-white'}`}>
+                                                                                    {cat === 'all' ? '全部' : cat.toUpperCase()}
+                                                                                </button>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="max-h-48 overflow-y-auto custom-scrollbar p-1">
+                                                                        {PROTOCOL_TEMPLATES.filter(tpl => templateCategory === 'all' || tpl.category === templateCategory).map(tpl => (
+                                                                            <button key={tpl.namespace} onClick={() => {
+                                                                                const methods: any = {};
+                                                                                ALL_METHODS.forEach(m => {
+                                                                                    if (tpl.methods.includes(m)) {
+                                                                                        const preset = tpl.presets?.[m];
+                                                                                        methods[m] = { enabled: true, payload: preset?.payload || '{}', schema: preset?.schema || '{}' };
+                                                                                    } else {
+                                                                                        methods[m] = { enabled: false, payload: '{}', schema: '{}' };
+                                                                                    }
+                                                                                });
+                                                                                setNewProtocol(p => ({ ...p, namespace: tpl.namespace, name: tpl.namespace, description: tpl.description, methods }));
+                                                                                addTestLog('INFO', `应用模板: ${tpl.name}`);
+                                                                            }} className="w-full text-left p-2 hover:bg-slate-800 rounded-lg">
+                                                                                <div className="text-sm font-bold text-white">{tpl.name}</div>
+                                                                                <div className="text-xs text-slate-500 font-mono truncate">{tpl.namespace}</div>
+                                                                            </button>
+                                                                        ))}
+                                                                    </div>
                                                                 </div>
                                                             </div>
-                                                        </div>
-                                                        {newProtocol.reviewStatus !== 'VERIFIED' && (
-                                                            <button
-                                                                onClick={() => {
-                                                                    setNewProtocol(p => ({ ...p, reviewStatus: 'VERIFIED' }));
-                                                                    // Also update in suites
-                                                                    if (selectedSuiteId && newProtocol.id) {
-                                                                        setSuites(prev => prev.map(s => {
-                                                                            if (s.id !== selectedSuiteId) return s;
-                                                                            return {
-                                                                                ...s,
-                                                                                protocols: s.protocols.map(p =>
-                                                                                    p.id === newProtocol.id ? { ...p, reviewStatus: 'VERIFIED' as const } : p
-                                                                                ),
-                                                                                updatedAt: Date.now()
-                                                                            };
-                                                                        }));
-                                                                    }
-                                                                }}
-                                                                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold flex items-center gap-2"
-                                                            >
-                                                                <ShieldCheck size={16} /> Mark as Verified
+                                                            <button onClick={addProtocolToSuite}
+                                                                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold uppercase shadow-lg shadow-emerald-900/20 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5">
+                                                                <Save size={14} /> {newProtocol.id ? '保存' : '创建'}
                                                             </button>
-                                                        )}
-                                                    </div>
-                                                </div>
-
-                                                {/* Protocol Summary */}
-                                                <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
-                                                    <h4 className="text-sm font-bold text-slate-300 mb-3">Protocol Summary</h4>
-                                                    <div className="grid grid-cols-2 gap-3 text-sm">
-                                                        <div>
-                                                            <span className="text-slate-500">Namespace:</span>
-                                                            <span className="ml-2 text-white font-mono">{newProtocol.namespace}</span>
-                                                        </div>
-                                                        <div>
-                                                            <span className="text-slate-500">Methods:</span>
-                                                            <span className="ml-2">
-                                                                {ALL_METHODS.filter(m => newProtocol.methods[m]?.enabled).map(m => (
-                                                                    <span key={m} className={`text-xs font-bold px-1.5 py-0.5 rounded mr-1 ${getMethodColorClasses(m)}`}>{m}</span>
-                                                                ))}
-                                                            </span>
                                                         </div>
                                                     </div>
                                                 </div>
 
-                                                {/* Run Test Section */}
-                                                <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
-                                                    <h4 className="text-sm font-bold text-slate-300 mb-3">Run Test</h4>
-                                                    <div className="flex items-center gap-4">
-                                                        <button
-                                                            onClick={async () => {
-                                                                const protocol = selectedSuite?.protocols.find(p => p.id === selectedProtocolId);
-                                                                if (protocol) {
-                                                                    for (const method of ALL_METHODS) {
-                                                                        if (protocol.methods[method]?.enabled) {
-                                                                            await runSingleTest(protocol, method as RequestMethod);
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }}
-                                                            disabled={!mqttConnected || !targetDevice || newProtocol.reviewStatus !== 'VERIFIED' || isRunning}
-                                                            className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                                                        >
-                                                            {isRunning ? <RefreshCw size={18} className="animate-spin" /> : <Play size={18} />}
-                                                            {isRunning ? 'Running...' : 'Run All Methods'}
-                                                        </button>
-                                                        {newProtocol.reviewStatus !== 'VERIFIED' && (
-                                                            <p className="text-sm text-amber-400">请先审核通过协议后才能运行测试</p>
-                                                        )}
-                                                    </div>
-                                                </div>
+                                                {/* Edit Content - Compact Split-Pane Layout */}
+                                                {(rightPanelTab === 'edit') && (
+                                                    <div className="flex-1 flex flex-col h-full overflow-hidden bg-slate-950">
+                                                        {/* Header: Namespace & Methods */}
+                                                        <div className="px-3 py-2 border-b border-slate-800 space-y-2 shrink-0 bg-slate-900/50">
+                                                            {/* Namespace Row */}
+                                                            <div className="relative">
+                                                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 tracking-wider pointer-events-none">NAMESPACE</span>
+                                                                <input
+                                                                    value={newProtocol.namespace}
+                                                                    onChange={e => setNewProtocol(p => ({ ...p, namespace: e.target.value, name: e.target.value }))}
+                                                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-32 pr-10 py-2 text-sm font-mono text-white outline-none focus:border-indigo-500 transition-colors"
+                                                                    placeholder="Appliance.Module.Function"
+                                                                />
+                                                                {!/^[A-Z][a-zA-Z0-9]*(\.[A-Z][a-zA-Z0-9]*)+$/.test(newProtocol.namespace) && newProtocol.namespace && (
+                                                                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-amber-500" title="格式建议: Appliance.Module.Function">
+                                                                        <AlertTriangle size={14} />
+                                                                    </div>
+                                                                )}
+                                                            </div>
 
-                                                {/* Last Test Result */}
-                                                {(() => {
-                                                    const protocol = selectedSuite?.protocols.find(p => p.id === selectedProtocolId);
-                                                    const hasResults = protocol && Object.values(protocol.methods).some(m => m?.lastResult);
-                                                    if (!hasResults) return null;
-                                                    return (
-                                                        <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
-                                                            <h4 className="text-sm font-bold text-slate-300 mb-3">Last Test Results</h4>
-                                                            <div className="space-y-2">
+                                                            {/* Methods Row */}
+                                                            <div className="flex flex-wrap gap-2">
                                                                 {ALL_METHODS.map(method => {
-                                                                    const result = protocol?.methods[method]?.lastResult;
-                                                                    if (!result) return null;
+                                                                    const isEnabled = newProtocol.methods[method]?.enabled || false;
+                                                                    const isEditing = editingMethod === method;
+                                                                    const colors = METHOD_COLORS[method];
                                                                     return (
-                                                                        <div key={method} className="flex items-center justify-between p-2 bg-slate-900/50 rounded-lg">
-                                                                            <div className="flex items-center gap-2">
-                                                                                <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${getMethodColorClasses(method)}`}>{method}</span>
+                                                                        <div key={method}
+                                                                            className={`flex items-center rounded-md border overflow-hidden transition-all select-none ${isEnabled ? `${colors.bgLight} border-${colors.text.split('-')[1]}-500/40` : 'bg-slate-800/50 border-slate-700'
+                                                                                } ${isEditing ? 'ring-2 ring-indigo-500 ring-offset-1 ring-offset-slate-950' : ''}`}>
+                                                                            {/* Checkbox area - only toggle enabled */}
+                                                                            <div className="px-2 py-1.5 border-r border-inherit hover:bg-black/20 transition-colors flex items-center justify-center cursor-pointer"
+                                                                                onClick={() => {
+                                                                                    setNewProtocol(p => ({
+                                                                                        ...p,
+                                                                                        methods: { ...p.methods, [method]: { ...(p.methods[method] || { payload: '{}', schema: '{}' }), enabled: !isEnabled } }
+                                                                                    }));
+                                                                                }}>
+                                                                                <div className={`w-4 h-4 rounded border flex items-center justify-center ${isEnabled ? `${colors.bg} border-transparent text-white` : 'border-slate-500'}`}>
+                                                                                    {isEnabled && <Check size={8} strokeWidth={4} />}
+                                                                                </div>
                                                                             </div>
-                                                                            <div className="flex items-center gap-3">
-                                                                                <span className={`text-xs font-bold ${result.status === 'PASS' ? 'text-emerald-400' :
-                                                                                    result.status === 'FAIL' ? 'text-red-400' :
-                                                                                        'text-amber-400'
-                                                                                    }`}>
-                                                                                    {result.status === 'PASS' ? '✓ Pass' : result.status === 'FAIL' ? '✗ Fail' : '○ Timeout'}
-                                                                                </span>
-                                                                                <span className="text-xs text-slate-500">{result.duration}ms</span>
+                                                                            {/* Method name area - switch to edit this method */}
+                                                                            <div className="px-2.5 py-1.5 flex flex-col cursor-pointer hover:bg-white/5 transition-colors"
+                                                                                onClick={() => setEditingMethod(method)}>
+                                                                                <span className={`text-xs font-bold ${isEnabled ? colors.text : 'text-slate-500'}`}>{method}</span>
+                                                                                <span className="text-[10px] text-slate-500 font-mono">{METHOD_TO_ACK[method]}</span>
                                                                             </div>
                                                                         </div>
                                                                     );
                                                                 })}
                                                             </div>
                                                         </div>
-                                                    );
-                                                })()}
+
+                                                        {/* Method Editor Area */}
+                                                        {(rightPanelTab === 'edit' || rightPanelTab === 'overview') && (
+                                                            <div className="flex-1 flex min-h-0 border-t border-slate-800">
+                                                                {/* Left: Request Payload */}
+                                                                <div className="w-1/2 flex flex-col border-r border-slate-800 bg-slate-950">
+                                                                    <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
+                                                                        <div className="flex items-center gap-2">
+                                                                            <span className={`w-2.5 h-2.5 rounded-full ${METHOD_COLORS[editingMethod]?.bg || 'bg-slate-500'}`} />
+                                                                            <span className="text-xs font-bold text-slate-300 uppercase">Request Payload</span>
+                                                                            <span className="text-xs text-slate-500 font-normal ml-2">(发送给设备的数据)</span>
+                                                                        </div>
+                                                                        <div className="flex items-center gap-2">
+                                                                            <button onClick={() => {
+                                                                                setJsonExampleInput('');
+                                                                                setJsonExtractMode('payload');
+                                                                                setShowJsonToSchemaModal(true);
+                                                                            }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
+                                                                                <Copy size={12} /> 从示例提取
+                                                                            </button>
+                                                                            <button onClick={() => {
+                                                                                const currentPayload = newProtocol.methods[editingMethod]?.payload || '{}';
+                                                                                try {
+                                                                                    const formatted = JSON.stringify(JSON.parse(currentPayload), null, 2);
+                                                                                    setNewProtocol(p => ({
+                                                                                        ...p,
+                                                                                        methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], payload: formatted } }
+                                                                                    }));
+                                                                                    showToast('success', '格式化成功');
+                                                                                } catch (e) {
+                                                                                    showToast('error', 'JSON 格式错误，无法格式化');
+                                                                                }
+                                                                            }} className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors">
+                                                                                <AlignLeft size={12} /> 格式化
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="flex-1 overflow-hidden relative group/editor">
+                                                                        {newProtocol.methods[editingMethod]?.enabled ? (
+                                                                            editingMethod === 'PUSH' ? (
+                                                                                <div className="flex flex-col items-center justify-center h-full text-slate-500 p-6 text-center">
+                                                                                    <Bell size={32} className="mb-3 opacity-50" />
+                                                                                    <p className="text-xs font-bold mb-1">PUSH 方法</p>
+                                                                                    <p className="text-[10px] max-w-[180px] text-slate-600">设备主动推送消息，无需配置请求载荷</p>
+                                                                                </div>
+                                                                            ) : (
+                                                                                <div className="absolute inset-0 overflow-hidden">
+                                                                                    <PayloadEditor
+                                                                                        value={newProtocol.methods[editingMethod]?.payload || '{}'}
+                                                                                        onChange={(v) => setNewProtocol(p => ({
+                                                                                            ...p,
+                                                                                            methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], payload: v } }
+                                                                                        }))}
+                                                                                        mode="payload"
+                                                                                        protocol={newProtocol}
+                                                                                        method={editingMethod}
+                                                                                        session={session}
+                                                                                    />
+                                                                                    {/* JSON Error Indicator */}
+                                                                                    {(() => {
+                                                                                        try {
+                                                                                            JSON.parse(newProtocol.methods[editingMethod]?.payload || '{}');
+                                                                                            return null;
+                                                                                        } catch (e) {
+                                                                                            return (
+                                                                                                <div className="absolute bottom-4 right-4 px-3 py-1.5 bg-red-500/10 border border-red-500/50 rounded text-red-400 text-xs font-mono flex items-center gap-2 backdrop-blur-sm shadow-lg">
+                                                                                                    <AlertTriangle size={12} /> JSON 格式错误
+                                                                                                </div>
+                                                                                            );
+                                                                                        }
+                                                                                    })()}
+                                                                                </div>
+                                                                            )
+                                                                        ) : (
+                                                                            <div className="flex flex-col items-center justify-center h-full text-slate-600">
+                                                                                <p className="text-sm">方法未启用</p>
+                                                                                <button onClick={() => {
+                                                                                    setNewProtocol(p => ({
+                                                                                        ...p,
+                                                                                        methods: { ...p.methods, [editingMethod]: { ...(p.methods[editingMethod] || { payload: '{}', schema: '{}' }), enabled: true } }
+                                                                                    }));
+                                                                                }} className="mt-2 text-indigo-400 hover:text-indigo-300 text-xs underline">
+                                                                                    启用 {editingMethod}
+                                                                                </button>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+
+                                                                {/* Right: Response Schema */}
+                                                                <div className="w-1/2 flex flex-col bg-slate-950">
+                                                                    <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
+                                                                        <div className="flex items-center gap-2">
+                                                                            <span className={`w-2.5 h-2.5 rounded-full ${METHOD_COLORS[editingMethod]?.bg || 'bg-slate-500'}`} />
+                                                                            <span className="text-xs font-bold text-slate-300 uppercase">Response Payload</span>
+                                                                            <span className="text-xs text-slate-500 font-normal ml-2">(用于验证设备响应)</span>
+                                                                        </div>
+                                                                        <div className="flex items-center gap-2">
+                                                                            <button onClick={() => {
+                                                                                setJsonExampleInput('');
+                                                                                setJsonExtractMode('schema_payload');
+                                                                                setShowJsonToSchemaModal(true);
+                                                                            }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
+                                                                                <Copy size={12} /> 从示例提取 Payload
+                                                                            </button>
+                                                                            <button onClick={() => {
+                                                                                setShowSchemaPreview(true);
+                                                                            }} className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors">
+                                                                                <FileJson size={12} /> 查看 Schema
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="flex-1 overflow-hidden relative">
+                                                                        {newProtocol.methods[editingMethod]?.enabled ? (
+                                                                            <div className="absolute inset-0 overflow-hidden">
+                                                                                <PayloadEditor
+                                                                                    value={newProtocol.methods[editingMethod]?.schema || '{}'}
+                                                                                    onChange={(v) => setNewProtocol(p => ({
+                                                                                        ...p,
+                                                                                        methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], schema: v } }
+                                                                                    }))}
+                                                                                    mode="schema"
+                                                                                    protocol={newProtocol}
+                                                                                    method={editingMethod}
+                                                                                    session={session}
+                                                                                />
+                                                                                {/* JSON Error Indicator */}
+                                                                                {(() => {
+                                                                                    try {
+                                                                                        JSON.parse(newProtocol.methods[editingMethod]?.schema || '{}');
+                                                                                        return null;
+                                                                                    } catch (e) {
+                                                                                        return (
+                                                                                            <div className="absolute bottom-4 right-4 px-3 py-1.5 bg-red-500/10 border border-red-500/50 rounded text-red-400 text-xs font-mono flex items-center gap-2 backdrop-blur-sm shadow-lg">
+                                                                                                <AlertTriangle size={12} /> JSON 格式错误
+                                                                                            </div>
+                                                                                        );
+                                                                                    }
+                                                                                })()}
+                                                                            </div>
+                                                                        ) : (
+                                                                            <div className="flex items-center justify-center h-full text-slate-600 text-sm">
+                                                                                方法未启用
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {/* Workbench Tab Content (Phase 3) */}
+                                                {rightPanelTab === 'review' && (
+                                                    <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
+                                                        {/* 1. Protocol Status Header */}
+                                                        <div className={`p-4 rounded-xl border flex items-center justify-between ${newProtocol.reviewStatus === 'VERIFIED' ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
+                                                            <div className="flex items-center gap-3">
+                                                                {newProtocol.reviewStatus === 'VERIFIED' ? (
+                                                                    <ShieldCheck size={24} className="text-emerald-400" />
+                                                                ) : (
+                                                                    <AlertTriangle size={24} className="text-red-400" />
+                                                                )}
+                                                                <div>
+                                                                    <div className={`text-lg font-bold ${newProtocol.reviewStatus === 'VERIFIED' ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                                        {newProtocol.reviewStatus === 'VERIFIED' ? 'Protocol Verified' : 'Unverified'}
+                                                                    </div>
+                                                                    <div className="text-xs text-slate-400">
+                                                                        {newProtocol.reviewStatus === 'VERIFIED'
+                                                                            ? '此协议已通过审核，可以运行测试'
+                                                                            : '请审核协议配置后标记为已验证'}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                            {newProtocol.reviewStatus !== 'VERIFIED' && (
+                                                                <button
+                                                                    onClick={() => {
+                                                                        setNewProtocol(p => ({ ...p, reviewStatus: 'VERIFIED' }));
+                                                                        if (selectedSuiteId && newProtocol.id) {
+                                                                            setSuites(prev => prev.map(s => {
+                                                                                if (s.id !== selectedSuiteId) return s;
+                                                                                return {
+                                                                                    ...s,
+                                                                                    protocols: s.protocols.map(p =>
+                                                                                        p.id === newProtocol.id ? { ...p, reviewStatus: 'VERIFIED' as const } : p
+                                                                                    ),
+                                                                                    updatedAt: Date.now()
+                                                                                };
+                                                                            }));
+                                                                        }
+                                                                    }}
+                                                                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold flex items-center gap-2"
+                                                                >
+                                                                    <ShieldCheck size={16} /> Mark as Verified
+                                                                </button>
+                                                            )}
+                                                        </div>
+
+                                                        {/* 2. Methods Workbench */}
+                                                        <div className="space-y-6">
+                                                            {getEnabledMethods().map(method => {
+                                                                const methodConfig = newProtocol.methods[method];
+                                                                if (!methodConfig) return null;
+
+                                                                // Determine if Interactive (Phase 3 Logic)
+                                                                const isInteractive = (method !== 'GET' && method !== 'DELETE') && (methodConfig.payload !== '{}' && !!methodConfig.payload);
+                                                                const lastResult = methodConfig.lastResult;
+
+                                                                return (
+                                                                    <div key={method} className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden transition-all hover:border-slate-600">
+                                                                        {/* Method Header */}
+                                                                        <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between bg-slate-900/30">
+                                                                            <div className="flex items-center gap-3">
+                                                                                <span className={`text-sm font-bold px-2 py-0.5 rounded ${getMethodColorClasses(method)}`}>{method}</span>
+                                                                                <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${isInteractive
+                                                                                    ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400'
+                                                                                    : 'bg-slate-500/10 border-slate-500/30 text-slate-400'}`}>
+                                                                                    {isInteractive ? 'Interactive Mode' : 'Auto Mode'}
+                                                                                </span>
+                                                                            </div>
+                                                                            {lastResult && (
+                                                                                <span className={`text-xs font-bold px-2 py-1 rounded-full flex items-center gap-1 ${lastResult.status === 'PASS' ? 'bg-emerald-500/20 text-emerald-400' :
+                                                                                    lastResult.status === 'FAIL' ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'
+                                                                                    }`}>
+                                                                                    {lastResult.status === 'PASS' ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
+                                                                                    {lastResult.status}
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+
+                                                                        <div className="p-4">
+                                                                            {/* Interactive Input Area */}
+                                                                            {isInteractive && (
+                                                                                <div className="mb-4 space-y-2">
+                                                                                    <div className="flex items-center justify-between">
+                                                                                        <label className="text-xs font-bold text-slate-500 uppercase flex items-center gap-2">
+                                                                                            <Edit3 size={12} /> Request Payload
+                                                                                        </label>
+                                                                                        <span className="text-[10px] text-slate-600">Edit parameters before running</span>
+                                                                                    </div>
+                                                                                    <div className="bg-slate-950 border border-slate-700 rounded-lg overflow-hidden max-h-[200px] overflow-y-auto custom-scrollbar">
+                                                                                        <PayloadEditor
+                                                                                            value={methodConfig.payload}
+                                                                                            onChange={(v) => setNewProtocol(p => ({
+                                                                                                ...p,
+                                                                                                methods: {
+                                                                                                    ...p.methods,
+                                                                                                    [method]: { ...p.methods[method], payload: v }
+                                                                                                }
+                                                                                            }))}
+                                                                                            mode="payload"
+                                                                                            protocol={newProtocol}
+                                                                                            method={method}
+                                                                                            session={session}
+                                                                                        />
+                                                                                    </div>
+                                                                                </div>
+                                                                            )}
+
+                                                                            {/* Action & Result Area */}
+                                                                            <div className="flex items-start gap-4">
+                                                                                <button
+                                                                                    onClick={async () => {
+                                                                                        setRunningTest(`${newProtocol.id}:${method}`);
+                                                                                        await runSingleTest(newProtocol, method as RequestMethod);
+                                                                                        setRunningTest(null);
+                                                                                    }}
+                                                                                    disabled={!mqttConnected || !targetDevice || isRunning}
+                                                                                    className={`shrink-0 px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2 transition-all shadow-lg ${isInteractive
+                                                                                        ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-900/20'
+                                                                                        : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-900/20'
+                                                                                        } disabled:opacity-50 disabled:cursor-not-allowed`}
+                                                                                >
+                                                                                    {runningTest === `${newProtocol.id}:${method}` ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} />}
+                                                                                    {isInteractive ? 'Send Request' : 'Run Verification'}
+                                                                                </button>
+
+                                                                                {/* Last Result Summary */}
+                                                                                {lastResult ? (
+                                                                                    <div className={`flex-1 rounded-lg p-3 text-xs font-mono border ${lastResult.status === 'PASS' ? 'bg-emerald-900/10 border-emerald-500/20' :
+                                                                                        lastResult.status === 'FAIL' ? 'bg-red-900/10 border-red-500/20' : 'bg-slate-900/50 border-slate-800'
+                                                                                        }`}>
+                                                                                        <div className="flex justify-between text-slate-500 mb-1">
+                                                                                            <span>Duration: {lastResult.duration}ms</span>
+                                                                                            <span>{new Date().toLocaleTimeString()}</span>
+                                                                                        </div>
+                                                                                        {lastResult.error ? (
+                                                                                            <div className="text-red-400 break-all">{lastResult.error}</div>
+                                                                                        ) : (
+                                                                                            <div className="text-emerald-400 flex items-center gap-2">
+                                                                                                <CheckCircle2 size={12} /> Response Verified Successfully
+                                                                                            </div>
+                                                                                        )}
+                                                                                    </div>
+                                                                                ) : (
+                                                                                    <div className="flex-1 flex items-center text-xs text-slate-600 italic py-2">
+                                                                                        Ready to run...
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                )}
+
                                             </div>
                                         )}
 
+
+
+
+
+
+                                    </>
+                                ) : (
+                                    <div className="flex-1 flex flex-col items-center justify-center text-slate-600">
+                                        <ShieldCheck size={64} className="mb-4 opacity-20" />
+                                        <p className="text-lg font-bold">选择或创建一个测试库</p>
+                                        <p className="text-sm mt-2">测试库可以复用于同型号的任何设备</p>
                                     </div>
                                 )}
+                            </div>
 
-                                {/* Results Tab - Table View (only when no protocol selected) */}
-                                {rightPanelTab === 'results' && !selectedProtocolId && (
-                                    <div className="flex-1 overflow-hidden flex flex-col bg-slate-900/50 rounded-xl m-4 border border-slate-800 relative">
-                                        {viewingRunId ? (
-                                            // Detailed View (Existing Table Logic)
-                                            (() => {
-                                                const viewingRun = testHistory.find(r => r.id === viewingRunId);
-                                                if (!viewingRun) return <div className="p-4 text-slate-500">Run not found</div>;
-                                                return (
-                                                    <>
-                                                        <div className="p-4 border-b border-slate-800 flex justify-between items-center shrink-0">
-                                                            <div className="flex items-center gap-3">
-                                                                <button
-                                                                    onClick={() => setViewingRunId(null)}
-                                                                    className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white"
-                                                                >
-                                                                    <ChevronLeft size={20} />
-                                                                </button>
-                                                                <div>
-                                                                    <h3 className="text-lg font-black text-white">Test Details</h3>
-                                                                    <div className="text-xs text-slate-400">
-                                                                        {new Date(viewingRun.startTime).toLocaleString()}
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                            <div className="flex items-center gap-4">
-                                                                <button
-                                                                    onClick={() => setShowStatsDashboard(true)}
-                                                                    className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-bold"
-                                                                >
-                                                                    View Statistics
-                                                                </button>
-                                                            </div>
-                                                        </div>
+                        </div>
+                    </WorkbenchPanel>
 
-                                                        {/* Table Header */}
-                                                        <div className="grid grid-cols-12 gap-2 px-4 py-3 bg-slate-800/50 text-xs font-bold text-slate-400 uppercase border-b border-slate-700/50">
-                                                            <div className="col-span-1">ID</div>
-                                                            <div className="col-span-4">Protocol Name</div>
-                                                            <div className="col-span-1">Method</div>
-                                                            <div className="col-span-2">Status</div>
-                                                            <div className="col-span-2">Duration</div>
-                                                            <div className="col-span-2">Actions</div>
-                                                        </div>
+                    <InspectionPanel
+                        logs={testLogs}
+                        onClearLogs={() => setTestLogs([])}
+                        autoScroll={autoScroll}
+                        setAutoScroll={setAutoScroll}
+                        logFilter={logFilter}
+                        setLogFilter={setLogFilter}
+                        headerActions={null}
+                    />
 
-                                                        {/* Table Body */}
-                                                        <div className="flex-1 overflow-y-auto custom-scrollbar">
-                                                            {viewingRun.results.map((result, idx) => (
-                                                                <div
-                                                                    key={idx}
-                                                                    className="grid grid-cols-12 gap-2 px-4 py-3 border-b border-slate-800/50 hover:bg-slate-800/50 transition-colors items-center"
-                                                                >
-                                                                    {/* ID */}
-                                                                    <div className="col-span-1 text-xs font-mono text-slate-500">
-                                                                        {(idx + 1).toString().padStart(3, '0')}
-                                                                    </div>
 
-                                                                    {/* Protocol Name */}
-                                                                    <div className="col-span-4 truncate">
-                                                                        <span className="text-sm font-bold text-white">{result.namespace}</span>
-                                                                        {result.testCaseName && (
-                                                                            <span className="text-xs text-slate-500 ml-2">({result.testCaseName})</span>
-                                                                        )}
-                                                                    </div>
-
-                                                                    {/* Method */}
-                                                                    <div className="col-span-1">
-                                                                        <span className={`text-xs font-bold px-2 py-0.5 rounded ${getMethodColorClasses(result.method)}`}>
-                                                                            {result.method}
-                                                                        </span>
-                                                                    </div>
-
-                                                                    {/* Status */}
-                                                                    <div className="col-span-2">
-                                                                        <span className={`text-xs font-bold px-2 py-0.5 rounded inline-flex items-center gap-1 ${result.status === 'PASS' ? 'bg-emerald-500/20 text-emerald-400' :
-                                                                            result.status === 'FAIL' ? 'bg-red-500/20 text-red-400' :
-                                                                                'bg-amber-500/20 text-amber-400'
-                                                                            }`}>
-                                                                            {result.status === 'PASS' ? <CheckCircle size={10} /> :
-                                                                                result.status === 'FAIL' ? <XCircle size={10} /> :
-                                                                                    <Clock size={10} />}
-                                                                            {result.status === 'PASS' ? '成功' : result.status === 'FAIL' ? '失败' : '超时'}
-                                                                        </span>
-                                                                    </div>
-
-                                                                    {/* Duration */}
-                                                                    <div className="col-span-2 text-xs font-mono text-slate-400">
-                                                                        {result.duration}ms
-                                                                    </div>
-
-                                                                    {/* Actions */}
-                                                                    <div className="col-span-2 flex gap-1">
-                                                                        <button
-                                                                            onClick={() => {
-                                                                                setViewingResult({
-                                                                                    result: {
-                                                                                        ...result,
-                                                                                        request: undefined,
-                                                                                        expectedSchema: undefined
-                                                                                    } as any,
-                                                                                    namespace: result.namespace,
-                                                                                    method: result.method,
-                                                                                    protocolId: result.protocolId
-                                                                                });
-                                                                                setShowResultViewer(true);
-                                                                            }}
-                                                                            className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-bold"
-                                                                        >
-                                                                            Details
-                                                                        </button>
-                                                                        {result.status === 'FAIL' && (
-                                                                            <button
-                                                                                onClick={() => {
-                                                                                    const protocol = selectedSuite?.protocols.find(p => p.id === result.protocolId);
-                                                                                    if (protocol) {
-                                                                                        startEditingProtocol(protocol);
-                                                                                    }
-                                                                                }}
-                                                                                className="px-2 py-1 bg-slate-600 hover:bg-slate-500 text-white rounded text-xs"
-                                                                            >
-                                                                                Edit
-                                                                            </button>
-                                                                        )}
-                                                                    </div>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-
-                                                        {/* Summary Footer */}
-                                                        <div className="px-4 py-3 border-t border-slate-800 bg-slate-800/30 flex justify-between items-center shrink-0">
-                                                            <div className="flex gap-4 text-xs">
-                                                                <span className="text-slate-400">Total: <b className="text-white">{viewingRun.results.length}</b></span>
-                                                                <span className="text-emerald-400">Pass: <b>{viewingRun.summary.passed}</b></span>
-                                                                <span className="text-red-400">Fail: <b>{viewingRun.summary.failed}</b></span>
-                                                                <span className="text-amber-400">Timeout: <b>{viewingRun.summary.timeout}</b></span>
-                                                            </div>
-                                                        </div>
-                                                    </>
-                                                );
-                                            })()
-                                        ) : (
-                                            // History List View
-                                            <>
-                                                <div className="p-4 border-b border-slate-800 flex justify-between items-center shrink-0">
-                                                    <h3 className="text-lg font-black text-white">Test History</h3>
-                                                    <div className="text-xs text-slate-400">
-                                                        Total Runs: {testHistory.filter(r => r.suiteId === selectedSuite?.id).length}
-                                                    </div>
-                                                </div>
-                                                <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-2">
-                                                    {testHistory.filter(r => r.suiteId === selectedSuite?.id).length === 0 ? (
-                                                        <div className="flex flex-col items-center justify-center h-full text-slate-500">
-                                                            <p>No test history for this suite</p>
-                                                        </div>
-                                                    ) : (
-                                                        testHistory.filter(r => r.suiteId === selectedSuite?.id).slice().reverse().map(run => (
-                                                            <div key={run.id} className="flex items-center justify-between p-4 bg-slate-800/50 hover:bg-slate-800 rounded-xl border border-slate-700/50 transition-all group">
-                                                                <div className="flex items-center gap-4">
-                                                                    <div className={`p-2 rounded-lg ${run.status === 'COMPLETED' ? 'bg-emerald-500/10 text-emerald-400' :
-                                                                        run.status === 'FAILED' ? 'bg-red-500/10 text-red-400' :
-                                                                            'bg-blue-500/10 text-blue-400'
-                                                                        }`}>
-                                                                        {run.status === 'COMPLETED' ? <CheckCircle size={20} /> :
-                                                                            run.status === 'FAILED' ? <XCircle size={20} /> :
-                                                                                <RefreshCw size={20} className="animate-spin" />}
-                                                                    </div>
-                                                                    <div>
-                                                                        <div className="text-sm font-bold text-white flex items-center gap-2">
-                                                                            {new Date(run.startTime).toLocaleString()}
-                                                                            <span className="text-xs font-normal text-slate-500">({Math.round(((run.endTime || run.startTime) - run.startTime) / 1000)}s)</span>
-                                                                        </div>
-                                                                        <div className="flex gap-3 text-xs mt-1">
-                                                                            <span className="text-emerald-400">{run.summary.passed} Pass</span>
-                                                                            <span className="text-red-400">{run.summary.failed} Fail</span>
-                                                                            <span className="text-amber-400">{run.summary.timeout} Timeout</span>
-                                                                        </div>
-                                                                    </div>
-                                                                </div>
-                                                                <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                                    <button
-                                                                        onClick={() => setViewingRunId(run.id)}
-                                                                        className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold"
-                                                                    >
-                                                                        Details
-                                                                    </button>
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            if (confirm('Delete this test run?')) {
-                                                                                setTestHistory(prev => prev.filter(r => r.id !== run.id));
-                                                                                if (currentRun?.id === run.id) setCurrentRun(null);
-                                                                            }
-                                                                        }}
-                                                                        className="p-1.5 bg-slate-700 hover:bg-red-500/20 text-slate-400 hover:text-red-400 rounded-lg transition-colors"
-                                                                        title="Delete"
-                                                                    >
-                                                                        <Trash2 size={16} />
-                                                                    </button>
-                                                                </div>
-                                                            </div>
-                                                        ))
-                                                    )}
-                                                </div>
-                                            </>
-                                        )}
+                    {/* Add Suite Modal */}
+                    {
+                        isAddingSuite && (
+                            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+                                <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[450px]">
+                                    <h3 className="text-lg font-black text-white mb-4">{editingSuiteId ? '编辑测试库' : '新建测试库'}</h3>
+                                    <div className="space-y-4">
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-400 uppercase mb-1 block">名称 *</label>
+                                            <input
+                                                value={newSuite.name}
+                                                onChange={e => setNewSuite(p => ({ ...p, name: e.target.value }))}
+                                                placeholder="例如：MSS210 V8 智能插座"
+                                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white outline-none focus:border-indigo-500"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-400 uppercase mb-1 block">描述</label>
+                                            <input
+                                                value={newSuite.description}
+                                                onChange={e => setNewSuite(p => ({ ...p, description: e.target.value }))}
+                                                placeholder="可选的描述信息"
+                                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white outline-none focus:border-indigo-500"
+                                            />
+                                        </div>
                                     </div>
-                                )}
-
-                            </>
-                        ) : (
-                            <div className="flex-1 flex flex-col items-center justify-center text-slate-600">
-                                <ShieldCheck size={64} className="mb-4 opacity-20" />
-                                <p className="text-lg font-bold">选择或创建一个测试库</p>
-                                <p className="text-sm mt-2">测试库可以复用于同型号的任何设备</p>
+                                    <div className="flex justify-end gap-3 mt-6">
+                                        <button onClick={() => { setIsAddingSuite(false); setEditingSuiteId(null); setNewSuite({ name: '', description: '' }); }} className="px-4 py-2 text-slate-400 hover:text-white">取消</button>
+                                        <button onClick={editingSuiteId ? updateSuite : addNewSuite} className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold">{editingSuiteId ? '保存' : '创建'}</button>
+                                    </div>
+                                </div>
                             </div>
                         )
-                        }
-                    </div>
+                    }
 
+                    {/* Add Protocol Wizard Modal - Moved to Edit Tab */}
 
-
-                    {/* Test Log Panel */}
-                    <div className={`shrink-0 border-t border-slate-700 bg-slate-900 transition-all ${logPanelExpanded ? 'h-48' : 'h-10'}`}>
-                        {/* Log Panel Header */}
-                        <div className="flex items-center justify-between px-4 h-10 border-b border-slate-800">
-                            <div className="flex items-center gap-4">
-                                <button
-                                    onClick={() => setLogPanelExpanded(!logPanelExpanded)}
-                                    className="flex items-center gap-2 text-sm font-bold text-slate-300 hover:text-white"
-                                >
-                                    {logPanelExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                                    <span>📝 Test Log</span>
-                                    <span className="text-xs text-slate-500">({testLogs.length})</span>
-                                </button>
-
-                                {/* Log Filters */}
-                                {logPanelExpanded && (
-                                    <div className="flex gap-1">
-                                        {(['all', 'TX', 'RX', 'ERROR', 'INFO'] as const).map(filter => (
-                                            <button
-                                                key={filter}
-                                                onClick={() => setLogFilter(filter)}
-                                                className={`px-2 py-0.5 text-xs rounded ${logFilter === filter
-                                                    ? 'bg-indigo-600 text-white'
-                                                    : 'bg-slate-800 text-slate-400 hover:text-white'
-                                                    }`}
-                                            >
-                                                {filter}
-                                            </button>
-                                        ))}
-                                    </div>
-                                )}
-
-                                {/* Running Indicator */}
-                                {testProgress && (
-                                    <div className="flex items-center gap-2 px-2 py-1 bg-emerald-500/10 rounded-lg">
-                                        <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                                        <span className="text-xs text-emerald-400">
-                                            {testProgress.currentProtocol} ({testProgress.current}/{testProgress.total})
-                                        </span>
-                                    </div>
-                                )}
-                            </div>
-
-                            <button
-                                onClick={() => setTestLogs([])}
-                                className="text-xs text-slate-500 hover:text-red-400 transition-colors"
-                            >
-                                Clear
-                            </button>
-                        </div>
-
-                        {/* Log Content */}
-                        {logPanelExpanded && (
-                            <div
-                                ref={logContainerRef}
-                                className="h-[calc(100%-2.5rem)] overflow-y-auto custom-scrollbar px-2 py-1"
-                            >
-                                {testLogs
-                                    .filter(log => logFilter === 'all' || log.type === logFilter)
-                                    .map(log => (
-                                        <div
-                                            key={log.id}
-                                            className={`flex items-start gap-2 px-2 py-1 text-xs font-mono rounded mb-0.5 ${log.type === 'TX' ? 'bg-blue-500/5 text-blue-400' :
-                                                log.type === 'RX' ? 'bg-emerald-500/5 text-emerald-400' :
-                                                    log.type === 'ERROR' ? 'bg-red-500/10 text-red-400' :
-                                                        'bg-slate-800/50 text-slate-400'
-                                                }`}
-                                        >
-                                            <span className="text-slate-600 shrink-0">{log.timeStr}</span>
-                                            <span className={`shrink-0 w-12 font-bold ${log.type === 'TX' ? 'text-blue-500' :
-                                                log.type === 'RX' ? 'text-emerald-500' :
-                                                    log.type === 'ERROR' ? 'text-red-500' : 'text-slate-500'
-                                                }`}>[{log.type}]</span>
-                                            <span className="flex-1 truncate">{log.message}</span>
+                    {/* Unverified Protocols Warning Modal */}
+                    {
+                        unverifiedProtocolsModal.show && (
+                            <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[100]" onClick={() => setUnverifiedProtocolsModal({ show: false, protocols: [] })}>
+                                <div className="bg-slate-900 border-2 border-red-500/50 rounded-2xl p-6 w-[500px] max-h-[80vh] flex flex-col shadow-2xl shadow-red-500/20" onClick={e => e.stopPropagation()}>
+                                    {/* Header */}
+                                    <div className="flex items-center gap-4 mb-6">
+                                        <div className="p-3 bg-red-500/20 rounded-xl">
+                                            <AlertTriangle size={32} className="text-red-400" />
                                         </div>
-                                    ))
-                                }
-                                {testLogs.length === 0 && (
-                                    <div className="flex items-center justify-center h-full text-slate-600 text-xs">
-                                        No logs yet. Run a test to see logs here.
+                                        <div>
+                                            <h3 className="text-xl font-black text-white">无法运行测试</h3>
+                                            <p className="text-sm text-red-400 mt-1">
+                                                {unverifiedProtocolsModal.protocols.length} 个协议尚未通过审核
+                                            </p>
+                                        </div>
                                     </div>
-                                )}
-                            </div>
-                        )}
-                    </div>
-                </div>
-            </div>
 
-
-            {/* Add Suite Modal */}
-            {
-                isAddingSuite && (
-                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-                        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[450px]">
-                            <h3 className="text-lg font-black text-white mb-4">{editingSuiteId ? '编辑测试库' : '新建测试库'}</h3>
-                            <div className="space-y-4">
-                                <div>
-                                    <label className="text-xs font-bold text-slate-400 uppercase mb-1 block">名称 *</label>
-                                    <input
-                                        value={newSuite.name}
-                                        onChange={e => setNewSuite(p => ({ ...p, name: e.target.value }))}
-                                        placeholder="例如：MSS210 V8 智能插座"
-                                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white outline-none focus:border-indigo-500"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="text-xs font-bold text-slate-400 uppercase mb-1 block">描述</label>
-                                    <input
-                                        value={newSuite.description}
-                                        onChange={e => setNewSuite(p => ({ ...p, description: e.target.value }))}
-                                        placeholder="可选的描述信息"
-                                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white outline-none focus:border-indigo-500"
-                                    />
-                                </div>
-                            </div>
-                            <div className="flex justify-end gap-3 mt-6">
-                                <button onClick={() => { setIsAddingSuite(false); setEditingSuiteId(null); setNewSuite({ name: '', description: '' }); }} className="px-4 py-2 text-slate-400 hover:text-white">取消</button>
-                                <button onClick={editingSuiteId ? updateSuite : addNewSuite} className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold">{editingSuiteId ? '保存' : '创建'}</button>
-                            </div>
-                        </div>
-                    </div>
-                )
-            }
-
-            {/* Add Protocol Wizard Modal - Moved to Edit Tab */}
-
-            {/* Unverified Protocols Warning Modal */}
-            {unverifiedProtocolsModal.show && (
-                <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[100]" onClick={() => setUnverifiedProtocolsModal({ show: false, protocols: [] })}>
-                    <div className="bg-slate-900 border-2 border-red-500/50 rounded-2xl p-6 w-[500px] max-h-[80vh] flex flex-col shadow-2xl shadow-red-500/20" onClick={e => e.stopPropagation()}>
-                        {/* Header */}
-                        <div className="flex items-center gap-4 mb-6">
-                            <div className="p-3 bg-red-500/20 rounded-xl">
-                                <AlertTriangle size={32} className="text-red-400" />
-                            </div>
-                            <div>
-                                <h3 className="text-xl font-black text-white">无法运行测试</h3>
-                                <p className="text-sm text-red-400 mt-1">
-                                    {unverifiedProtocolsModal.protocols.length} 个协议尚未通过审核
-                                </p>
-                            </div>
-                        </div>
-
-                        {/* Protocol List */}
-                        <div className="flex-1 overflow-y-auto custom-scrollbar mb-6">
-                            <p className="text-sm text-slate-400 mb-3">请先审核并验证以下协议后再运行测试：</p>
-                            <div className="space-y-2">
-                                {unverifiedProtocolsModal.protocols.map(protocol => (
-                                    <div
-                                        key={protocol.id}
-                                        className="flex items-center justify-between p-3 bg-slate-800/50 rounded-xl border border-slate-700 hover:border-amber-500/50 cursor-pointer transition-all group"
-                                        onClick={() => {
-                                            setUnverifiedProtocolsModal({ show: false, protocols: [] });
-                                            startEditingProtocol(protocol);
-                                        }}
-                                    >
-                                        <div className="flex items-center gap-3">
-                                            <HelpCircle size={18} className="text-amber-500" />
-                                            <div>
-                                                <div className="text-sm font-bold text-white">{protocol.namespace}</div>
-                                                <div className="text-xs text-slate-500">
-                                                    {ALL_METHODS.filter(m => protocol.methods[m]?.enabled).join(', ')}
+                                    {/* Protocol List */}
+                                    <div className="flex-1 overflow-y-auto custom-scrollbar mb-6">
+                                        <p className="text-sm text-slate-400 mb-3">请先审核并验证以下协议后再运行测试：</p>
+                                        <div className="space-y-2">
+                                            {unverifiedProtocolsModal.protocols.map(protocol => (
+                                                <div
+                                                    key={protocol.id}
+                                                    className="flex items-center justify-between p-3 bg-slate-800/50 rounded-xl border border-slate-700 hover:border-amber-500/50 cursor-pointer transition-all group"
+                                                    onClick={() => {
+                                                        setUnverifiedProtocolsModal({ show: false, protocols: [] });
+                                                        startEditingProtocol(protocol);
+                                                    }}
+                                                >
+                                                    <div className="flex items-center gap-3">
+                                                        <HelpCircle size={18} className="text-amber-500" />
+                                                        <div>
+                                                            <div className="text-sm font-bold text-white">{protocol.namespace}</div>
+                                                            <div className="text-xs text-slate-500">
+                                                                {ALL_METHODS.filter(m => protocol.methods[m]?.enabled).join(', ')}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                        <span className="text-xs text-amber-400">点击审核</span>
+                                                        <ArrowRight size={14} className="text-amber-400" />
+                                                    </div>
                                                 </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* Footer */}
+                                    <div className="flex justify-end gap-3 pt-4 border-t border-slate-700">
+                                        <button
+                                            onClick={() => setUnverifiedProtocolsModal({ show: false, protocols: [] })}
+                                            className="px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl font-bold"
+                                        >
+                                            关闭
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )
+                    }
+
+                    {/* Report Export Modal */}
+                    {
+                        showReportModal && currentRun && (
+                            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+                                <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[500px]">
+                                    <h3 className="text-lg font-black text-white mb-4">导出测试报告</h3>
+
+                                    {/* Summary */}
+                                    <div className="bg-slate-800/50 rounded-xl p-4 mb-4">
+                                        <div className="text-sm font-bold text-white mb-2">{currentRun.suiteName}</div>
+                                        <div className="text-xs text-slate-400 mb-3">
+                                            Device: {currentRun.deviceName} · {new Date(currentRun.startTime).toLocaleString()}
+                                        </div>
+                                        <div className="flex gap-4 text-sm">
+                                            <span className="text-emerald-400">{currentRun.summary.passed} Pass</span>
+                                            <span className="text-red-400">{currentRun.summary.failed} Fail</span>
+                                            <span className="text-amber-400">{currentRun.summary.timeout} Timeout</span>
+                                        </div>
+                                    </div>
+
+                                    {/* Export Options */}
+                                    <div className="space-y-3 mb-4">
+                                        <button
+                                            onClick={() => exportReport('json')}
+                                            className="w-full p-3 bg-slate-800 hover:bg-slate-700 rounded-xl flex items-center gap-3 text-left"
+                                        >
+                                            <FileJson size={20} className="text-blue-400" />
+                                            <div>
+                                                <div className="text-sm font-bold text-white">JSON 格式</div>
+                                                <div className="text-xs text-slate-400">完整的测试结果数据</div>
                                             </div>
-                                        </div>
-                                        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                            <span className="text-xs text-amber-400">点击审核</span>
-                                            <ArrowRight size={14} className="text-amber-400" />
-                                        </div>
+                                        </button>
+                                        <button
+                                            onClick={() => exportReport('junit')}
+                                            className="w-full p-3 bg-slate-800 hover:bg-slate-700 rounded-xl flex items-center gap-3 text-left"
+                                        >
+                                            <FileJson size={20} className="text-emerald-400" />
+                                            <div>
+                                                <div className="text-sm font-bold text-white">JUnit XML 格式</div>
+                                                <div className="text-xs text-slate-400">Jenkins 兼容格式</div>
+                                            </div>
+                                        </button>
+                                        {/* P1 优化: HTML 报告导出 */}
+                                        <button
+                                            onClick={() => exportReport('html')}
+                                            className="w-full p-3 bg-slate-800 hover:bg-slate-700 rounded-xl flex items-center gap-3 text-left"
+                                        >
+                                            <FileText size={20} className="text-purple-400" />
+                                            <div>
+                                                <div className="text-sm font-bold text-white">HTML 报告</div>
+                                                <div className="text-xs text-slate-400">可视化报告，适合浏览器查看</div>
+                                            </div>
+                                        </button>
                                     </div>
-                                ))}
-                            </div>
-                        </div>
 
-                        {/* Footer */}
-                        <div className="flex justify-end gap-3 pt-4 border-t border-slate-700">
-                            <button
-                                onClick={() => setUnverifiedProtocolsModal({ show: false, protocols: [] })}
-                                className="px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl font-bold"
-                            >
-                                关闭
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Report Export Modal */}
-            {
-                showReportModal && currentRun && (
-                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-                        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[500px]">
-                            <h3 className="text-lg font-black text-white mb-4">导出测试报告</h3>
-
-                            {/* Summary */}
-                            <div className="bg-slate-800/50 rounded-xl p-4 mb-4">
-                                <div className="text-sm font-bold text-white mb-2">{currentRun.suiteName}</div>
-                                <div className="text-xs text-slate-400 mb-3">
-                                    Device: {currentRun.deviceName} · {new Date(currentRun.startTime).toLocaleString()}
-                                </div>
-                                <div className="flex gap-4 text-sm">
-                                    <span className="text-emerald-400">{currentRun.summary.passed} Pass</span>
-                                    <span className="text-red-400">{currentRun.summary.failed} Fail</span>
-                                    <span className="text-amber-400">{currentRun.summary.timeout} Timeout</span>
-                                </div>
-                            </div>
-
-                            {/* Export Options */}
-                            <div className="space-y-3 mb-4">
-                                <button
-                                    onClick={() => exportReport('json')}
-                                    className="w-full p-3 bg-slate-800 hover:bg-slate-700 rounded-xl flex items-center gap-3 text-left"
-                                >
-                                    <FileJson size={20} className="text-blue-400" />
-                                    <div>
-                                        <div className="text-sm font-bold text-white">JSON 格式</div>
-                                        <div className="text-xs text-slate-400">完整的测试结果数据</div>
-                                    </div>
-                                </button>
-                                <button
-                                    onClick={() => exportReport('junit')}
-                                    className="w-full p-3 bg-slate-800 hover:bg-slate-700 rounded-xl flex items-center gap-3 text-left"
-                                >
-                                    <FileJson size={20} className="text-emerald-400" />
-                                    <div>
-                                        <div className="text-sm font-bold text-white">JUnit XML 格式</div>
-                                        <div className="text-xs text-slate-400">Jenkins 兼容格式</div>
-                                    </div>
-                                </button>
-                                {/* P1 优化: HTML 报告导出 */}
-                                <button
-                                    onClick={() => exportReport('html')}
-                                    className="w-full p-3 bg-slate-800 hover:bg-slate-700 rounded-xl flex items-center gap-3 text-left"
-                                >
-                                    <FileText size={20} className="text-purple-400" />
-                                    <div>
-                                        <div className="text-sm font-bold text-white">HTML 报告</div>
-                                        <div className="text-xs text-slate-400">可视化报告，适合浏览器查看</div>
-                                    </div>
-                                </button>
-                            </div>
-
-                            {/* Jenkins Upload */}
-                            <div className="border-t border-slate-700 pt-4">
-                                <div className="text-xs font-bold text-slate-400 uppercase mb-2">上报到 Jenkins</div>
-                                <div className="flex gap-2">
-                                    <input
-                                        value={jenkinsUrl}
-                                        onChange={e => setJenkinsUrl(e.target.value)}
-                                        placeholder="Jenkins Webhook URL"
-                                        className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
-                                    />
-                                    <button
-                                        onClick={sendToJenkins}
-                                        className="px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white rounded-lg font-bold flex items-center gap-2"
-                                    >
-                                        <Send size={14} /> 发送
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div className="flex justify-end mt-6">
-                                <button onClick={() => setShowReportModal(false)} className="px-4 py-2 text-slate-400 hover:text-white">关闭</button>
-                            </div>
-                        </div>
-                    </div>
-                )
-            }
-
-            {/* JSON Extract Modal (Payload / Schema) */}
-            {
-                showJsonToSchemaModal && (
-                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60]">
-                        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[600px]">
-                            <h3 className="text-lg font-black text-white mb-4">
-                                {jsonExtractMode === 'payload' ? '从 JSON 示例提取 Payload' : '从 JSON 示例生成 Schema'}
-                            </h3>
-
-                            <p className="text-sm text-slate-400 mb-4">
-                                {jsonExtractMode === 'payload'
-                                    ? '粘贴完整的协议消息 JSON，自动提取其中的 payload 部分。'
-                                    : '粘贴协议文档中的 JSON 响应示例，可选择生成完整消息或仅 payload 的 Schema。'
-                                }
-                            </p>
-
-                            <textarea
-                                value={jsonExampleInput}
-                                onChange={e => setJsonExampleInput(e.target.value)}
-                                placeholder={'粘贴完整 JSON 示例，例如:\n{\n  "header": {"method": "GETACK", ...},\n  "payload": {"time": {"timestamp": 1234567890}}\n}'}
-                                className="w-full h-48 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-emerald-400 font-mono outline-none focus:border-indigo-500 resize-none"
-                            />
-
-                            <div className="flex justify-end gap-3 mt-6">
-                                <button
-                                    onClick={() => setShowJsonToSchemaModal(false)}
-                                    className="px-4 py-2 text-slate-400 hover:text-white"
-                                >
-                                    取消
-                                </button>
-                                <button
-                                    onClick={() => {
-                                        try {
-                                            const parsed = JSON.parse(jsonExampleInput);
-                                            const methods = getEnabledMethods();
-                                            const currentMethod = methods[currentMethodIndex];
-
-                                            if (!currentMethod) {
-                                                showToast('warning', '请先选择一个 Method');
-                                                return;
-                                            }
-
-                                            if (jsonExtractMode === 'payload') {
-                                                // 提取 payload 部分
-                                                const payloadData = parsed.payload !== undefined ? parsed.payload : parsed;
-                                                const payloadStr = JSON.stringify(payloadData, null, 2);
-
-                                                setNewProtocol(p => ({
-                                                    ...p,
-                                                    methods: {
-                                                        ...p.methods,
-                                                        [currentMethod]: {
-                                                            ...p.methods[currentMethod],
-                                                            payload: payloadStr
-                                                        }
-                                                    }
-                                                }));
-                                                setShowJsonToSchemaModal(false);
-                                            } else {
-                                                // 生成 Schema - 第一步：解析并准备必填字段选择
-                                                const schema = generateSchemaFromJson(parsed, false); // 先不生成 required
-                                                const paths = extractFieldPaths(parsed);
-
-                                                // 默认所有字段都非必填，或者根据某种规则预选
-                                                const initialSelection: Record<string, FieldConfig> = {};
-                                                paths.forEach(p => {
-                                                    initialSelection[p.path] = {
-                                                        required: false,
-                                                        type: p.type,
-                                                        value: p.sample
-                                                    };
-                                                });
-
-                                                setGeneratedSchema(schema);
-                                                setFieldConfigSelection(initialSelection);
-
-                                                setShowJsonToSchemaModal(false);
-                                                setShowRequiredFieldsModal(true);
-                                            }
-                                        } catch (e) {
-                                            showToast('error', 'JSON 解析失败，请检查格式是否正确');
-                                        }
-                                    }}
-                                    className={`px-6 py-2 ${jsonExtractMode === 'payload' ? 'bg-blue-600 hover:bg-blue-500' : 'bg-emerald-600 hover:bg-emerald-500'} text-white rounded-lg font-bold`}
-                                >
-                                    {jsonExtractMode === 'payload' ? '提取 Payload' : '生成 Schema'}
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                )
-            }
-
-            {/* Required Fields Selection Modal */}
-            {
-                showRequiredFieldsModal && (
-                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[70]">
-                        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[800px] max-h-[80vh] flex flex-col">
-                            <h3 className="text-lg font-black text-white mb-4">选择必填字段与类型</h3>
-                            <p className="text-sm text-slate-400 mb-4">
-                                Header 字段默认必填且已隐藏。请勾选 Payload 中需要标记为 <span className="text-red-400 font-bold">required</span> 的字段，并确认字段类型。
-                            </p>
-
-                            <div className="flex-1 overflow-y-auto custom-scrollbar border border-slate-700 rounded-lg bg-slate-950 p-2">
-                                {Object.keys(fieldConfigSelection).length === 0 ? (
-                                    <div className="text-center text-slate-500 py-8">没有可供选择的字段</div>
-                                ) : (
-                                    <div className="space-y-1">
-                                        {buildFieldTree(fieldConfigSelection).map(node => (
-                                            <FieldTreeItem
-                                                key={node.fullPath}
-                                                node={node}
-                                                level={0}
-                                                onUpdate={(path, updates) => {
-                                                    setFieldConfigSelection(prev => ({
-                                                        ...prev,
-                                                        [path]: { ...prev[path], ...updates }
-                                                    }));
-                                                }}
-                                                onDelete={(path) => {
-                                                    setFieldConfigSelection(prev => {
-                                                        const next = { ...prev };
-                                                        const deleteRecursive = (p: string) => {
-                                                            delete next[p];
-                                                            Object.keys(next).forEach(k => {
-                                                                if (k.startsWith(p + '.')) {
-                                                                    deleteRecursive(k);
-                                                                }
-                                                            });
-                                                        };
-                                                        deleteRecursive(path);
-                                                        return next;
-                                                    });
-                                                }}
+                                    {/* Jenkins Upload */}
+                                    <div className="border-t border-slate-700 pt-4">
+                                        <div className="text-xs font-bold text-slate-400 uppercase mb-2">上报到 Jenkins</div>
+                                        <div className="flex gap-2">
+                                            <input
+                                                value={jenkinsUrl}
+                                                onChange={e => setJenkinsUrl(e.target.value)}
+                                                placeholder="Jenkins Webhook URL"
+                                                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
                                             />
-                                        ))}
+                                            <button
+                                                onClick={sendToJenkins}
+                                                className="px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white rounded-lg font-bold flex items-center gap-2"
+                                            >
+                                                <Send size={14} /> 发送
+                                            </button>
+                                        </div>
                                     </div>
-                                )}
-                            </div>
 
-                            <div className="flex justify-between items-center mt-6">
-                                <div className="flex gap-2">
-                                    <button
-                                        onClick={() => {
-                                            const allSelected: Record<string, FieldConfig> = {};
-                                            Object.keys(fieldConfigSelection).forEach(k => {
-                                                allSelected[k] = { ...fieldConfigSelection[k], required: true };
-                                            });
-                                            setFieldConfigSelection(allSelected);
-                                        }}
-                                        className="text-xs text-indigo-400 hover:text-indigo-300 font-bold"
-                                    >
-                                        全选
-                                    </button>
-                                    <button
-                                        onClick={() => {
-                                            const noneSelected: Record<string, FieldConfig> = {};
-                                            Object.keys(fieldConfigSelection).forEach(k => {
-                                                noneSelected[k] = { ...fieldConfigSelection[k], required: false };
-                                            });
-                                            setFieldConfigSelection(noneSelected);
-                                        }}
-                                        className="text-xs text-slate-500 hover:text-slate-400"
-                                    >
-                                        全不选
-                                    </button>
+                                    <div className="flex justify-end mt-6">
+                                        <button onClick={() => setShowReportModal(false)} className="px-4 py-2 text-slate-400 hover:text-white">关闭</button>
+                                    </div>
                                 </div>
-                                <div className="flex gap-3">
+                            </div>
+                        )
+                    }
+
+                    {/* JSON Extract Modal (Payload / Schema) */}
+                    {
+                        showJsonToSchemaModal && (
+                            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60]">
+                                <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[600px]">
+                                    <h3 className="text-lg font-black text-white mb-4">
+                                        {jsonExtractMode === 'payload' ? '从 JSON 示例提取 Payload' : '从 JSON 示例生成 Schema'}
+                                    </h3>
+
+                                    <p className="text-sm text-slate-400 mb-4">
+                                        {jsonExtractMode === 'payload'
+                                            ? '粘贴完整的协议消息 JSON，自动提取其中的 payload 部分。'
+                                            : '粘贴协议文档中的 JSON 响应示例，可选择生成完整消息或仅 payload 的 Schema。'
+                                        }
+                                    </p>
+
+                                    <textarea
+                                        value={jsonExampleInput}
+                                        onChange={e => setJsonExampleInput(e.target.value)}
+                                        placeholder={'粘贴完整 JSON 示例，例如:\n{\n  "header": {"method": "GETACK", ...},\n  "payload": {"time": {"timestamp": 1234567890}}\n}'}
+                                        className="w-full h-48 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-emerald-400 font-mono outline-none focus:border-indigo-500 resize-none"
+                                    />
+
+                                    <div className="flex justify-end gap-3 mt-6">
+                                        <button
+                                            onClick={() => setShowJsonToSchemaModal(false)}
+                                            className="px-4 py-2 text-slate-400 hover:text-white"
+                                        >
+                                            取消
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                try {
+                                                    const parsed = JSON.parse(jsonExampleInput);
+                                                    const methods = getEnabledMethods();
+                                                    const currentMethod = methods[currentMethodIndex];
+
+                                                    if (!currentMethod) {
+                                                        showToast('warning', '请先选择一个 Method');
+                                                        return;
+                                                    }
+
+                                                    if (jsonExtractMode === 'payload') {
+                                                        // 提取 payload 部分
+                                                        const payloadData = parsed.payload !== undefined ? parsed.payload : parsed;
+                                                        const payloadStr = JSON.stringify(payloadData, null, 2);
+
+                                                        setNewProtocol(p => ({
+                                                            ...p,
+                                                            methods: {
+                                                                ...p.methods,
+                                                                [currentMethod]: {
+                                                                    ...p.methods[currentMethod],
+                                                                    payload: payloadStr
+                                                                }
+                                                            }
+                                                        }));
+                                                        setShowJsonToSchemaModal(false);
+                                                    } else if (jsonExtractMode === 'schema_payload') {
+                                                        // Response: 仅提取 payload 作为 schema 模板
+                                                        const payloadData = parsed.payload !== undefined ? parsed.payload : parsed;
+                                                        const payloadStr = JSON.stringify(payloadData, null, 2);
+
+                                                        setNewProtocol(p => ({
+                                                            ...p,
+                                                            methods: {
+                                                                ...p.methods,
+                                                                [currentMethod]: {
+                                                                    ...p.methods[currentMethod],
+                                                                    schema: payloadStr
+                                                                }
+                                                            }
+                                                        }));
+                                                        setShowJsonToSchemaModal(false);
+                                                        showToast('success', 'Payload 已提取到 Schema 编辑器');
+                                                    } else {
+                                                        // 生成 Schema - 第一步：解析并准备必填字段选择
+                                                        const schema = generateSchemaFromJson(parsed, false); // 先不生成 required
+                                                        setGeneratedSchema(JSON.stringify(schema, null, 2));
+
+                                                        setShowJsonToSchemaModal(false);
+                                                        setShowRequiredFieldsModal(true);
+                                                    }
+                                                } catch (e) {
+                                                    showToast('error', 'JSON 解析失败，请检查格式是否正确');
+                                                }
+                                            }}
+                                            className={`px-6 py-2 ${jsonExtractMode === 'payload' ? 'bg-blue-600 hover:bg-blue-500' : 'bg-emerald-600 hover:bg-emerald-500'} text-white rounded-lg font-bold`}
+                                        >
+                                            {jsonExtractMode === 'payload' ? '提取 Payload' : '生成 Schema'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )
+                    }
+
+                    {/* Required Fields Selection Modal */}
+                    {
+                        showRequiredFieldsModal && (
+                            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[70]">
+                                <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[800px] max-h-[80vh] flex flex-col">
+                                    <h3 className="text-lg font-black text-white mb-4">编辑 Schema</h3>
+                                    <p className="text-sm text-slate-400 mb-4">
+                                        您可以编辑 Schema 结构，并勾选 <span className="text-red-400 font-bold">Required</span> 复选框来标记必填字段。
+                                    </p>
+
+                                    <div className="flex-1 overflow-hidden border border-slate-700 rounded-lg bg-slate-950 relative">
+                                        <PayloadEditor
+                                            value={typeof generatedSchema === 'string' ? generatedSchema : JSON.stringify(generatedSchema, null, 2)}
+                                            onChange={(v) => setGeneratedSchema(v)}
+                                            mode="schema"
+                                            protocol={newProtocol}
+                                            method={getEnabledMethods()[currentMethodIndex]}
+                                            session={session}
+                                        />
+                                    </div>
+
+                                    <div className="flex justify-end gap-3 mt-6">
+                                        <button
+                                            onClick={() => setShowRequiredFieldsModal(false)}
+                                            className="px-4 py-2 text-slate-400 hover:text-white"
+                                        >
+                                            取消
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                const methods = getEnabledMethods();
+                                                const currentMethod = methods[currentMethodIndex];
+
+                                                if (currentMethod) {
+                                                    setNewProtocol(p => ({
+                                                        ...p,
+                                                        methods: {
+                                                            ...p.methods,
+                                                            [currentMethod]: {
+                                                                ...p.methods[currentMethod],
+                                                                schema: typeof generatedSchema === 'string' ? generatedSchema : JSON.stringify(generatedSchema, null, 2)
+                                                            }
+                                                        }
+                                                    }));
+                                                }
+
+                                                setShowRequiredFieldsModal(false);
+                                            }}
+                                            className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold"
+                                        >
+                                            应用 Schema
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )
+                    }
+
+                    {/* Protocol Generator Modal (从 Ability + Confluence 自动生成) */}
+                    <ProtocolGenerator
+                        isOpen={showProtocolGenerator}
+                        onClose={() => setShowProtocolGenerator(false)}
+                        onGenerate={handleGeneratedProtocols}
+                        generateSchema={generateSchemaFromJson}
+                        deviceName={targetDevice?.name}
+                        onFetchAbility={fetchDeviceAbility}
+                    />
+
+
+
+
+
+                    {/* Test Execution Configuration Modal */}
+                    {
+                        showExecutionConfigModal && (
+                            <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={() => setShowExecutionConfigModal(false)}>
+                                <div className="bg-slate-900 rounded-2xl p-6 max-w-md w-full mx-4 border border-slate-700" onClick={e => e.stopPropagation()}>
+                                    <div className="flex justify-between items-center mb-4">
+                                        <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                                            <Settings size={20} className="text-indigo-400" />
+                                            测试执行配置
+                                        </h3>
+                                        <button onClick={() => setShowExecutionConfigModal(false)} className="text-slate-400 hover:text-white">
+                                            <X size={20} />
+                                        </button>
+                                    </div>
+
+                                    <div className="space-y-4">
+                                        {/* Timeout Configuration */}
+                                        <div>
+                                            <label className="text-sm text-slate-400 block mb-2">超时时间（秒）</label>
+                                            <input
+                                                type="number"
+                                                value={tempExecutionConfig.timeout / 1000}
+                                                onChange={(e) => setTempExecutionConfig(prev => ({ ...prev, timeout: Math.max(1, parseInt(e.target.value) || 8) * 1000 }))}
+                                                min={1}
+                                                max={60}
+                                                className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-indigo-500 outline-none"
+                                            />
+                                            <p className="text-xs text-slate-500 mt-1">每个测试的最大等待响应时间，默认 8 秒</p>
+                                        </div>
+
+                                        {/* Retry Configuration */}
+                                        <div>
+                                            <label className="text-sm text-slate-400 block mb-2">失败重试次数</label>
+                                            <input
+                                                type="number"
+                                                value={tempExecutionConfig.retryCount}
+                                                onChange={(e) => setTempExecutionConfig(prev => ({ ...prev, retryCount: Math.max(0, Math.min(5, parseInt(e.target.value) || 0)) }))}
+                                                min={0}
+                                                max={5}
+                                                className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-indigo-500 outline-none"
+                                            />
+                                            <p className="text-xs text-slate-500 mt-1">测试失败或超时后的重试次数，0 表示不重试</p>
+                                        </div>
+
+                                        {/* Stop on Fail Configuration */}
+                                        <div className="flex items-center gap-3">
+                                            <input
+                                                type="checkbox"
+                                                id="stopOnFail"
+                                                checked={tempExecutionConfig.stopOnFail}
+                                                onChange={(e) => setTempExecutionConfig(prev => ({ ...prev, stopOnFail: e.target.checked }))}
+                                                className="w-4 h-4 accent-indigo-500"
+                                            />
+                                            <label htmlFor="stopOnFail" className="text-sm text-slate-300">失败后停止执行</label>
+                                        </div>
+                                        <p className="text-xs text-slate-500 -mt-2">启用后，当任意测试失败时立即停止整个测试批次</p>
+                                    </div>
+
+                                    <div className="flex justify-end gap-3 mt-6">
+                                        <button
+                                            onClick={() => setShowExecutionConfigModal(false)}
+                                            className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm"
+                                        >
+                                            取消
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                if (selectedSuiteId) {
+                                                    setSuites(prev => prev.map(s =>
+                                                        s.id === selectedSuiteId
+                                                            ? { ...s, executionConfig: tempExecutionConfig, updatedAt: Date.now() }
+                                                            : s
+                                                    ));
+                                                }
+                                                setShowExecutionConfigModal(false);
+                                            }}
+                                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm flex items-center gap-2"
+                                        >
+                                            <Check size={16} /> 保存配置
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )
+                    }
+
+
+
+                    {/* Test Result Viewer Modal */}
+                    <TestResultViewer
+                        isOpen={showResultViewer}
+                        onClose={() => setShowResultViewer(false)}
+                        result={viewingResult?.result || null}
+                        batchResult={viewingResult?.batchResult || null}
+                        protocolNamespace={viewingResult?.namespace}
+                        protocolMethod={viewingResult?.method}
+                        onRetry={() => {
+                            if (viewingResult?.protocolId && viewingResult?.method) {
+                                const suite = suites.find(s => s.protocols.some(p => p.id === viewingResult.protocolId));
+                                const protocol = suite?.protocols.find(p => p.id === viewingResult.protocolId);
+                                if (protocol) {
+                                    runSingleTest(protocol, viewingResult.method as RequestMethod).then(res => {
+                                        setViewingResult(prev => prev ? { ...prev, result: { ...prev.result, ...res } } : null);
+                                    });
+                                }
+                            }
+                        }}
+                    />
+
+                    {/* Add Protocol Modal */}
+                    {
+                        isAddingProtocol && (
+                            <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={() => setIsAddingProtocol(false)}>
+                                <div className="bg-slate-900 rounded-2xl p-6 max-w-md w-full mx-4 border border-slate-700" onClick={e => e.stopPropagation()}>
+                                    <h3 className="text-lg font-bold text-white mb-4">Add New Protocol</h3>
+                                    <div className="space-y-4">
+                                        <div>
+                                            <label className="text-sm text-slate-400 block mb-2">Namespace *</label>
+                                            <input
+                                                type="text"
+                                                value={newProtocol.namespace}
+                                                onChange={(e) => setNewProtocol(prev => ({ ...prev, namespace: e.target.value, name: e.target.value }))}
+                                                className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-indigo-500 outline-none"
+                                                placeholder="e.g. Appliance.System.All"
+                                                autoFocus
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-sm text-slate-400 block mb-2">Description</label>
+                                            <textarea
+                                                value={newProtocol.description || ''}
+                                                onChange={(e) => setNewProtocol(prev => ({ ...prev, description: e.target.value }))}
+                                                className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-indigo-500 outline-none h-24 resize-none"
+                                                placeholder="Optional description"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="flex justify-end gap-3 mt-6">
+                                        <button
+                                            onClick={() => setIsAddingProtocol(false)}
+                                            className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm"
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                if (!newProtocol.namespace) {
+                                                    showToast('warning', 'Namespace is required');
+                                                    return;
+                                                }
+                                                // Ensure methods structure exists
+                                                const methods = newProtocol.methods || ALL_METHODS.reduce((acc, m) => ({ ...acc, [m]: { enabled: false, requestPayload: {}, responseSchema: {} } }), {} as any);
+
+                                                // Update state before adding (since addProtocolToSuite uses state)
+                                                // Actually addProtocolToSuite uses current state, so we need to set it first?
+                                                // No, setState is async. We can't set then call immediately.
+                                                // We should modify addProtocolToSuite to accept params or use a temp state.
+                                                // But addProtocolToSuite reads newProtocol directly.
+                                                // The input onChange already updated newProtocol.
+                                                // So we just need to ensure methods are initialized if empty.
+
+                                                if (Object.keys(newProtocol.methods || {}).length === 0) {
+                                                    setNewProtocol(prev => ({ ...prev, methods }));
+                                                    // This won't work immediately for addProtocolToSuite call below.
+                                                }
+
+                                                // Let's manually call setSuites logic here or fix addProtocolToSuite later?
+                                                // Better: Update addProtocolToSuite to be robust, or just rely on current state.
+                                                // The onChange updates newProtocol. So namespace is there.
+                                                // Methods might be empty. addProtocolToSuite doesn't validate methods existence, just iterates keys.
+                                                // If keys empty, loop doesn't run. That's fine.
+
+                                                addProtocolToSuite();
+                                                setIsAddingProtocol(false);
+                                            }}
+                                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-bold"
+                                        >
+                                            Create
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )
+                    }
+
+                    {/* JSON Input Modal (For Schema/Payload Generation) */}
+                    {showJsonToSchemaModal && (
+                        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 backdrop-blur-sm" onClick={() => setShowJsonToSchemaModal(false)}>
+                            <div className="bg-[#0f172a] rounded-xl p-0 max-w-2xl w-full mx-4 border border-slate-800 shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                                <div className="p-6 pb-4">
+                                    <h3 className="text-lg font-bold text-white mb-2">
+                                        {jsonExtractMode === 'schema' ? '从 JSON 示例生成 Schema' : '从 JSON 示例提取 Payload'}
+                                    </h3>
+                                    <p className="text-sm text-slate-400">
+                                        {jsonExtractMode === 'schema'
+                                            ? '粘贴完整的响应 JSON，自动生成用于验证的 Schema 结构。'
+                                            : '粘贴完整的协议消息 JSON，自动提取其中的 payload 部分。'}
+                                    </p>
+                                </div>
+                                <div className="px-6 py-2">
+                                    <div className="bg-slate-950 rounded-lg border border-slate-800 p-4">
+                                        <div className="text-xs text-slate-500 mb-2 font-mono">粘贴完整 JSON 示例:</div>
+                                        <textarea
+                                            value={jsonExampleInput}
+                                            onChange={(e) => setJsonExampleInput(e.target.value)}
+                                            className="w-full h-64 bg-transparent text-emerald-400 font-mono text-sm outline-none resize-none placeholder-slate-700 custom-scrollbar"
+                                            placeholder={jsonExtractMode === 'schema'
+                                                ? `{\n  "header": { "code": 0, ... },\n  "payload": { "status": "ok" }\n}`
+                                                : `{\n  "header": { "method": "SET", ... },\n  "payload": { "switch": { "on": 1 } }\n}`}
+                                        />
+                                    </div>
+                                </div>
+                                <div className="p-6 pt-4 flex justify-end gap-3">
                                     <button
-                                        onClick={() => setShowRequiredFieldsModal(false)}
-                                        className="px-4 py-2 text-slate-400 hover:text-white"
+                                        onClick={() => setShowJsonToSchemaModal(false)}
+                                        className="px-4 py-2 text-slate-400 hover:text-white text-sm transition-colors"
                                     >
                                         取消
                                     </button>
                                     <button
                                         onClick={() => {
-                                            // Apply required fields and save
-                                            const finalSchema = applyRequiredFields(generatedSchema, fieldConfigSelection);
-                                            const schemaStr = JSON.stringify(finalSchema, null, 2);
+                                            try {
+                                                const json = JSON.parse(jsonExampleInput);
+                                                if (jsonExtractMode === 'payload') {
+                                                    // Extract payload if it exists, otherwise use full json
+                                                    const payloadData = json.payload !== undefined ? json.payload : json;
 
-                                            const methods = getEnabledMethods();
-                                            const currentMethod = methods[currentMethodIndex];
-
-                                            if (currentMethod) {
-                                                setNewProtocol(p => ({
-                                                    ...p,
-                                                    methods: {
-                                                        ...p.methods,
-                                                        [currentMethod]: {
-                                                            ...p.methods[currentMethod],
-                                                            schema: schemaStr
+                                                    setNewProtocol(p => ({
+                                                        ...p,
+                                                        methods: {
+                                                            ...p.methods,
+                                                            [editingMethod]: {
+                                                                ...p.methods[editingMethod],
+                                                                payload: JSON.stringify(payloadData, null, 2)
+                                                            }
                                                         }
-                                                    }
-                                                }));
-                                            }
+                                                    }));
+                                                    setShowJsonToSchemaModal(false);
+                                                    showToast('success', 'Payload 已提取并更新');
+                                                } else {
+                                                    // Schema Generation Logic
+                                                    // Simple schema generator
+                                                    const generateSimpleSchema = (val: any): any => {
+                                                        if (val === null) return { type: 'null' };
+                                                        if (Array.isArray(val)) {
+                                                            return {
+                                                                type: 'array',
+                                                                items: val.length > 0 ? generateSimpleSchema(val[0]) : {}
+                                                            };
+                                                        }
+                                                        if (typeof val === 'object') {
+                                                            const props: any = {};
+                                                            Object.keys(val).forEach(k => props[k] = generateSimpleSchema(val[k]));
+                                                            return { type: 'object', properties: props };
+                                                        }
+                                                        return { type: typeof val };
+                                                    };
 
-                                            setShowRequiredFieldsModal(false);
+                                                    const schema = generateSimpleSchema(json);
+                                                    setGeneratedSchema(JSON.stringify(schema, null, 2));
+                                                    setShowJsonToSchemaModal(false);
+                                                    setShowRequiredFieldsModal(true);
+                                                }
+                                            } catch (e) {
+                                                showToast('error', '无效的 JSON 格式');
+                                            }
                                         }}
-                                        className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold"
+                                        className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-bold shadow-lg shadow-blue-900/20 transition-all"
                                     >
-                                        完成生成
+                                        {jsonExtractMode === 'schema' ? '生成 Schema' : '提取 Payload'}
                                     </button>
                                 </div>
                             </div>
                         </div>
-                    </div>
-                )
-            }
+                    )}
 
-            {/* Protocol Generator Modal (从 Ability + Confluence 自动生成) */}
-            <ProtocolGenerator
-                isOpen={showProtocolGenerator}
-                onClose={() => setShowProtocolGenerator(false)}
-                onGenerate={handleGeneratedProtocols}
-                generateSchema={generateSchemaFromJson}
-                deviceName={targetDevice?.name}
-                onFetchAbility={fetchDeviceAbility}
-            />
-
-
-
-            {/* Batch Test Summary Panel */}
-            <BatchTestSummaryPanel
-                isOpen={showBatchSummary}
-                onClose={() => setShowBatchSummary(false)}
-                batchResult={batchTestResult}
-                onViewDetail={(item) => {
-                    if (item.detailedResult) {
-                        setShowBatchSummary(false);
-                        setViewingFromBatch(true);
-                        setViewingResult({
-                            result: item.detailedResult,
-                            namespace: item.namespace,
-                            method: item.method,
-                            protocolId: item.protocolId
-                        });
-                        setShowResultViewer(true);
-                    }
-                }}
-            />
-
-            {/* Test Execution Configuration Modal */}
-            {
-                showExecutionConfigModal && (
-                    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={() => setShowExecutionConfigModal(false)}>
-                        <div className="bg-slate-900 rounded-2xl p-6 max-w-md w-full mx-4 border border-slate-700" onClick={e => e.stopPropagation()}>
-                            <div className="flex justify-between items-center mb-4">
-                                <h3 className="text-lg font-bold text-white flex items-center gap-2">
-                                    <Settings size={20} className="text-indigo-400" />
-                                    测试执行配置
-                                </h3>
-                                <button onClick={() => setShowExecutionConfigModal(false)} className="text-slate-400 hover:text-white">
-                                    <X size={20} />
-                                </button>
-                            </div>
-
-                            <div className="space-y-4">
-                                {/* Timeout Configuration */}
-                                <div>
-                                    <label className="text-sm text-slate-400 block mb-2">超时时间（秒）</label>
-                                    <input
-                                        type="number"
-                                        value={tempExecutionConfig.timeout / 1000}
-                                        onChange={(e) => setTempExecutionConfig(prev => ({ ...prev, timeout: Math.max(1, parseInt(e.target.value) || 8) * 1000 }))}
-                                        min={1}
-                                        max={60}
-                                        className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-indigo-500 outline-none"
-                                    />
-                                    <p className="text-xs text-slate-500 mt-1">每个测试的最大等待响应时间，默认 8 秒</p>
+                    {/* Schema Preview Modal */}
+                    {showSchemaPreview && (
+                        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 backdrop-blur-sm" onClick={() => setShowSchemaPreview(false)}>
+                            <div className="bg-[#0f172a] rounded-xl p-0 max-w-3xl w-full mx-4 border border-slate-800 shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                                <div className="p-6 pb-4 border-b border-slate-800">
+                                    <h3 className="text-lg font-bold text-white mb-2">
+                                        Schema 预览
+                                    </h3>
+                                    <p className="text-sm text-slate-400">
+                                        这是当前配置生成的最终 JSON Schema，将用于验证设备响应。
+                                    </p>
                                 </div>
-
-                                {/* Retry Configuration */}
-                                <div>
-                                    <label className="text-sm text-slate-400 block mb-2">失败重试次数</label>
-                                    <input
-                                        type="number"
-                                        value={tempExecutionConfig.retryCount}
-                                        onChange={(e) => setTempExecutionConfig(prev => ({ ...prev, retryCount: Math.max(0, Math.min(5, parseInt(e.target.value) || 0)) }))}
-                                        min={0}
-                                        max={5}
-                                        className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-indigo-500 outline-none"
-                                    />
-                                    <p className="text-xs text-slate-500 mt-1">测试失败或超时后的重试次数，0 表示不重试</p>
+                                <div className="p-0">
+                                    <div className="bg-slate-950 p-4 max-h-[60vh] overflow-auto custom-scrollbar">
+                                        <pre className="text-xs font-mono text-emerald-400 whitespace-pre-wrap break-all">
+                                            {(() => {
+                                                try {
+                                                    const schemaContent = newProtocol.methods[editingMethod]?.schema;
+                                                    const parsed = typeof schemaContent === 'string' ? JSON.parse(schemaContent) : schemaContent;
+                                                    // 尝试判断是否已经是 Schema 格式 (包含 type 或 properties)
+                                                    if (parsed.type || parsed.properties) {
+                                                        return JSON.stringify(parsed, null, 2);
+                                                    }
+                                                    // 否则视为 Payload 模板，生成 Schema
+                                                    const generated = generateSchemaFromJson(parsed, true); // 默认全必填? 或者根据编辑器状态?
+                                                    // 由于编辑器状态(required)未持久化到 schema 字符串，这里只能生成基础 Schema
+                                                    // 如果需要精确控制，需要解决 required 持久化问题
+                                                    return JSON.stringify(generated, null, 2);
+                                                } catch (e) {
+                                                    return newProtocol.methods[editingMethod]?.schema || '{}';
+                                                }
+                                            })()}
+                                        </pre>
+                                    </div>
                                 </div>
-
-                                {/* Stop on Fail Configuration */}
-                                <div className="flex items-center gap-3">
-                                    <input
-                                        type="checkbox"
-                                        id="stopOnFail"
-                                        checked={tempExecutionConfig.stopOnFail}
-                                        onChange={(e) => setTempExecutionConfig(prev => ({ ...prev, stopOnFail: e.target.checked }))}
-                                        className="w-4 h-4 accent-indigo-500"
-                                    />
-                                    <label htmlFor="stopOnFail" className="text-sm text-slate-300">失败后停止执行</label>
+                                <div className="p-6 pt-4 flex justify-end gap-3 border-t border-slate-800">
+                                    <button
+                                        onClick={() => {
+                                            const content = (() => {
+                                                try {
+                                                    const schemaContent = newProtocol.methods[editingMethod]?.schema;
+                                                    const parsed = typeof schemaContent === 'string' ? JSON.parse(schemaContent) : schemaContent;
+                                                    if (parsed.type || parsed.properties) {
+                                                        return JSON.stringify(parsed, null, 2);
+                                                    }
+                                                    const generated = generateSchemaFromJson(parsed, true);
+                                                    return JSON.stringify(generated, null, 2);
+                                                } catch (e) {
+                                                    return newProtocol.methods[editingMethod]?.schema || '{}';
+                                                }
+                                            })();
+                                            navigator.clipboard.writeText(content);
+                                            showToast('success', 'Schema 已复制到剪贴板');
+                                        }}
+                                        className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-sm font-bold transition-colors flex items-center gap-2"
+                                    >
+                                        <Copy size={14} /> 复制
+                                    </button>
+                                    <button
+                                        onClick={() => setShowSchemaPreview(false)}
+                                        className="px-6 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-bold transition-colors"
+                                    >
+                                        关闭
+                                    </button>
                                 </div>
-                                <p className="text-xs text-slate-500 -mt-2">启用后，当任意测试失败时立即停止整个测试批次</p>
-                            </div>
-
-                            <div className="flex justify-end gap-3 mt-6">
-                                <button
-                                    onClick={() => setShowExecutionConfigModal(false)}
-                                    className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm"
-                                >
-                                    取消
-                                </button>
-                                <button
-                                    onClick={() => {
-                                        if (selectedSuiteId) {
-                                            setSuites(prev => prev.map(s =>
-                                                s.id === selectedSuiteId
-                                                    ? { ...s, executionConfig: tempExecutionConfig, updatedAt: Date.now() }
-                                                    : s
-                                            ));
-                                        }
-                                        setShowExecutionConfigModal(false);
-                                    }}
-                                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm flex items-center gap-2"
-                                >
-                                    <Check size={16} /> 保存配置
-                                </button>
                             </div>
                         </div>
-                    </div>
-                )
-            }
-
-
-
-            {/* Test Result Viewer Modal */}
-            <TestResultViewer
-                isOpen={showResultViewer}
-                onClose={() => setShowResultViewer(false)}
-                result={viewingResult?.result || null}
-                protocolNamespace={viewingResult?.namespace}
-                protocolMethod={viewingResult?.method}
-                onRetry={() => {
-                    if (viewingResult?.protocolId && viewingResult?.method) {
-                        const suite = suites.find(s => s.protocols.some(p => p.id === viewingResult.protocolId));
-                        const protocol = suite?.protocols.find(p => p.id === viewingResult.protocolId);
-                        if (protocol) {
-                            runSingleTest(protocol, viewingResult.method as RequestMethod).then(res => {
-                                setViewingResult(prev => prev ? { ...prev, result: { ...prev.result, ...res } } : null);
-                            });
-                        }
-                    }
-                }}
-            />
-
-            {/* Add Protocol Modal */}
-            {isAddingProtocol && (
-                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={() => setIsAddingProtocol(false)}>
-                    <div className="bg-slate-900 rounded-2xl p-6 max-w-md w-full mx-4 border border-slate-700" onClick={e => e.stopPropagation()}>
-                        <h3 className="text-lg font-bold text-white mb-4">Add New Protocol</h3>
-                        <div className="space-y-4">
-                            <div>
-                                <label className="text-sm text-slate-400 block mb-2">Namespace *</label>
-                                <input
-                                    type="text"
-                                    value={newProtocol.namespace}
-                                    onChange={(e) => setNewProtocol(prev => ({ ...prev, namespace: e.target.value, name: e.target.value }))}
-                                    className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-indigo-500 outline-none"
-                                    placeholder="e.g. Appliance.System.All"
-                                    autoFocus
-                                />
-                            </div>
-                            <div>
-                                <label className="text-sm text-slate-400 block mb-2">Description</label>
-                                <textarea
-                                    value={newProtocol.description || ''}
-                                    onChange={(e) => setNewProtocol(prev => ({ ...prev, description: e.target.value }))}
-                                    className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-indigo-500 outline-none h-24 resize-none"
-                                    placeholder="Optional description"
-                                />
+                    )}
+                    {/* Copy Protocol Modal */}
+                    {showCopyProtocolModal && (
+                        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[450px]">
+                                <h3 className="text-lg font-black text-white mb-4">复制协议</h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-400 uppercase mb-1 block">目标测试库</label>
+                                        <select
+                                            value={copyTargetSuiteId}
+                                            onChange={e => setCopyTargetSuiteId(e.target.value)}
+                                            className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white outline-none focus:border-indigo-500"
+                                        >
+                                            <option value="">选择测试库...</option>
+                                            {suites.map(s => (
+                                                <option key={s.id} value={s.id}>{s.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700/50">
+                                        <div className="text-xs text-slate-400 mb-1">将复制以下协议:</div>
+                                        <div className="font-mono text-sm text-white font-bold">{newProtocol.namespace}</div>
+                                        <div className="text-xs text-slate-500 mt-1">新协议将自动命名为 "{newProtocol.name}_copy" 并重置为未验证状态。</div>
+                                    </div>
+                                </div>
+                                <div className="mt-6 flex justify-end gap-3">
+                                    <button
+                                        onClick={() => setShowCopyProtocolModal(false)}
+                                        className="px-4 py-2 text-slate-400 hover:text-white font-bold transition-colors"
+                                    >
+                                        取消
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            handleCopyProtocol();
+                                            setShowCopyProtocolModal(false);
+                                        }}
+                                        disabled={!copyTargetSuiteId}
+                                        className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-bold transition-colors"
+                                    >
+                                        确认复制
+                                    </button>
+                                </div>
                             </div>
                         </div>
-                        <div className="flex justify-end gap-3 mt-6">
-                            <button
-                                onClick={() => setIsAddingProtocol(false)}
-                                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                onClick={() => {
-                                    if (!newProtocol.namespace) {
-                                        showToast('warning', 'Namespace is required');
-                                        return;
-                                    }
-                                    // Ensure methods structure exists
-                                    const methods = newProtocol.methods || ALL_METHODS.reduce((acc, m) => ({ ...acc, [m]: { enabled: false, requestPayload: {}, responseSchema: {} } }), {} as any);
+                    )}
 
-                                    // Update state before adding (since addProtocolToSuite uses state)
-                                    // Actually addProtocolToSuite uses current state, so we need to set it first?
-                                    // No, setState is async. We can't set then call immediately.
-                                    // We should modify addProtocolToSuite to accept params or use a temp state.
-                                    // But addProtocolToSuite reads newProtocol directly.
-                                    // The input onChange already updated newProtocol.
-                                    // So we just need to ensure methods are initialized if empty.
-
-                                    if (Object.keys(newProtocol.methods || {}).length === 0) {
-                                        setNewProtocol(prev => ({ ...prev, methods }));
-                                        // This won't work immediately for addProtocolToSuite call below.
-                                    }
-
-                                    // Let's manually call setSuites logic here or fix addProtocolToSuite later?
-                                    // Better: Update addProtocolToSuite to be robust, or just rely on current state.
-                                    // The onChange updates newProtocol. So namespace is there.
-                                    // Methods might be empty. addProtocolToSuite doesn't validate methods existence, just iterates keys.
-                                    // If keys empty, loop doesn't run. That's fine.
-
-                                    addProtocolToSuite();
-                                    setIsAddingProtocol(false);
-                                }}
-                                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-bold"
-                            >
-                                Create
-                            </button>
-                        </div>
-                    </div>
+                    <TestStatisticsDashboard
+                        isOpen={showStatsDashboard}
+                        onClose={() => setShowStatsDashboard(false)}
+                        testHistory={testHistory.map((run: TestRun) => ({
+                            id: run.id,
+                            suiteId: run.suiteId,
+                            suiteName: run.suiteName,
+                            deviceId: run.deviceId,
+                            deviceName: run.deviceName,
+                            startTime: run.startTime,
+                            endTime: run.endTime,
+                            status: run.status,
+                            results: run.results.map((r: TestRun['results'][0]) => ({
+                                protocolId: r.protocolId,
+                                namespace: r.namespace,
+                                method: r.method,
+                                status: r.status,
+                                duration: r.duration || 0,
+                                response: r.response,
+                                error: r.error
+                            })),
+                            summary: run.summary
+                        }))}
+                        onClearHistory={() => {
+                            if (confirm('确定要清除所有测试历史记录吗？')) {
+                                setTestHistory([]);
+                            }
+                        }}
+                    />
                 </div>
-            )}
-
-            {/* Test Statistics Dashboard */}
-            <TestStatisticsDashboard
-                isOpen={showStatsDashboard}
-                onClose={() => setShowStatsDashboard(false)}
-                testHistory={testHistory.map((run: TestRun) => ({
-                    id: run.id,
-                    suiteId: run.suiteId,
-                    suiteName: run.suiteName,
-                    deviceId: run.deviceId,
-                    deviceName: run.deviceName,
-                    startTime: run.startTime,
-                    endTime: run.endTime,
-                    status: run.status,
-                    results: run.results.map((r: TestRun['results'][0]) => ({
-                        protocolId: r.protocolId,
-                        namespace: r.namespace,
-                        method: r.method,
-                        status: r.status,
-                        duration: r.duration || 0,
-                        response: r.response,
-                        error: r.error
-                    })),
-                    summary: run.summary
-                }))}
-                onClearHistory={() => {
-                    if (confirm('确定要清除所有测试历史记录吗？')) {
-                        setTestHistory([]);
-                    }
-                }}
-            />
-        </div>
+            </div >
+        </div >
     );
 };

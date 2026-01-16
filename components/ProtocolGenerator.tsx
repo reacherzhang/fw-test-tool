@@ -3,11 +3,11 @@
  * 从设备 Ability + Confluence 文档自动生成协议库
  */
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
 import {
     Wand2, BookOpen, RefreshCw, CheckCircle, XCircle, AlertTriangle,
     Settings, Play, ExternalLink, ChevronDown, ChevronRight, Check,
-    X, FileText, Loader2, Info, Wifi, Copy
+    X, FileText, Loader2, Info, Wifi, Copy, Bot, Sparkles, Zap
 } from 'lucide-react';
 import {
     ConfluenceConfig,
@@ -16,6 +16,18 @@ import {
     generateProtocolFromDoc,
     HttpFetcher
 } from '../services/confluence-protocol-service';
+import {
+    AIServiceConfig,
+    AIMatchStrategy,
+    AIProcessLog,
+    AIGeneratedProtocol,
+    AIProtocolService,
+    DEFAULT_AI_CONFIG,
+    AI_MODELS,
+    AIProvider,
+    estimateTokens,
+    estimateProcessingTime
+} from '../services/ai-protocol-service';
 
 /**
  * 创建使用 Electron 原生 HTTP 的 fetcher
@@ -77,11 +89,15 @@ const createElectronFetcher = (): HttpFetcher => {
 };
 
 
+// 文档匹配模式
+type DocMatchMode = 'manual' | 'ai';
+
 // 协议生成状态
 interface ProtocolGenerationState {
-    status: 'idle' | 'fetching-ability' | 'configuring-docs' | 'fetching-docs' | 'reviewing' | 'saving' | 'done' | 'error';
+    status: 'idle' | 'fetching-ability' | 'selecting-mode' | 'configuring-docs' | 'fetching-docs' | 'ai-processing' | 'reviewing' | 'saving' | 'done' | 'error';
     abilityNamespaces: string[];
     parsedDocs: Map<string, ParsedProtocolDoc>;
+    aiGeneratedProtocols: Map<string, AIGeneratedProtocol>;
     progress: { current: number; total: number; namespace: string };
     error?: string;
 }
@@ -132,6 +148,7 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
         status: 'idle',
         abilityNamespaces: [],
         parsedDocs: new Map(),
+        aiGeneratedProtocols: new Map(),
         progress: { current: 0, total: 0, namespace: '' },
     });
 
@@ -146,6 +163,30 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
     // 选中的协议
     const [selectedProtocols, setSelectedProtocols] = useState<Set<string>>(new Set());
     const [expandedProtocols, setExpandedProtocols] = useState<Set<string>>(new Set());
+
+    // AI 模式相关状态
+    const [docMatchMode, setDocMatchMode] = useState<DocMatchMode | null>(null);
+    const [aiConfig, setAIConfig] = useState<AIServiceConfig>(() => {
+        const saved = localStorage.getItem('ai_protocol_config');
+        if (saved) {
+            try {
+                return JSON.parse(saved);
+            } catch { }
+        }
+        return DEFAULT_AI_CONFIG;
+    });
+    const [aiStrategy, setAIStrategy] = useState<AIMatchStrategy>({
+        semanticSearch: true,
+        deepAnalysis: true,
+        generateTestCases: false,
+    });
+    const [aiConfigTesting, setAIConfigTesting] = useState(false);
+    const [aiConfigTestResult, setAIConfigTestResult] = useState<{ success: boolean; message: string } | null>(null);
+    const [aiProcessLogs, setAIProcessLogs] = useState<AIProcessLog[]>([]);
+    const [aiProcessingTime, setAIProcessingTime] = useState<number>(0);
+    const [aiTokensUsed, setAITokensUsed] = useState<number>(0);
+    const aiServiceRef = useRef<AIProtocolService | null>(null);
+    const aiLogsContainerRef = useRef<HTMLDivElement>(null);
 
     // 保存配置
     const saveConfig = useCallback(() => {
@@ -333,7 +374,7 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
             setState(prev => ({
                 ...prev,
                 abilityNamespaces: namespaces,
-                status: 'configuring-docs',
+                status: 'selecting-mode', // 修改为进入模式选择
                 progress: { current: 0, total: namespaces.length, namespace: '' },
             }));
 
@@ -346,6 +387,102 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
         }
     };
 
+    // 测试 AI 连接
+    const testAIConnection = async () => {
+        if (!aiConfig.apiKey) {
+            setAIConfigTestResult({ success: false, message: '请填写 API Key' });
+            return;
+        }
+
+        setAIConfigTesting(true);
+        setAIConfigTestResult(null);
+
+        try {
+            const service = new AIProtocolService(aiConfig, config);
+            const result = await service.testConnection();
+            setAIConfigTestResult(result);
+
+            if (result.success) {
+                localStorage.setItem('ai_protocol_config', JSON.stringify(aiConfig));
+            }
+        } catch (error: any) {
+            setAIConfigTestResult({ success: false, message: `测试失败: ${error.message}` });
+        } finally {
+            setAIConfigTesting(false);
+        }
+    };
+
+    // 开始 AI 处理
+    const startAIProcessing = async () => {
+        if (!aiConfig.apiKey) {
+            setAIConfigTestResult({ success: false, message: '请填写 API Key' });
+            return;
+        }
+
+        setState(prev => ({
+            ...prev,
+            status: 'ai-processing',
+            aiGeneratedProtocols: new Map(),
+            progress: { current: 0, total: state.abilityNamespaces.length, namespace: '' }
+        }));
+
+        setAIProcessLogs([]);
+        setAIProcessingTime(0);
+        setAITokensUsed(0);
+
+        // 启动计时器
+        const startTime = Date.now();
+        const timerId = setInterval(() => {
+            setAIProcessingTime(Math.floor((Date.now() - startTime) / 1000));
+        }, 1000);
+
+        try {
+            const service = new AIProtocolService(aiConfig, config);
+            aiServiceRef.current = service;
+
+            const results = await service.processProtocols(
+                state.abilityNamespaces,
+                aiStrategy,
+                (current, total, namespace, log) => {
+                    setState(prev => ({
+                        ...prev,
+                        progress: { current, total, namespace }
+                    }));
+
+                    setAIProcessLogs(prev => [...prev, log]);
+
+                    // 自动滚动日志
+                    if (aiLogsContainerRef.current) {
+                        aiLogsContainerRef.current.scrollTop = aiLogsContainerRef.current.scrollHeight;
+                    }
+                }
+            );
+
+            // 估算 Token 消耗
+            const tokens = estimateTokens(state.abilityNamespaces.length, aiStrategy);
+            setAITokensUsed(tokens);
+
+            setState(prev => ({
+                ...prev,
+                status: 'reviewing',
+                aiGeneratedProtocols: results,
+            }));
+
+            // 默认全选
+            setSelectedProtocols(new Set(state.abilityNamespaces));
+
+        } catch (error: any) {
+            setState(prev => ({
+                ...prev,
+                status: 'error',
+                error: error.message || 'AI 处理失败',
+            }));
+        } finally {
+            clearInterval(timerId);
+            aiServiceRef.current = null;
+        }
+    };
+
     // 确认生成
     const confirmGeneration = () => {
         setState(prev => ({ ...prev, status: 'saving' }));
@@ -353,16 +490,33 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
         const protocols: any[] = [];
 
         selectedProtocols.forEach(namespace => {
-            const doc = state.parsedDocs.get(namespace);
-            if (doc) {
-                const generated = generateProtocolFromDoc(doc, generateSchema);
-                protocols.push({
-                    id: generated.id,
-                    namespace: generated.namespace,
-                    name: generated.name,
-                    description: generated.description,
-                    methods: generated.methods,
-                });
+            if (docMatchMode === 'ai') {
+                // AI 模式
+                const aiProto = state.aiGeneratedProtocols.get(namespace);
+                if (aiProto) {
+                    protocols.push({
+                        id: `proto_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                        namespace: aiProto.namespace,
+                        name: aiProto.namespace, // 使用 namespace 作为 name
+                        description: aiProto.description,
+                        methods: aiProto.methods,
+                        reviewStatus: 'UNVERIFIED'
+                    });
+                }
+            } else {
+                // 手动模式
+                const doc = state.parsedDocs.get(namespace);
+                if (doc) {
+                    const generated = generateProtocolFromDoc(doc, generateSchema);
+                    protocols.push({
+                        id: generated.id,
+                        namespace: generated.namespace,
+                        name: generated.name,
+                        description: generated.description,
+                        methods: generated.methods,
+                        reviewStatus: 'UNVERIFIED'
+                    });
+                }
             }
         });
 
@@ -376,8 +530,10 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                 status: 'idle',
                 abilityNamespaces: [],
                 parsedDocs: new Map(),
+                aiGeneratedProtocols: new Map(),
                 progress: { current: 0, total: 0, namespace: '' },
             });
+            setDocMatchMode(null);
         }, 1500);
     };
 
@@ -616,6 +772,314 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                         </div>
                     )}
 
+                    {state.status === 'selecting-mode' && (
+                        <div className="flex flex-col h-full">
+                            <div className="text-center mb-8">
+                                <h3 className="text-lg font-bold text-white mb-2">选择生成模式</h3>
+                                <p className="text-sm text-slate-400">
+                                    检测到 {state.abilityNamespaces.length} 个协议。请选择文档匹配方式。
+                                </p>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-6 max-w-4xl mx-auto w-full px-8">
+                                {/* 手动模式 */}
+                                <div
+                                    onClick={() => {
+                                        setDocMatchMode('manual');
+                                        setState(prev => ({ ...prev, status: 'configuring-docs' }));
+                                    }}
+                                    className="bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-indigo-500/50 rounded-2xl p-6 cursor-pointer transition-all group"
+                                >
+                                    <div className="w-12 h-12 bg-slate-700 rounded-xl flex items-center justify-center mb-4 group-hover:bg-indigo-500/20 group-hover:text-indigo-400 transition-colors">
+                                        <FileText size={24} />
+                                    </div>
+                                    <h4 className="text-lg font-bold text-white mb-2">手动输入模式</h4>
+                                    <p className="text-sm text-slate-400 mb-4 h-10">
+                                        适用于已知文档链接的情况。支持输入父页面自动匹配或手动指定 URL。
+                                    </p>
+                                    <ul className="text-xs text-slate-500 space-y-2 mb-6">
+                                        <li className="flex items-center gap-2">✓ 精确控制文档来源</li>
+                                        <li className="flex items-center gap-2">✓ 适合结构化良好的文档库</li>
+                                    </ul>
+                                    <button className="w-full py-2 bg-slate-700 group-hover:bg-indigo-600 text-white rounded-lg text-sm font-bold transition-colors">
+                                        选择此模式
+                                    </button>
+                                </div>
+
+                                {/* AI 模式 */}
+                                <div
+                                    onClick={() => {
+                                        setDocMatchMode('ai');
+                                        // 强制重置所有 AI 相关状态
+                                        setState(prev => ({
+                                            ...prev,
+                                            status: 'ai-processing',
+                                            aiGeneratedProtocols: new Map(),
+                                            progress: { current: 0, total: prev.abilityNamespaces.length, namespace: '' }
+                                        }));
+                                        setAIProcessLogs([]);
+                                        setAIProcessingTime(0);
+                                        setAITokensUsed(0);
+                                    }}
+                                    className="bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-purple-500/50 rounded-2xl p-6 cursor-pointer transition-all group relative overflow-hidden"
+                                >
+                                    <div className="absolute top-0 right-0 bg-purple-600 text-white text-[10px] px-2 py-1 rounded-bl-lg font-bold">
+                                        BETA
+                                    </div>
+                                    <div className="w-12 h-12 bg-slate-700 rounded-xl flex items-center justify-center mb-4 group-hover:bg-purple-500/20 group-hover:text-purple-400 transition-colors">
+                                        <Sparkles size={24} />
+                                    </div>
+                                    <h4 className="text-lg font-bold text-white mb-2">AI 智能匹配模式</h4>
+                                    <p className="text-sm text-slate-400 mb-4 h-10">
+                                        调用 AI 自动在 Confluence 中检索、分析并生成最终协议配置。
+                                    </p>
+                                    <ul className="text-xs text-slate-500 space-y-2 mb-6">
+                                        <li className="flex items-center gap-2">✓ 智能语义搜索匹配</li>
+                                        <li className="flex items-center gap-2">✓ 自动提取 Schema</li>
+                                        <li className="flex items-center gap-2">✓ 节省大量手动配置时间</li>
+                                    </ul>
+                                    <button className="w-full py-2 bg-slate-700 group-hover:bg-purple-600 text-white rounded-lg text-sm font-bold transition-colors">
+                                        选择此模式
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="mt-auto pt-6 border-t border-slate-800 flex justify-between px-8 pb-2">
+                                <button
+                                    onClick={() => setState(prev => ({ ...prev, status: 'idle' }))}
+                                    className="px-4 py-2 text-slate-400 hover:text-white"
+                                >
+                                    返回
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {state.status === 'ai-processing' && (
+                        <div className="flex flex-col h-full">
+                            {state.progress.current === 0 && state.aiGeneratedProtocols.size === 0 ? (
+                                // AI 配置界面
+                                <div className="max-w-3xl mx-auto w-full">
+                                    <div className="text-center mb-6">
+                                        <div className="w-12 h-12 bg-purple-500/20 rounded-xl flex items-center justify-center mx-auto mb-3">
+                                            <Bot size={24} className="text-purple-400" />
+                                        </div>
+                                        <h3 className="text-lg font-bold text-white mb-2">AI 智能匹配配置</h3>
+                                        <p className="text-sm text-slate-400">
+                                            配置 AI 服务以开始自动检索和分析
+                                        </p>
+                                    </div>
+
+                                    <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 space-y-6">
+                                        {/* AI 服务配置 */}
+                                        <div>
+                                            <h4 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                                                <Settings size={16} className="text-indigo-400" /> AI 服务配置
+                                            </h4>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <label className="text-xs text-slate-500 mb-1 block">AI 提供商</label>
+                                                    <select
+                                                        value={aiConfig.provider}
+                                                        onChange={e => setAIConfig(prev => ({ ...prev, provider: e.target.value as AIProvider }))}
+                                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+                                                    >
+                                                        <option value="openai">OpenAI</option>
+                                                        <option value="azure">Azure OpenAI</option>
+                                                        <option value="ollama">Ollama (Local)</option>
+                                                        <option value="custom">Custom / Other</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label className="text-xs text-slate-500 mb-1 block">模型</label>
+                                                    <input
+                                                        type="text"
+                                                        value={aiConfig.model}
+                                                        onChange={e => setAIConfig(prev => ({ ...prev, model: e.target.value }))}
+                                                        placeholder="gpt-4-turbo"
+                                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+                                                    />
+                                                </div>
+                                                <div className="col-span-2">
+                                                    <label className="text-xs text-slate-500 mb-1 block">API Endpoint</label>
+                                                    <input
+                                                        type="text"
+                                                        value={aiConfig.apiEndpoint}
+                                                        onChange={e => setAIConfig(prev => ({ ...prev, apiEndpoint: e.target.value }))}
+                                                        placeholder="https://api.openai.com/v1"
+                                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+                                                    />
+                                                </div>
+                                                <div className="col-span-2">
+                                                    <label className="text-xs text-slate-500 mb-1 block">API Key</label>
+                                                    <div className="flex gap-2">
+                                                        <input
+                                                            type="password"
+                                                            value={aiConfig.apiKey}
+                                                            onChange={e => setAIConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                                                            placeholder="sk-..."
+                                                            className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+                                                        />
+                                                        <button
+                                                            onClick={testAIConnection}
+                                                            disabled={aiConfigTesting}
+                                                            className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm flex items-center gap-2 whitespace-nowrap"
+                                                        >
+                                                            {aiConfigTesting ? <Loader2 size={14} className="animate-spin" /> : <Wifi size={14} />}
+                                                            测试连接
+                                                        </button>
+                                                    </div>
+                                                    {aiConfigTestResult && (
+                                                        <div className={`mt-2 text-xs flex items-center gap-2 ${aiConfigTestResult.success ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                            {aiConfigTestResult.success ? <CheckCircle size={14} /> : <XCircle size={14} />}
+                                                            {aiConfigTestResult.message}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* 匹配策略 */}
+                                        <div className="border-t border-slate-700 pt-6">
+                                            <h4 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                                                <Zap size={16} className="text-amber-400" /> 匹配策略
+                                            </h4>
+                                            <div className="space-y-3">
+                                                <label className="flex items-center gap-3 p-3 bg-slate-900/50 rounded-lg border border-slate-800 cursor-pointer hover:border-slate-600">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={aiStrategy.semanticSearch}
+                                                        onChange={e => setAIStrategy(prev => ({ ...prev, semanticSearch: e.target.checked }))}
+                                                        className="w-4 h-4 accent-purple-500"
+                                                    />
+                                                    <div>
+                                                        <div className="text-sm text-white font-bold">智能语义搜索</div>
+                                                        <div className="text-xs text-slate-400">AI 理解协议含义，搜索最相关文档，而非仅靠关键词匹配</div>
+                                                    </div>
+                                                </label>
+                                                <label className="flex items-center gap-3 p-3 bg-slate-900/50 rounded-lg border border-slate-800 cursor-pointer hover:border-slate-600">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={aiStrategy.deepAnalysis}
+                                                        onChange={e => setAIStrategy(prev => ({ ...prev, deepAnalysis: e.target.checked }))}
+                                                        className="w-4 h-4 accent-purple-500"
+                                                    />
+                                                    <div>
+                                                        <div className="text-sm text-white font-bold">内容深度分析</div>
+                                                        <div className="text-xs text-slate-400">AI 分析文档结构，自动提取请求/响应 Schema</div>
+                                                    </div>
+                                                </label>
+                                            </div>
+                                        </div>
+
+                                        {/* 预估信息 */}
+                                        <div className="bg-slate-900/50 rounded-lg p-4 flex items-center justify-between text-xs text-slate-400">
+                                            <div>
+                                                待处理协议: <span className="text-white font-bold">{state.abilityNamespaces.length}</span> 个
+                                            </div>
+                                            <div>
+                                                预计消耗 Token: <span className="text-white font-bold">~{estimateTokens(state.abilityNamespaces.length, aiStrategy).toLocaleString()}</span>
+                                            </div>
+                                            <div>
+                                                预计耗时: <span className="text-white font-bold">
+                                                    {Math.ceil(estimateProcessingTime(state.abilityNamespaces.length, aiStrategy).min / 60)}-
+                                                    {Math.ceil(estimateProcessingTime(state.abilityNamespaces.length, aiStrategy).max / 60)} 分钟
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex justify-between mt-6">
+                                        <button
+                                            onClick={() => setState(prev => ({ ...prev, status: 'selecting-mode' }))}
+                                            className="px-4 py-2 text-slate-400 hover:text-white"
+                                        >
+                                            返回选择
+                                        </button>
+                                        <button
+                                            onClick={startAIProcessing}
+                                            disabled={!aiConfig.apiKey}
+                                            className="px-6 py-2 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white rounded-xl font-bold text-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            <Sparkles size={16} />
+                                            开始 AI 智能匹配
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : (
+                                // AI 处理进度界面
+                                <div className="max-w-3xl mx-auto w-full flex flex-col h-full">
+                                    <div className="text-center mb-8">
+                                        <div className="inline-block p-3 bg-purple-500/10 rounded-full mb-4 relative">
+                                            <Bot size={32} className="text-purple-400" />
+                                            <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full animate-pulse" />
+                                        </div>
+                                        <h3 className="text-xl font-bold text-white mb-2">AI 智能匹配中</h3>
+                                        <div className="w-96 mx-auto mt-4 h-2 bg-slate-700 rounded-full overflow-hidden">
+                                            <div
+                                                className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-500"
+                                                style={{ width: `${(state.progress.current / state.progress.total) * 100}%` }}
+                                            />
+                                        </div>
+                                        <div className="flex justify-between w-96 mx-auto mt-2 text-xs text-slate-400">
+                                            <span>{state.progress.current} / {state.progress.total}</span>
+                                            <span>{Math.round((state.progress.current / state.progress.total) * 100)}%</span>
+                                        </div>
+                                        <p className="text-sm text-indigo-300 font-mono mt-2 h-6">
+                                            {state.progress.namespace ? `正在处理: ${state.progress.namespace}` : '准备中...'}
+                                        </p>
+                                    </div>
+
+                                    {/* 实时日志 */}
+                                    <div className="flex-1 bg-slate-950 border border-slate-800 rounded-xl overflow-hidden flex flex-col mb-6">
+                                        <div className="px-4 py-2 bg-slate-900 border-b border-slate-800 text-xs font-bold text-slate-400 flex justify-between">
+                                            <span>实时处理日志</span>
+                                            <span>⏱️ {Math.floor(aiProcessingTime / 60)}m {aiProcessingTime % 60}s</span>
+                                        </div>
+                                        <div
+                                            ref={aiLogsContainerRef}
+                                            className="flex-1 overflow-y-auto p-4 space-y-2 font-mono text-xs custom-scrollbar"
+                                        >
+                                            {aiProcessLogs.map((log, i) => (
+                                                <div key={i} className="flex gap-3">
+                                                    <span className="text-slate-600 shrink-0">
+                                                        {new Date(log.timestamp).toLocaleTimeString()}
+                                                    </span>
+                                                    <span className={`shrink-0 w-16 font-bold ${log.type === 'search' ? 'text-blue-400' :
+                                                        log.type === 'analyze' ? 'text-purple-400' :
+                                                            log.type === 'extract' ? 'text-amber-400' :
+                                                                log.type === 'complete' ? 'text-emerald-400' :
+                                                                    log.type === 'error' ? 'text-red-400' : 'text-slate-400'
+                                                        }`}>
+                                                        [{log.type.toUpperCase()}]
+                                                    </span>
+                                                    <span className="text-slate-300 break-all">
+                                                        {log.message}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                            {aiProcessLogs.length === 0 && (
+                                                <div className="text-slate-600 text-center py-8">等待开始...</div>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <div className="flex justify-center">
+                                        <button
+                                            onClick={() => {
+                                                aiServiceRef.current?.abort();
+                                                setState(prev => ({ ...prev, status: 'selecting-mode' }));
+                                            }}
+                                            className="px-6 py-2 border border-slate-700 hover:bg-slate-800 text-slate-300 rounded-lg text-sm"
+                                        >
+                                            取消处理
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                     {state.status === 'configuring-docs' && (
                         <div className="flex flex-col h-full">
                             <div className="text-center mb-6">
@@ -752,7 +1216,12 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <CheckCircle size={16} className="text-emerald-400" />
-                                    <span className="text-sm text-slate-400">{stats.withDocs} 已解析</span>
+                                    <span className="text-sm text-slate-400">
+                                        {docMatchMode === 'ai'
+                                            ? `${Array.from(state.aiGeneratedProtocols.values()).filter(p => p.confidence > 0.6).length} 高置信度`
+                                            : `${stats.withDocs} 已解析`
+                                        }
+                                    </span>
                                 </div>
                                 {stats.withWarnings > 0 && (
                                     <div className="flex items-center gap-2">
@@ -772,11 +1241,33 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                             {/* 协议列表 */}
                             <div className="space-y-2 max-h-[400px] overflow-y-auto custom-scrollbar">
                                 {state.abilityNamespaces.map(namespace => {
-                                    const doc = state.parsedDocs.get(namespace);
                                     const isSelected = selectedProtocols.has(namespace);
                                     const isExpanded = expandedProtocols.has(namespace);
-                                    const hasWarnings = doc && doc.parseWarnings.length > 0;
-                                    const notFound = doc?.parseWarnings.includes('文档页面未找到，使用默认配置');
+
+                                    // 根据模式获取数据
+                                    let doc: ParsedProtocolDoc | undefined;
+                                    let aiProto: AIGeneratedProtocol | undefined;
+                                    let hasWarnings = false;
+                                    let notFound = false;
+                                    let methods: string[] = [];
+                                    let description = '';
+                                    let docUrl = '';
+
+                                    if (docMatchMode === 'ai') {
+                                        aiProto = state.aiGeneratedProtocols.get(namespace);
+                                        hasWarnings = (aiProto?.warnings?.length || 0) > 0;
+                                        notFound = !aiProto?.documentUrl;
+                                        methods = aiProto ? Object.keys(aiProto.methods).filter(m => aiProto!.methods[m].enabled) : [];
+                                        description = aiProto?.description || '';
+                                        docUrl = aiProto?.documentUrl || '';
+                                    } else {
+                                        doc = state.parsedDocs.get(namespace);
+                                        hasWarnings = (doc?.parseWarnings?.length || 0) > 0;
+                                        notFound = doc?.parseWarnings.includes('文档页面未找到，使用默认配置') || false;
+                                        methods = doc ? Object.entries(doc.supportedMethods).filter(([_, v]) => v).map(([k]) => k) : [];
+                                        description = doc?.description || '';
+                                        docUrl = doc?.pageUrl || '';
+                                    }
 
                                     return (
                                         <div key={namespace} className={`border rounded-xl overflow-hidden ${isSelected ? 'border-indigo-500/50 bg-indigo-500/5' : 'border-slate-700 bg-slate-800/30'
@@ -806,26 +1297,34 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                                         {hasWarnings && !notFound && (
                                                             <AlertTriangle size={14} className="text-amber-400" />
                                                         )}
+                                                        {docMatchMode === 'ai' && aiProto && (
+                                                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${aiProto.confidence > 0.8 ? 'bg-emerald-500/20 text-emerald-400' :
+                                                                aiProto.confidence > 0.5 ? 'bg-amber-500/20 text-amber-400' :
+                                                                    'bg-red-500/20 text-red-400'
+                                                                }`}>
+                                                                {Math.round(aiProto.confidence * 100)}% 置信度
+                                                            </span>
+                                                        )}
                                                     </div>
-                                                    {doc && (
+                                                    {(methods.length > 0 || description) && (
                                                         <div className="flex items-center gap-2 mt-1">
-                                                            {Object.entries(doc.supportedMethods)
-                                                                .filter(([_, v]) => v)
-                                                                .map(([method]) => (
-                                                                    <span key={method} className={`text-[10px] px-1.5 py-0.5 rounded ${method === 'GET' ? 'bg-blue-500/20 text-blue-400' :
-                                                                        method === 'SET' ? 'bg-amber-500/20 text-amber-400' :
-                                                                            method === 'PUSH' ? 'bg-purple-500/20 text-purple-400' :
-                                                                                'bg-slate-500/20 text-slate-400'
-                                                                        }`}>{method}</span>
-                                                                ))
-                                                            }
+                                                            {methods.map((method) => (
+                                                                <span key={method} className={`text-[10px] px-1.5 py-0.5 rounded ${method === 'GET' ? 'bg-blue-500/20 text-blue-400' :
+                                                                    method === 'SET' ? 'bg-amber-500/20 text-amber-400' :
+                                                                        method === 'PUSH' ? 'bg-purple-500/20 text-purple-400' :
+                                                                            'bg-slate-500/20 text-slate-400'
+                                                                    }`}>{method}</span>
+                                                            ))}
+                                                            {description && (
+                                                                <span className="text-xs text-slate-500 truncate max-w-[300px] ml-2">{description}</span>
+                                                            )}
                                                         </div>
                                                     )}
                                                 </div>
 
-                                                {doc?.pageUrl && (
+                                                {docUrl && (
                                                     <a
-                                                        href={doc.pageUrl}
+                                                        href={docUrl}
                                                         target="_blank"
                                                         rel="noopener noreferrer"
                                                         className="p-1.5 text-slate-400 hover:text-white"
@@ -836,42 +1335,87 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                                 )}
                                             </div>
 
-                                            {isExpanded && doc && (
+                                            {isExpanded && (
                                                 <div className="border-t border-slate-700 p-3 bg-slate-900/50">
-                                                    {doc.description && (
-                                                        <p className="text-xs text-slate-400 mb-2">{doc.description}</p>
-                                                    )}
-
-                                                    {doc.parseWarnings.length > 0 && (
-                                                        <div className="space-y-1">
-                                                            {doc.parseWarnings.map((warning, i) => (
-                                                                <div key={i} className="flex items-center gap-2 text-[11px] text-amber-400">
-                                                                    <Info size={12} />
-                                                                    {warning}
+                                                    {docMatchMode === 'ai' && aiProto ? (
+                                                        // AI 模式详情
+                                                        <div className="space-y-2">
+                                                            {aiProto.documentTitle && (
+                                                                <div className="text-xs text-slate-400">
+                                                                    匹配文档: <span className="text-indigo-400">{aiProto.documentTitle}</span>
                                                                 </div>
-                                                            ))}
-                                                        </div>
-                                                    )}
-
-                                                    {Object.keys(doc.methods).length > 0 && (
-                                                        <div className="mt-2 space-y-2">
-                                                            {Object.entries(doc.methods).map(([method, data]) => (
-                                                                <div key={method} className="text-xs">
-                                                                    <span className="text-slate-500">{method}:</span>
-                                                                    {data.requestExample ? (
-                                                                        <span className="text-emerald-400 ml-2">✓ 请求示例</span>
-                                                                    ) : (
-                                                                        <span className="text-slate-600 ml-2">○ 无请求示例</span>
-                                                                    )}
-                                                                    {data.responseExample ? (
-                                                                        <span className="text-emerald-400 ml-2">✓ 响应示例</span>
-                                                                    ) : (
-                                                                        <span className="text-slate-600 ml-2">○ 无响应示例</span>
-                                                                    )}
+                                                            )}
+                                                            {aiProto.warnings.length > 0 && (
+                                                                <div className="space-y-1">
+                                                                    {aiProto.warnings.map((warning, i) => (
+                                                                        <div key={i} className="flex items-center gap-2 text-[11px] text-amber-400">
+                                                                            <Info size={12} />
+                                                                            {warning}
+                                                                        </div>
+                                                                    ))}
                                                                 </div>
-                                                            ))}
+                                                            )}
+                                                            <div className="grid grid-cols-1 gap-2 mt-2">
+                                                                {Object.entries(aiProto.methods).filter(([_, m]) => m.enabled).map(([method, data]) => (
+                                                                    <div key={method} className="bg-slate-950 rounded p-2 border border-slate-800">
+                                                                        <div className="text-xs font-bold text-slate-300 mb-1">{method}</div>
+                                                                        <div className="grid grid-cols-2 gap-2">
+                                                                            <div>
+                                                                                <div className="text-[10px] text-slate-500 mb-1">Payload</div>
+                                                                                <pre className="text-[10px] text-slate-400 bg-slate-900 p-1 rounded overflow-x-auto custom-scrollbar">
+                                                                                    {data.payload}
+                                                                                </pre>
+                                                                            </div>
+                                                                            <div>
+                                                                                <div className="text-[10px] text-slate-500 mb-1">Schema</div>
+                                                                                <pre className="text-[10px] text-slate-400 bg-slate-900 p-1 rounded overflow-x-auto custom-scrollbar">
+                                                                                    {data.schema}
+                                                                                </pre>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
                                                         </div>
-                                                    )}
+                                                    ) : doc ? (
+                                                        // 手动模式详情
+                                                        <>
+                                                            {doc.description && (
+                                                                <p className="text-xs text-slate-400 mb-2">{doc.description}</p>
+                                                            )}
+
+                                                            {doc.parseWarnings.length > 0 && (
+                                                                <div className="space-y-1">
+                                                                    {doc.parseWarnings.map((warning, i) => (
+                                                                        <div key={i} className="flex items-center gap-2 text-[11px] text-amber-400">
+                                                                            <Info size={12} />
+                                                                            {warning}
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            )}
+
+                                                            {Object.keys(doc.methods).length > 0 && (
+                                                                <div className="mt-2 space-y-2">
+                                                                    {Object.entries(doc.methods).map(([method, data]) => (
+                                                                        <div key={method} className="text-xs">
+                                                                            <span className="text-slate-500">{method}:</span>
+                                                                            {data.requestExample ? (
+                                                                                <span className="text-emerald-400 ml-2">✓ 请求示例</span>
+                                                                            ) : (
+                                                                                <span className="text-slate-600 ml-2">○ 无请求示例</span>
+                                                                            )}
+                                                                            {data.responseExample ? (
+                                                                                <span className="text-emerald-400 ml-2">✓ 响应示例</span>
+                                                                            ) : (
+                                                                                <span className="text-slate-600 ml-2">○ 无响应示例</span>
+                                                                            )}
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                        </>
+                                                    ) : null}
                                                 </div>
                                             )}
                                         </div>

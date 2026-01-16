@@ -8,7 +8,7 @@
  * 4. 批量测试汇总面板
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
     X, Copy, Check, ChevronDown, ChevronRight, AlertTriangle,
     CheckCircle, XCircle, Clock, ArrowRight, Eye, EyeOff,
@@ -78,6 +78,7 @@ export interface BatchTestResult {
     id?: string;
     suiteId: string;
     suiteName: string;
+    deviceId?: string;
     deviceName: string;
     startTime: number;
     endTime?: number;
@@ -91,243 +92,12 @@ export interface BatchTestResult {
     };
 }
 
-// ==================== Side-by-Side Diff 组件 ====================
 
-interface DiffLine {
-    lineNumber: { left?: number; right?: number };
-    type: 'unchanged' | 'added' | 'removed' | 'modified';
-    leftContent?: string;
-    rightContent?: string;
-}
-
-/**
- * 将 JSON 转为带行号的字符串数组
- */
-const jsonToLines = (obj: any): string[] => {
-    if (obj === undefined || obj === null) return ['null'];
-    try {
-        return JSON.stringify(obj, null, 2).split('\n');
-    } catch {
-        return [String(obj)];
-    }
-};
-
-/**
- * 简单的 LCS 差异算法
- */
-const computeDiff = (leftLines: string[], rightLines: string[]): DiffLine[] => {
-    const result: DiffLine[] = [];
-    let leftIdx = 0;
-    let rightIdx = 0;
-    let leftLineNum = 1;
-    let rightLineNum = 1;
-
-    // 使用简单的逐行比较算法
-    while (leftIdx < leftLines.length || rightIdx < rightLines.length) {
-        const leftLine = leftLines[leftIdx];
-        const rightLine = rightLines[rightIdx];
-
-        if (leftIdx >= leftLines.length) {
-            // 左边已结束，剩余的都是新增
-            result.push({
-                lineNumber: { right: rightLineNum++ },
-                type: 'added',
-                rightContent: rightLine
-            });
-            rightIdx++;
-        } else if (rightIdx >= rightLines.length) {
-            // 右边已结束，剩余的都是删除
-            result.push({
-                lineNumber: { left: leftLineNum++ },
-                type: 'removed',
-                leftContent: leftLine
-            });
-            leftIdx++;
-        } else if (leftLine === rightLine) {
-            // 相同
-            result.push({
-                lineNumber: { left: leftLineNum++, right: rightLineNum++ },
-                type: 'unchanged',
-                leftContent: leftLine,
-                rightContent: rightLine
-            });
-            leftIdx++;
-            rightIdx++;
-        } else {
-            // 不同 - 尝试向前查找匹配
-            let foundInRight = -1;
-            let foundInLeft = -1;
-
-            // 在右边查找当前左边的行
-            for (let i = rightIdx; i < Math.min(rightIdx + 5, rightLines.length); i++) {
-                if (rightLines[i] === leftLine) {
-                    foundInRight = i;
-                    break;
-                }
-            }
-
-            // 在左边查找当前右边的行
-            for (let i = leftIdx; i < Math.min(leftIdx + 5, leftLines.length); i++) {
-                if (leftLines[i] === rightLine) {
-                    foundInLeft = i;
-                    break;
-                }
-            }
-
-            if (foundInRight !== -1 && (foundInLeft === -1 || foundInRight - rightIdx <= foundInLeft - leftIdx)) {
-                // 右边有新增的行
-                while (rightIdx < foundInRight) {
-                    result.push({
-                        lineNumber: { right: rightLineNum++ },
-                        type: 'added',
-                        rightContent: rightLines[rightIdx]
-                    });
-                    rightIdx++;
-                }
-            } else if (foundInLeft !== -1) {
-                // 左边有删除的行
-                while (leftIdx < foundInLeft) {
-                    result.push({
-                        lineNumber: { left: leftLineNum++ },
-                        type: 'removed',
-                        leftContent: leftLines[leftIdx]
-                    });
-                    leftIdx++;
-                }
-            } else {
-                // 修改的行
-                result.push({
-                    lineNumber: { left: leftLineNum++, right: rightLineNum++ },
-                    type: 'modified',
-                    leftContent: leftLine,
-                    rightContent: rightLine
-                });
-                leftIdx++;
-                rightIdx++;
-            }
-        }
-    }
-
-    return result;
-};
 
 /**
  * Side-by-Side Diff 视图组件
  */
-export const SideBySideDiff: React.FC<{
-    leftJson: any;
-    rightJson: any;
-    leftTitle: string;
-    rightTitle: string;
-}> = ({ leftJson, rightJson, leftTitle, rightTitle }) => {
-    const diffLines = useMemo(() => {
-        const leftLines = jsonToLines(leftJson);
-        const rightLines = jsonToLines(rightJson);
-        return computeDiff(leftLines, rightLines);
-    }, [leftJson, rightJson]);
 
-    const stats = useMemo(() => {
-        return {
-            added: diffLines.filter(d => d.type === 'added').length,
-            removed: diffLines.filter(d => d.type === 'removed').length,
-            modified: diffLines.filter(d => d.type === 'modified').length,
-            unchanged: diffLines.filter(d => d.type === 'unchanged').length
-        };
-    }, [diffLines]);
-
-    const lineColors: Record<DiffLine['type'], { bg: string; border: string; text: string }> = {
-        unchanged: { bg: '', border: 'border-transparent', text: 'text-slate-400' },
-        added: { bg: 'bg-emerald-500/10', border: 'border-emerald-500', text: 'text-emerald-400' },
-        removed: { bg: 'bg-red-500/10', border: 'border-red-500', text: 'text-red-400' },
-        modified: { bg: 'bg-amber-500/10', border: 'border-amber-500', text: 'text-amber-400' }
-    };
-
-    return (
-        <div className="flex flex-col h-full">
-            {/* Stats Bar */}
-            <div className="flex items-center justify-between px-4 py-2 bg-slate-900/50 border-b border-slate-800">
-                <div className="flex items-center gap-4 text-xs">
-                    <span className="text-slate-500">Changes:</span>
-                    {stats.added > 0 && (
-                        <span className="text-emerald-400">+{stats.added} added</span>
-                    )}
-                    {stats.removed > 0 && (
-                        <span className="text-red-400">-{stats.removed} removed</span>
-                    )}
-                    {stats.modified > 0 && (
-                        <span className="text-amber-400">~{stats.modified} modified</span>
-                    )}
-                    {stats.added === 0 && stats.removed === 0 && stats.modified === 0 && (
-                        <span className="text-emerald-400">✓ No differences</span>
-                    )}
-                </div>
-            </div>
-
-            {/* Column Headers */}
-            <div className="flex border-b border-slate-700 bg-slate-950/50">
-                <div className="flex-1 px-4 py-2 text-xs font-bold text-red-400 uppercase border-r border-slate-700">
-                    {leftTitle}
-                </div>
-                <div className="flex-1 px-4 py-2 text-xs font-bold text-emerald-400 uppercase">
-                    {rightTitle}
-                </div>
-            </div>
-
-            {/* Diff Content */}
-            <div className="flex-1 overflow-auto custom-scrollbar">
-                <div className="flex min-w-max">
-                    {/* Left Column */}
-                    <div className="flex-1 border-r border-slate-700 font-mono text-xs">
-                        {diffLines.map((line, idx) => {
-                            const colors = lineColors[line.type];
-                            const showLine = line.type !== 'added';
-                            return (
-                                <div
-                                    key={`left-${idx}`}
-                                    className={`flex ${colors.bg} border-l-2 ${colors.border} min-h-[24px]`}
-                                >
-                                    <div className="w-10 px-2 py-0.5 text-right text-slate-600 bg-slate-900/30 select-none shrink-0">
-                                        {line.lineNumber.left || ''}
-                                    </div>
-                                    <div className="w-6 px-1 py-0.5 text-center text-slate-500 bg-slate-900/20 select-none shrink-0">
-                                        {line.type === 'removed' ? '−' : line.type === 'modified' ? '~' : ''}
-                                    </div>
-                                    <pre className={`flex-1 px-2 py-0.5 whitespace-pre ${showLine ? colors.text : 'text-transparent'}`}>
-                                        {showLine ? line.leftContent : ' '}
-                                    </pre>
-                                </div>
-                            );
-                        })}
-                    </div>
-
-                    {/* Right Column */}
-                    <div className="flex-1 font-mono text-xs">
-                        {diffLines.map((line, idx) => {
-                            const colors = lineColors[line.type];
-                            const showLine = line.type !== 'removed';
-                            return (
-                                <div
-                                    key={`right-${idx}`}
-                                    className={`flex ${colors.bg} border-l-2 ${colors.border} min-h-[24px]`}
-                                >
-                                    <div className="w-10 px-2 py-0.5 text-right text-slate-600 bg-slate-900/30 select-none shrink-0">
-                                        {line.lineNumber.right || ''}
-                                    </div>
-                                    <div className="w-6 px-1 py-0.5 text-center text-slate-500 bg-slate-900/20 select-none shrink-0">
-                                        {line.type === 'added' ? '+' : line.type === 'modified' ? '~' : ''}
-                                    </div>
-                                    <pre className={`flex-1 px-2 py-0.5 whitespace-pre ${showLine ? colors.text : 'text-transparent'}`}>
-                                        {showLine ? line.rightContent : ' '}
-                                    </pre>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
-};
 
 // ==================== Phase 2: 三栏对比视图组件 ====================
 
@@ -386,142 +156,286 @@ const extractActualFields = (obj: any, prefix = ''): Map<string, { value: any; t
     return fields;
 };
 
-export const ThreeWayDiff: React.FC<ThreeWayDiffProps> = ({
-    requestPayload, expectedSchema, actualResponse
+interface HighlightedJSONProps {
+    data: any;
+    errors?: any[];
+    mode?: 'data' | 'schema'; // 'data' uses instancePath, 'schema' uses schemaPath
+    highlightColor?: 'red' | 'amber' | 'blue';
+    hideErrorText?: boolean;
+}
+
+const HighlightedJSON: React.FC<HighlightedJSONProps> = ({ data, errors, mode = 'data', highlightColor = 'red', hideErrorText = false }) => {
+    const errorMap = useMemo(() => {
+        const map = new Map<string, string>();
+        if (!errors) return map;
+
+        const hasPayload = data && typeof data === 'object' && 'payload' in data;
+
+        errors.forEach(err => {
+            let path = '';
+
+            if (mode === 'schema') {
+                // For schema, use schemaPath
+                // schemaPath format: "#/properties/payload/properties/system/..."
+                path = err.schemaPath || '';
+                if (path.startsWith('#')) {
+                    path = path.substring(1);
+                }
+
+                // If we are displaying a wrapped object (Response Structure) where schema is under /payload
+                // We need to adjust the path if it doesn't already start with /payload
+                if (hasPayload && !path.startsWith('/payload')) {
+                    if (!path.startsWith('/') && path !== '') {
+                        path = '/' + path;
+                    }
+                    path = '/payload' + path;
+                }
+            } else {
+                // For data (request/response), use instancePath
+                path = err.instancePath ?? err.dataPath ?? '';
+
+                // Normalize path to JSON Pointer
+                if (path.startsWith('.')) {
+                    path = path.replace(/^\./, '/').replace(/\./g, '/');
+                    path = path.replace(/\[['"]?([^'"\]]+)['"]?\]/g, '/$1');
+                }
+
+                if (hasPayload && !path.startsWith('/payload') && !path.startsWith('/header')) {
+                    if (!path.startsWith('/') && path !== '') {
+                        path = '/' + path;
+                    }
+                    path = '/payload' + path;
+                }
+            }
+
+            map.set(path, err.message);
+        });
+        return map;
+    }, [data, errors, mode]);
+
+    const renderValue = (value: any, path: string, level: number, key?: string, isLast: boolean = true): React.ReactNode[] => {
+        const indent = '  '.repeat(level);
+        const elements: React.ReactNode[] = [];
+        const error = errorMap.get(path);
+
+        // Enhanced Highlight Style
+        const isHighlighted = !!error;
+
+        let bgClass = '';
+        let borderClass = 'border-l-4 border-transparent';
+        let badgeClass = '';
+
+        if (isHighlighted) {
+            if (highlightColor === 'red') {
+                bgClass = 'bg-red-500/30';
+                borderClass = 'border-l-4 border-red-500';
+                badgeClass = 'text-red-300 bg-red-950/80 border-red-500/50';
+            } else if (highlightColor === 'amber') {
+                bgClass = 'bg-amber-500/30';
+                borderClass = 'border-l-4 border-amber-500';
+                badgeClass = 'text-amber-300 bg-amber-950/80 border-amber-500/50';
+            } else {
+                bgClass = 'bg-blue-500/30';
+                borderClass = 'border-l-4 border-blue-500';
+                badgeClass = 'text-blue-300 bg-blue-950/80 border-blue-500/50';
+            }
+        }
+
+        const getLineClass = (highlight: boolean) => {
+            if (!highlight) return `flex hover:bg-white/5 border-l-4 border-transparent transition-colors duration-150`;
+            return `flex hover:bg-white/5 ${bgClass} ${borderClass} transition-colors duration-150`;
+        };
+
+        const errorBadge = (error && !hideErrorText) ? (
+            <span className={`ml-4 font-bold italic flex items-center gap-1 text-xs px-2 py-0.5 rounded border ${badgeClass} select-text`}>
+                <AlertTriangle size={12} /> {error}
+            </span>
+        ) : null;
+
+        const renderLine = (content: React.ReactNode, keyPath: string, highlight: boolean = false, showBadge: boolean = false) => (
+            <div key={keyPath} className={getLineClass(highlight)}>
+                <div className="flex-1 whitespace-pre font-mono text-xs flex items-center px-2 py-[1px] select-text cursor-text">
+                    <span>{content}</span>
+                    {showBadge && errorBadge}
+                </div>
+            </div>
+        );
+
+        if (value === null) {
+            elements.push(renderLine(<><span className="text-slate-500">{indent}</span>{key && <span className="text-blue-300">"{key}": </span>}<span className="text-slate-400">null</span>{isLast ? '' : ','}</>, path, isHighlighted, true));
+        } else if (typeof value === 'object') {
+            const isArray = Array.isArray(value);
+            const isEmpty = Object.keys(value).length === 0;
+            const openChar = isArray ? '[' : '{';
+            const closeChar = isArray ? ']' : '}';
+
+            if (isEmpty) {
+                elements.push(renderLine(<><span className="text-slate-500">{indent}</span>{key && <span className="text-blue-300">"{key}": </span>}<span className="text-slate-300">{openChar}{closeChar}</span>{isLast ? '' : ','}</>, path, isHighlighted, true));
+            } else {
+                // Only highlight start line for objects/arrays
+                elements.push(renderLine(<><span className="text-slate-500">{indent}</span>{key && <span className="text-blue-300">"{key}": </span>}<span className="text-slate-300">{openChar}</span></>, path, isHighlighted, true));
+                const keys = Object.keys(value);
+                keys.forEach((k, i) => {
+                    const childPath = `${path}/${k}`;
+                    const childValue = value[k];
+                    const isLastChild = i === keys.length - 1;
+                    elements.push(...renderValue(childValue, childPath, level + 1, isArray ? undefined : k, isLastChild));
+                });
+                // Do NOT highlight end line
+                elements.push(renderLine(<><span className="text-slate-500">{indent}</span><span className="text-slate-300">{closeChar}</span>{isLast ? '' : ','}</>, path + '/_end', false, false));
+            }
+        } else {
+            let valColor = 'text-emerald-300';
+            if (typeof value === 'string') valColor = 'text-amber-300';
+            if (typeof value === 'boolean') valColor = 'text-purple-300';
+            if (typeof value === 'number') valColor = 'text-blue-300';
+            const valDisplay = typeof value === 'string' ? `"${value}"` : String(value);
+            elements.push(renderLine(
+                <>
+                    <span className="text-slate-500">{indent}</span>
+                    {key && <span className="text-blue-300">"{key}": </span>}
+                    <span className={valColor}>{valDisplay}</span>
+                    {isLast ? '' : ','}
+                </>,
+                path,
+                isHighlighted,
+                true
+            ));
+        }
+        return elements;
+    };
+
+    return (
+        <div className="w-full select-text">
+            {renderValue(data, '', 0)}
+        </div>
+    );
+};
+
+export const ThreeWayDiff: React.FC<ThreeWayDiffProps & { schemaErrors?: any[], requestMessage?: any }> = ({
+    requestPayload, expectedSchema, actualResponse, schemaErrors, requestMessage
 }) => {
     // 从 Schema 提取预期字段
-    const expectedFields = useMemo(() => {
-        return extractExpectedFieldsFromSchema(expectedSchema);
-    }, [expectedSchema]);
+    const requestData = requestMessage || requestPayload;
 
-    // 从响应提取实际字段
-    const actualFields = useMemo(() => {
-        const responseData = actualResponse?.payload || actualResponse;
-        return extractActualFields(responseData);
-    }, [actualResponse]);
+    // Construct Expected Response Data (Header + Payload Schema)
+    const expectedResponseData = useMemo(() => {
+        // Mock Header based on Request or Default
+        const header = {
+            messageId: requestMessage?.header?.messageId || "String",
+            namespace: requestMessage?.header?.namespace || "String",
+            method: requestMessage?.header?.method || "String",
+            payloadVersion: 1,
+            from: "String (Topic)",
+            timestamp: "Number",
+            sign: "String"
+        };
 
-    // 计算差异
-    type DiffStatus = 'match' | 'missing' | 'type_mismatch' | 'extra';
-    interface DiffItem {
-        path: string;
-        status: DiffStatus;
-        expected?: { type: string; required: boolean };
-        actual?: { value: any; type: string };
-    }
+        return {
+            header,
+            payload: expectedSchema
+        };
+    }, [expectedSchema, requestMessage]);
 
-    const diffs = useMemo(() => {
-        const result: DiffItem[] = [];
+    // Transform errors for Expected Response to point to missing properties
+    const expectedErrors = useMemo(() => {
+        if (!schemaErrors) return [];
+        return schemaErrors.map(err => {
+            // Adjust schemaPath to match our display structure where schema is under 'payload'
+            let path = err.schemaPath || '';
+            if (path.startsWith('#')) {
+                path = path.substring(1);
+            }
+            // If path is empty, it refers to root.
+            // Our root schema is at /payload.
+            const displayPath = '/payload' + path;
 
-        // 检查预期字段在实际响应中是否存在
-        expectedFields.forEach((expected, path) => {
-            const actual = actualFields.get(path);
-            if (!actual) {
-                result.push({ path, status: 'missing', expected });
-            } else if (expected.type !== 'any' && expected.type !== actual.type) {
-                result.push({ path, status: 'type_mismatch', expected, actual });
-            } else {
-                result.push({ path, status: 'match', expected, actual });
+            return {
+                ...err,
+                schemaPath: displayPath
+            };
+        });
+    }, [schemaErrors]);
+
+    const requestRef = React.useRef<HTMLDivElement>(null);
+    const expectedRef = React.useRef<HTMLDivElement>(null);
+    const actualRef = React.useRef<HTMLDivElement>(null);
+    const isScrolling = React.useRef(false);
+
+    const handleScroll = (sourceRef: React.RefObject<HTMLDivElement | null>) => {
+        if (isScrolling.current) return;
+        isScrolling.current = true;
+
+        const scrollTop = sourceRef.current?.scrollTop || 0;
+
+        [requestRef, expectedRef, actualRef].forEach(ref => {
+            if (ref.current && ref !== sourceRef) {
+                ref.current.scrollTop = scrollTop;
             }
         });
 
-        // 检查实际响应中多余的字段
-        actualFields.forEach((actual, path) => {
-            if (!expectedFields.has(path)) {
-                result.push({ path, status: 'extra', actual });
-            }
-        });
-
-        return result.sort((a, b) => a.path.localeCompare(b.path));
-    }, [expectedFields, actualFields]);
-
-    // 统计
-    const stats = useMemo(() => ({
-        match: diffs.filter(d => d.status === 'match').length,
-        missing: diffs.filter(d => d.status === 'missing').length,
-        typeMismatch: diffs.filter(d => d.status === 'type_mismatch').length,
-        extra: diffs.filter(d => d.status === 'extra').length
-    }), [diffs]);
-
-    const statusColors: Record<DiffStatus, { bg: string; text: string; icon: string }> = {
-        match: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', icon: '✓' },
-        missing: { bg: 'bg-red-500/10', text: 'text-red-400', icon: '✗' },
-        type_mismatch: { bg: 'bg-amber-500/10', text: 'text-amber-400', icon: '~' },
-        extra: { bg: 'bg-blue-500/10', text: 'text-blue-400', icon: '+' }
+        setTimeout(() => {
+            isScrolling.current = false;
+        }, 50);
     };
 
     return (
         <div className="flex flex-col h-full">
-            {/* Stats Bar */}
-            <div className="px-4 py-2 bg-slate-900/50 border-b border-slate-800 flex items-center gap-4 text-xs shrink-0">
-                <span className="text-slate-500">Fields:</span>
-                <span className="text-emerald-400 flex items-center gap-1">
-                    <CheckCircle size={12} /> {stats.match} matched
-                </span>
-                <span className="text-red-400 flex items-center gap-1">
-                    <XCircle size={12} /> {stats.missing} missing
-                </span>
-                <span className="text-amber-400 flex items-center gap-1">
-                    <AlertTriangle size={12} /> {stats.typeMismatch} type errors
-                </span>
-                <span className="text-blue-400 flex items-center gap-1">
-                    <FileText size={12} /> {stats.extra} extra
-                </span>
-            </div>
-
             {/* Three Column Grid */}
-            <div className="flex-1 grid grid-cols-3 overflow-hidden">
+            <div className="flex-1 grid grid-cols-3 overflow-hidden bg-slate-950">
                 {/* Column 1: Request */}
-                <div className="border-r border-slate-700 flex flex-col overflow-hidden">
-                    <div className="px-4 py-2 bg-blue-500/10 border-b border-slate-700 shrink-0">
-                        <div className="text-xs font-bold text-blue-400 uppercase">Request Payload</div>
-                        <div className="text-[10px] text-slate-500">发送的数据</div>
+                <div className="border-r border-slate-800 flex flex-col overflow-hidden">
+                    <div className="px-4 py-2 bg-blue-500/10 border-b border-slate-800 shrink-0 flex items-center justify-between">
+                        <div className="font-bold text-blue-400 text-base">REQUEST</div>
+                        <div className="text-sm text-slate-500">发送报文</div>
                     </div>
-                    <div className="flex-1 overflow-auto custom-scrollbar p-3">
-                        <pre className="text-xs font-mono text-blue-300 whitespace-pre-wrap">
-                            {JSON.stringify(requestPayload, null, 2)}
-                        </pre>
+                    <div
+                        ref={requestRef}
+                        onScroll={() => handleScroll(requestRef)}
+                        className="flex-1 overflow-auto custom-scrollbar p-3"
+                    >
+                        <HighlightedJSON data={requestData} mode="data" highlightColor="blue" />
                     </div>
                 </div>
 
-                {/* Column 2: Expected (from Schema) */}
-                <div className="border-r border-slate-700 flex flex-col overflow-hidden">
-                    <div className="px-4 py-2 bg-amber-500/10 border-b border-slate-700 shrink-0">
-                        <div className="text-xs font-bold text-amber-400 uppercase">Expected Fields</div>
-                        <div className="text-[10px] text-slate-500">预期响应字段</div>
+                {/* Column 2: Expected Response (Schema) */}
+                <div className="border-r border-slate-800 flex flex-col overflow-hidden">
+                    <div className="px-4 py-2 bg-amber-500/10 border-b border-slate-800 shrink-0 flex items-center justify-between">
+                        <div className="font-bold text-amber-400 text-base">EXPECTED</div>
+                        <div className="text-sm text-slate-500">期望结果 (Schema)</div>
                     </div>
-                    <div className="flex-1 overflow-auto custom-scrollbar">
-                        {diffs.length === 0 ? (
-                            <div className="p-4 text-xs text-slate-500 text-center">No schema defined</div>
-                        ) : (
-                            <div className="divide-y divide-slate-800">
-                                {diffs.filter(d => d.status !== 'extra').map((d, i) => {
-                                    const colors = statusColors[d.status];
-                                    return (
-                                        <div key={i} className={`px-3 py-1.5 ${colors.bg} flex items-center gap-2`}>
-                                            <span className={`text-[10px] ${colors.text}`}>{colors.icon}</span>
-                                            <span className="text-xs font-mono text-slate-300 flex-1 truncate">{d.path}</span>
-                                            <span className="text-[10px] text-slate-500">{d.expected?.type}</span>
-                                            {d.expected?.required && (
-                                                <span className="text-[10px] text-red-400">*</span>
-                                            )}
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        )}
+                    <div
+                        ref={expectedRef}
+                        onScroll={() => handleScroll(expectedRef)}
+                        className="flex-1 overflow-auto custom-scrollbar p-3"
+                    >
+                        <HighlightedJSON
+                            data={expectedResponseData}
+                            errors={schemaErrors}
+                            mode="data"
+                            highlightColor="amber"
+                            hideErrorText={true}
+                        />
                     </div>
                 </div>
 
                 {/* Column 3: Actual Response */}
                 <div className="flex flex-col overflow-hidden">
-                    <div className="px-4 py-2 bg-emerald-500/10 border-b border-slate-700 shrink-0">
-                        <div className="text-xs font-bold text-emerald-400 uppercase">Actual Response</div>
-                        <div className="text-[10px] text-slate-500">实际收到的数据</div>
+                    <div className="px-4 py-2 bg-emerald-500/10 border-b border-slate-800 shrink-0 flex items-center justify-between">
+                        <div className="font-bold text-emerald-400 text-base">ACTUAL</div>
+                        <div className="text-sm text-slate-500">实际响应</div>
                     </div>
-                    <div className="flex-1 overflow-auto custom-scrollbar p-3">
-                        <pre className="text-xs font-mono text-emerald-300 whitespace-pre-wrap">
-                            {JSON.stringify(actualResponse?.payload || actualResponse, null, 2)}
-                        </pre>
+                    <div
+                        ref={actualRef}
+                        onScroll={() => handleScroll(actualRef)}
+                        className="flex-1 overflow-auto custom-scrollbar p-3"
+                    >
+                        <HighlightedJSON
+                            data={actualResponse}
+                            errors={schemaErrors}
+                            mode="data"
+                            highlightColor="red"
+                        />
                     </div>
                 </div>
             </div>
@@ -529,578 +443,217 @@ export const ThreeWayDiff: React.FC<ThreeWayDiffProps> = ({
     );
 };
 
-// ==================== 批量测试结果汇总面板 ====================
-
-interface BatchTestSummaryPanelProps {
+export const TestResultViewer: React.FC<{
     isOpen: boolean;
     onClose: () => void;
-    batchResult: BatchTestResult | null;
-    onViewDetail: (result: any) => void;
-}
+    result?: DetailedTestResult | null;
+    batchResult?: BatchTestResult | null;
+    protocolNamespace?: string;
+    protocolMethod?: string;
+    onRetry?: () => void;
+}> = ({ isOpen, onClose, result, batchResult, protocolNamespace, protocolMethod, onRetry }) => {
+    if (!isOpen) return null;
 
-export const BatchTestSummaryPanel: React.FC<BatchTestSummaryPanelProps> = ({
-    isOpen,
-    onClose,
-    batchResult,
-    onViewDetail
-}) => {
-    const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-    const [filterStatus, setFilterStatus] = useState<'all' | 'PASS' | 'FAIL' | 'TIMEOUT'>('all');
+    // Normalize input to a list of results
+    const results = useMemo(() => {
+        if (batchResult) return batchResult.results;
+        if (result) return [result];
+        return [];
+    }, [batchResult, result]);
 
-    // 所有 useMemo 必须在 early return 之前，确保 hooks 数量恒定
-    const results = batchResult?.results || [];
+    const title = batchResult ? `批量测试结果: ${batchResult.suiteName}` : `${protocolNamespace} / ${protocolMethod}`;
+    const summary = batchResult ? batchResult.summary : (result ? {
+        total: 1,
+        passed: result.status === 'PASS' ? 1 : 0,
+        failed: result.status === 'FAIL' ? 1 : 0,
+        timeout: result.status === 'TIMEOUT' ? 1 : 0
+    } : { total: 0, passed: 0, failed: 0, timeout: 0 });
 
-    // 按 namespace 分组
-    const groupedResults = useMemo(() => {
-        const groups: Record<string, typeof results> = {};
-        results.forEach(r => {
-            const ns = r.namespace || 'Unknown';
-            if (!groups[ns]) {
-                groups[ns] = [];
+    // State for collapsible items
+    const [expandedIndices, setExpandedIndices] = useState<Set<number>>(new Set());
+
+    useEffect(() => {
+        if (isOpen) {
+            const newExpanded = new Set<number>();
+            results.forEach((res, idx) => {
+                const isFocused = result && (res === result || res.id === result.id);
+                const isFailed = res.status === 'FAIL' || res.status === 'TIMEOUT';
+                if (isFocused || isFailed) {
+                    newExpanded.add(idx);
+                }
+            });
+            if (newExpanded.size === 0 && results.length === 1) {
+                newExpanded.add(0);
             }
-            groups[ns].push(r);
-        });
-        return groups;
-    }, [results]);
+            setExpandedIndices(newExpanded);
+        }
+    }, [isOpen, results, result]);
 
-    const filteredGroups = useMemo(() => {
-        if (filterStatus === 'all') return groupedResults;
-        const filtered: Record<string, typeof results> = {};
-        Object.entries(groupedResults).forEach(([ns, items]) => {
-            const filteredItems = items.filter(i => i.status === filterStatus);
-            if (filteredItems.length > 0) {
-                filtered[ns] = filteredItems;
-            }
-        });
-        return filtered;
-    }, [groupedResults, filterStatus]);
-
-    // Early return 在所有 hooks 之后
-    if (!isOpen || !batchResult) return null;
-
-    const { summary, suiteName, deviceName, startTime, endTime } = batchResult;
-    const duration = endTime ? (endTime - startTime) / 1000 : 0;
-    const passRate = summary.total > 0 ? Math.round((summary.passed / summary.total) * 100) : 0;
-
-    const toggleGroup = (namespace: string) => {
-        setExpandedGroups(prev => {
+    const toggleExpand = (index: number) => {
+        setExpandedIndices(prev => {
             const next = new Set(prev);
-            if (next.has(namespace)) {
-                next.delete(namespace);
+            if (next.has(index)) {
+                next.delete(index);
             } else {
-                next.add(namespace);
+                next.add(index);
             }
             return next;
         });
     };
 
-    const statusConfig = {
-        PASS: { icon: CheckCircle, color: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30' },
-        FAIL: { icon: XCircle, color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30' },
-        TIMEOUT: { icon: Clock, color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/30' },
-        PENDING: { icon: Clock, color: 'text-slate-400', bg: 'bg-slate-500/10', border: 'border-slate-500/30' }
+    const [filterStatus, setFilterStatus] = useState<'ALL' | 'PASS' | 'FAIL' | 'TIMEOUT'>('ALL');
+
+    const filteredResults = useMemo(() => {
+        if (filterStatus === 'ALL') return results;
+        return results.filter(r => r.status === filterStatus);
+    }, [results, filterStatus]);
+
+    const expandAll = () => {
+        // Only expand currently visible results
+        const newExpanded = new Set(expandedIndices);
+        filteredResults.forEach(r => {
+            // Find original index
+            const idx = results.indexOf(r);
+            if (idx !== -1) newExpanded.add(idx);
+        });
+        setExpandedIndices(newExpanded);
+    };
+
+    const collapseAll = () => {
+        setExpandedIndices(new Set());
     };
 
     return (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[100]">
-            <div className="bg-slate-900 border border-slate-700 rounded-2xl w-[1100px] max-h-[90vh] flex flex-col overflow-hidden">
+        <div className="fixed inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-sm">
+            <div className="bg-slate-900 w-[95vw] h-[95vh] rounded-xl border border-slate-700 flex flex-col shadow-2xl overflow-hidden">
                 {/* Header */}
-                <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/80 shrink-0">
-                    <div className="flex items-center gap-4">
-                        <div className="p-2 bg-indigo-500/10 rounded-xl">
-                            <BarChart3 size={24} className="text-indigo-400" />
-                        </div>
-                        <div>
-                            <div className="text-lg font-black text-white">{suiteName}</div>
-                            <div className="text-xs text-slate-500">
-                                Device: {deviceName} • Duration: {duration.toFixed(1)}s
-                            </div>
-                        </div>
-                    </div>
-                    <button
-                        onClick={onClose}
-                        className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
-                    >
-                        <X size={18} />
-                    </button>
-                </div>
-
-                {/* Summary Stats */}
-                <div className="grid grid-cols-5 gap-4 p-6 border-b border-slate-800 bg-slate-950/30">
-                    <div className="bg-slate-800/50 rounded-xl p-4 text-center">
-                        <div className="text-3xl font-black text-white">{summary.total}</div>
-                        <div className="text-xs text-slate-500 uppercase mt-1">Total Tests</div>
-                    </div>
-                    <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 text-center">
-                        <div className="text-3xl font-black text-emerald-400">{summary.passed}</div>
-                        <div className="text-xs text-emerald-500 uppercase mt-1">Passed</div>
-                    </div>
-                    <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 text-center">
-                        <div className="text-3xl font-black text-red-400">{summary.failed}</div>
-                        <div className="text-xs text-red-500 uppercase mt-1">Failed</div>
-                    </div>
-                    <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 text-center">
-                        <div className="text-3xl font-black text-amber-400">{summary.timeout}</div>
-                        <div className="text-xs text-amber-500 uppercase mt-1">Timeout</div>
-                    </div>
-                    <div className={`rounded-xl p-4 text-center ${passRate >= 80 ? 'bg-emerald-500/10 border border-emerald-500/20' : passRate >= 50 ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-red-500/10 border border-red-500/20'}`}>
-                        <div className={`text-3xl font-black ${passRate >= 80 ? 'text-emerald-400' : passRate >= 50 ? 'text-amber-400' : 'text-red-400'}`}>
-                            {passRate}%
-                        </div>
-                        <div className="text-xs text-slate-500 uppercase mt-1">Pass Rate</div>
-                    </div>
-                </div>
-
-                {/* Filter Tabs */}
-                <div className="flex items-center gap-2 px-6 py-3 border-b border-slate-800 bg-slate-900/50">
-                    <span className="text-xs text-slate-500 mr-2">Filter:</span>
-                    {(['all', 'PASS', 'FAIL', 'TIMEOUT'] as const).map(status => (
-                        <button
-                            key={status}
-                            onClick={() => setFilterStatus(status)}
-                            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${filterStatus === status
-                                ? status === 'all' ? 'bg-indigo-600 text-white' : `${statusConfig[status as keyof typeof statusConfig].bg} ${statusConfig[status as keyof typeof statusConfig].color}`
-                                : 'bg-slate-800 text-slate-400 hover:text-white'
-                                }`}
-                        >
-                            {status === 'all' ? 'All' : status}
-                        </button>
-                    ))}
-                </div>
-
-                {/* Results List */}
-                <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-2">
-                    {Object.entries(filteredGroups).map(([namespace, items]) => {
-                        const isExpanded = expandedGroups.has(namespace);
-                        const groupPassed = items.filter(i => i.status === 'PASS').length;
-                        const groupFailed = items.filter(i => i.status === 'FAIL').length;
-                        const groupTimeout = items.filter(i => i.status === 'TIMEOUT').length;
-
-                        return (
-                            <div key={namespace} className="bg-slate-800/30 rounded-xl overflow-hidden">
-                                {/* Group Header */}
-                                <div
-                                    className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-slate-800/50 transition-colors"
-                                    onClick={() => toggleGroup(namespace)}
+                <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700 bg-slate-800/50 shrink-0">
+                    <div className="flex items-center gap-6">
+                        <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                            {title}
+                        </h2>
+                        <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700">
+                            <button
+                                onClick={() => setFilterStatus('ALL')}
+                                className={`px-3 py-1 text-xs font-bold rounded transition-colors flex items-center gap-2 ${filterStatus === 'ALL' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                            >
+                                <span>Total</span>
+                                <span className="bg-slate-700 px-1.5 rounded text-slate-300">{summary.total}</span>
+                            </button>
+                            <div className="w-px h-4 bg-slate-700 mx-1"></div>
+                            <button
+                                onClick={() => setFilterStatus('PASS')}
+                                className={`px-3 py-1 text-xs font-bold rounded transition-colors flex items-center gap-2 ${filterStatus === 'PASS' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'text-slate-400 hover:text-emerald-400'}`}
+                            >
+                                <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                                <span>Pass</span>
+                                <span className={`px-1.5 rounded ${filterStatus === 'PASS' ? 'bg-emerald-500/20' : 'bg-slate-700 text-slate-300'}`}>{summary.passed}</span>
+                            </button>
+                            <button
+                                onClick={() => setFilterStatus('FAIL')}
+                                className={`px-3 py-1 text-xs font-bold rounded transition-colors flex items-center gap-2 ${filterStatus === 'FAIL' ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'text-slate-400 hover:text-red-400'}`}
+                            >
+                                <span className="w-2 h-2 rounded-full bg-red-500"></span>
+                                <span>Fail</span>
+                                <span className={`px-1.5 rounded ${filterStatus === 'FAIL' ? 'bg-red-500/20' : 'bg-slate-700 text-slate-300'}`}>{summary.failed}</span>
+                            </button>
+                            {summary.timeout > 0 && (
+                                <button
+                                    onClick={() => setFilterStatus('TIMEOUT')}
+                                    className={`px-3 py-1 text-xs font-bold rounded transition-colors flex items-center gap-2 ${filterStatus === 'TIMEOUT' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'text-slate-400 hover:text-amber-400'}`}
                                 >
-                                    {isExpanded ? <ChevronDown size={16} className="text-slate-500" /> : <ChevronRight size={16} className="text-slate-500" />}
-                                    <span className="text-sm font-mono text-white flex-1">{namespace}</span>
-                                    <div className="flex gap-2">
-                                        {groupPassed > 0 && (
-                                            <span className="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400">
-                                                ✓ {groupPassed}
-                                            </span>
-                                        )}
-                                        {groupFailed > 0 && (
-                                            <span className="text-xs px-2 py-0.5 rounded bg-red-500/10 text-red-400">
-                                                ✗ {groupFailed}
-                                            </span>
-                                        )}
-                                        {groupTimeout > 0 && (
-                                            <span className="text-xs px-2 py-0.5 rounded bg-amber-500/10 text-amber-400">
-                                                ⏱ {groupTimeout}
-                                            </span>
-                                        )}
+                                    <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                                    <span>Timeout</span>
+                                    <span className={`px-1.5 rounded ${filterStatus === 'TIMEOUT' ? 'bg-amber-500/20' : 'bg-slate-700 text-slate-300'}`}>{summary.timeout}</span>
+                                </button>
+                            )}
+                        </div>
+                        {summary.total > 0 && (
+                            <div className="text-xs font-mono text-slate-500">
+                                Success Rate: <span className={`${summary.passed === summary.total ? 'text-emerald-400' : 'text-slate-300'}`}>{Math.round((summary.passed / summary.total) * 100)}%</span>
+                            </div>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-3">
+                        <div className="flex bg-slate-800 rounded-lg p-1 mr-2">
+                            <button onClick={expandAll} className="px-3 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Expand All</button>
+                            <button onClick={collapseAll} className="px-3 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Collapse All</button>
+                        </div>
+                        {onRetry && !batchResult && (
+                            <button onClick={onRetry} className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm flex items-center gap-2 transition-colors">
+                                <RefreshCw size={16} /> 重试
+                            </button>
+                        )}
+                        <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-white transition-colors">
+                            <X size={24} />
+                        </button>
+                    </div>
+                </div>
+
+                {/* Content List */}
+                <div className="flex-1 overflow-y-auto custom-scrollbar bg-slate-950 p-6 space-y-4">
+                    {filteredResults.map((res) => {
+                        const index = results.indexOf(res); // Use original index for stable keys and state
+                        const isExpanded = expandedIndices.has(index);
+                        return (
+                            <div key={index} className="border border-slate-800 rounded-xl overflow-hidden bg-slate-900 shadow-lg transition-all duration-300">
+                                {/* Result Header (Clickable) */}
+                                <div
+                                    className={`px-4 py-3 bg-slate-800 border-b ${isExpanded ? 'border-slate-700' : 'border-transparent'} flex items-center justify-between cursor-pointer hover:bg-slate-750 transition-colors`}
+                                    onClick={() => toggleExpand(index)}
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className={`transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>
+                                            <ChevronRight size={18} className="text-slate-500" />
+                                        </div>
+                                        <div className={`p-1.5 rounded-lg ${res.status === 'PASS' ? 'bg-emerald-500/20 text-emerald-400' : res.status === 'TIMEOUT' ? 'bg-amber-500/20 text-amber-400' : 'bg-red-500/20 text-red-400'}`}>
+                                            {res.status === 'PASS' ? <CheckCircle size={18} /> : res.status === 'TIMEOUT' ? <Clock size={18} /> : <XCircle size={18} />}
+                                        </div>
+                                        <div>
+                                            <div className="text-sm font-bold text-white font-mono flex items-center gap-2">
+                                                {res.namespace || protocolNamespace} <span className="text-slate-500">/</span> {res.method || protocolMethod}
+                                                {res.status !== 'PASS' && (
+                                                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${res.status === 'TIMEOUT' ? 'bg-amber-500/10 text-amber-400' : 'bg-red-500/10 text-red-400'}`}>
+                                                        {res.status}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            {res.error && (
+                                                <div className="text-xs text-red-400 mt-0.5">{res.error}</div>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-4 text-xs text-slate-400">
+                                        <span className="flex items-center gap-1"><Clock size={12} /> {res.duration}ms</span>
+                                        <span>{new Date(res.startTime || 0).toLocaleTimeString()}</span>
                                     </div>
                                 </div>
 
-                                {/* Group Items */}
+                                {/* 3-Column Detail View (Collapsible) */}
                                 {isExpanded && (
-                                    <div className="border-t border-slate-700/50">
-                                        {items.map((item, idx) => {
-                                            const cfg = statusConfig[item.status];
-                                            const Icon = cfg.icon;
-                                            return (
-                                                <div
-                                                    key={`${item.namespace}-${item.method}-${idx}`}
-                                                    className={`flex items-center gap-3 px-4 py-2 ${cfg.bg} border-l-2 ${cfg.border} hover:bg-slate-700/30 cursor-pointer transition-colors`}
-                                                    onClick={() => onViewDetail(item)}
-                                                >
-                                                    <Icon size={14} className={cfg.color} />
-                                                    <span className="text-xs font-bold text-slate-300 w-16">{item.method}</span>
-                                                    <span className="text-xs text-slate-500 flex-1">
-                                                        {item.duration}ms
-                                                        {item.error && ` • ${item.error.slice(0, 50)}...`}
-                                                    </span>
-                                                    <button
-                                                        className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            onViewDetail(item);
-                                                        }}
-                                                    >
-                                                        <Eye size={12} /> View
-                                                    </button>
-                                                </div>
-                                            );
-                                        })}
+                                    <div className="h-[500px] border-b border-slate-800 last:border-0 animate-in fade-in slide-in-from-top-2 duration-200">
+                                        <ThreeWayDiff
+                                            requestPayload={res.request?.payload}
+                                            requestMessage={res.request}
+                                            expectedSchema={res.expectedSchema}
+                                            actualResponse={res.response}
+                                            schemaErrors={res.schemaErrors}
+                                        />
                                     </div>
                                 )}
                             </div>
                         );
                     })}
-                </div>
 
-                {/* Footer */}
-                <div className="flex items-center justify-between px-6 py-3 border-t border-slate-800 bg-slate-900/50 shrink-0">
-                    <div className="text-xs text-slate-500">
-                        {Object.keys(filteredGroups).length} protocols • {results.length} total tests
-                    </div>
-                    <button
-                        onClick={onClose}
-                        className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold"
-                    >
-                        Close
-                    </button>
+                    {filteredResults.length === 0 && (
+                        <div className="text-center text-slate-500 py-20">
+                            No results to display
+                        </div>
+                    )}
                 </div>
             </div>
         </div>
     );
 };
 
-// ==================== 主组件 ====================
 
-interface TestResultViewerProps {
-    isOpen: boolean;
-    onClose: () => void;
-    result: DetailedTestResult | null;
-    protocolNamespace?: string;
-    protocolMethod?: string;
-    onRetry?: () => void;
-    // 用于 Diff 对比的预期响应（可选，如果没有则使用 request payload）
-    expectedResponse?: any;
-}
-
-export const TestResultViewer: React.FC<TestResultViewerProps> = ({
-    isOpen,
-    onClose,
-    result,
-    protocolNamespace,
-    protocolMethod,
-    onRetry,
-    expectedResponse
-}) => {
-    const [activeTab, setActiveTab] = useState<'overview' | 'request' | 'response' | 'diff' | 'schema' | 'threeway'>('overview');
-    const [copied, setCopied] = useState(false);
-    const [isFullscreen, setIsFullscreen] = useState(false);
-
-    if (!isOpen || !result) return null;
-
-    const statusConfig = {
-        PASS: { icon: CheckCircle, color: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', label: 'PASSED' },
-        FAIL: { icon: XCircle, color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30', label: 'FAILED' },
-        TIMEOUT: { icon: Clock, color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/30', label: 'TIMEOUT' },
-        PENDING: { icon: RefreshCw, color: 'text-slate-400', bg: 'bg-slate-500/10', border: 'border-slate-500/30', label: 'PENDING' },
-    };
-
-    const status = statusConfig[result.status];
-    const StatusIcon = status.icon;
-
-    const handleCopy = (data: any) => {
-        navigator.clipboard.writeText(JSON.stringify(data, null, 2));
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-    };
-
-    // 准备 Diff 数据
-    // 左边：请求发送的 payload（预期）
-    // 右边：响应收到的 payload（实际）
-    const leftDiffData = expectedResponse || result.request?.message?.payload || {};
-    const rightDiffData = result.response?.payload || result.response || {};
-
-    const tabs = [
-        { id: 'overview', label: 'Overview', show: true },
-        { id: 'request', label: 'Request', show: !!result.request },
-        { id: 'response', label: 'Response', show: !!result.response },
-        { id: 'diff', label: 'Diff', show: true, icon: ArrowLeftRight },
-        { id: 'threeway', label: '3-Way', show: !!result.expectedSchema, icon: BarChart3 },
-        { id: 'schema', label: 'Schema', show: !!result.expectedSchema },
-    ];
-
-    return (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[100]">
-            <div className={`bg-slate-900 border border-slate-700 rounded-2xl flex flex-col overflow-hidden transition-all duration-300 ${isFullscreen ? 'w-[95vw] h-[95vh]' : 'w-[1100px] h-[85vh]'
-                }`}>
-                {/* Header */}
-                <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/80 shrink-0">
-                    <div className="flex items-center gap-4">
-                        <div className={`flex items-center gap-2 px-4 py-2 rounded-xl ${status.bg} border ${status.border}`}>
-                            <StatusIcon size={18} className={status.color} />
-                            <span className={`font-black text-sm ${status.color}`}>{status.label}</span>
-                        </div>
-                        <div>
-                            <div className="text-sm font-bold text-white">{protocolNamespace || 'Unknown Protocol'}</div>
-                            <div className="text-xs text-slate-500">
-                                Method: {protocolMethod || 'N/A'} • Duration: {result.duration}ms
-                                {result.retryCount !== undefined && result.retryCount > 0 && (
-                                    <span className="ml-2 text-amber-400">• Retries: {result.retryCount}</span>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        {onRetry && result.status !== 'PASS' && (
-                            <button
-                                onClick={onRetry}
-                                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg flex items-center gap-1 transition-colors"
-                            >
-                                <RefreshCw size={12} /> Retry
-                            </button>
-                        )}
-                        <button
-                            onClick={() => setIsFullscreen(!isFullscreen)}
-                            className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
-                        >
-                            {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-                        </button>
-                        <button
-                            onClick={onClose}
-                            className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
-                        >
-                            <X size={18} />
-                        </button>
-                    </div>
-                </div>
-
-                {/* Tabs */}
-                <div className="flex gap-1 px-4 py-2 border-b border-slate-800 bg-slate-950/30 shrink-0">
-                    {tabs.filter(t => t.show).map(tab => (
-                        <button
-                            key={tab.id}
-                            onClick={() => setActiveTab(tab.id as any)}
-                            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${activeTab === tab.id
-                                ? 'bg-indigo-600 text-white'
-                                : 'bg-slate-800/50 text-slate-400 hover:text-white hover:bg-slate-800'
-                                }`}
-                        >
-                            {tab.icon && <tab.icon size={12} />}
-                            {tab.label}
-                        </button>
-                    ))}
-                </div>
-
-                {/* Content */}
-                <div className="flex-1 overflow-hidden flex flex-col">
-                    {/* Overview Tab */}
-                    {activeTab === 'overview' && (
-                        <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-6">
-                            {/* Status Summary */}
-                            <div className={`p-4 rounded-xl ${status.bg} border ${status.border}`}>
-                                <div className="flex items-start gap-4">
-                                    <StatusIcon size={32} className={status.color} />
-                                    <div className="flex-1">
-                                        <div className={`text-lg font-black ${status.color}`}>
-                                            Test {status.label}
-                                        </div>
-                                        <div className="text-sm text-slate-400 mt-1">
-                                            {result.status === 'PASS' && 'Response matched expected schema'}
-                                            {result.status === 'FAIL' && (result.error || 'Response did not match expected schema')}
-                                            {result.status === 'TIMEOUT' && 'Request timed out waiting for response'}
-                                        </div>
-                                    </div>
-                                    <div className="text-right">
-                                        <div className="text-2xl font-black text-white">{result.duration}ms</div>
-                                        <div className="text-xs text-slate-500">Response Time</div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Schema Errors */}
-                            {result.schemaErrors && result.schemaErrors.length > 0 && (
-                                <div className="bg-red-500/5 border border-red-500/20 rounded-xl p-4">
-                                    <div className="flex items-center gap-2 text-red-400 font-bold mb-3">
-                                        <AlertTriangle size={16} />
-                                        Schema Validation Errors ({result.schemaErrors.length})
-                                    </div>
-                                    <div className="space-y-2">
-                                        {result.schemaErrors.map((err, idx) => (
-                                            <div key={idx} className="flex items-start gap-3 bg-slate-900/50 rounded-lg p-3">
-                                                <XCircle size={14} className="text-red-400 flex-shrink-0 mt-0.5" />
-                                                <div className="flex-1 text-sm">
-                                                    <div className="font-mono text-amber-400">{err.path}</div>
-                                                    <div className="text-slate-400 mt-1">{err.message}</div>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Request/Response Preview */}
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="bg-slate-950 border border-slate-700 rounded-xl overflow-hidden">
-                                    <div className="flex items-center justify-between px-4 py-2 bg-slate-900/50 border-b border-slate-800">
-                                        <span className="text-xs font-bold text-blue-400 uppercase">Request Payload</span>
-                                        <button
-                                            onClick={() => handleCopy(result.request?.message?.payload)}
-                                            className="text-slate-500 hover:text-white"
-                                        >
-                                            {copied ? <Check size={12} /> : <Copy size={12} />}
-                                        </button>
-                                    </div>
-                                    <pre className="p-4 text-xs font-mono text-slate-300 max-h-48 overflow-auto custom-scrollbar">
-                                        {result.request?.message?.payload ? JSON.stringify(result.request.message.payload, null, 2) : 'No request data'}
-                                    </pre>
-                                </div>
-                                <div className="bg-slate-950 border border-slate-700 rounded-xl overflow-hidden">
-                                    <div className="flex items-center justify-between px-4 py-2 bg-slate-900/50 border-b border-slate-800">
-                                        <span className="text-xs font-bold text-emerald-400 uppercase">Response Payload</span>
-                                        <button
-                                            onClick={() => handleCopy(result.response?.payload)}
-                                            className="text-slate-500 hover:text-white"
-                                        >
-                                            {copied ? <Check size={12} /> : <Copy size={12} />}
-                                        </button>
-                                    </div>
-                                    <pre className="p-4 text-xs font-mono text-slate-300 max-h-48 overflow-auto custom-scrollbar">
-                                        {result.response?.payload ? JSON.stringify(result.response.payload, null, 2) : 'No response data'}
-                                    </pre>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Request Tab */}
-                    {activeTab === 'request' && result.request && (
-                        <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-4">
-                            <div className="flex items-center justify-between">
-                                <h3 className="text-sm font-bold text-white">Request Details</h3>
-                                <button
-                                    onClick={() => handleCopy(result.request)}
-                                    className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs flex items-center gap-1"
-                                >
-                                    {copied ? <Check size={12} /> : <Copy size={12} />} Copy
-                                </button>
-                            </div>
-
-                            <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700">
-                                <div className="text-xs text-slate-500 uppercase font-bold mb-2">Topic</div>
-                                <div className="text-sm text-white font-mono">{result.request.topic}</div>
-                            </div>
-
-                            <div className="bg-slate-950 border border-slate-700 rounded-xl overflow-hidden">
-                                <div className="px-4 py-2 bg-slate-900/50 border-b border-slate-800">
-                                    <span className="text-xs font-bold text-slate-400 uppercase">Full Message</span>
-                                </div>
-                                <pre className="p-4 text-sm font-mono text-emerald-400 overflow-auto custom-scrollbar max-h-96">
-                                    {JSON.stringify(result.request.message, null, 2)}
-                                </pre>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Response Tab */}
-                    {activeTab === 'response' && result.response && (
-                        <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-4">
-                            <div className="flex items-center justify-between">
-                                <h3 className="text-sm font-bold text-white">Response Details</h3>
-                                <button
-                                    onClick={() => handleCopy(result.response)}
-                                    className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs flex items-center gap-1"
-                                >
-                                    {copied ? <Check size={12} /> : <Copy size={12} />} Copy
-                                </button>
-                            </div>
-
-                            <div className="bg-slate-950 border border-slate-700 rounded-xl overflow-hidden">
-                                <div className="px-4 py-2 bg-slate-900/50 border-b border-slate-800">
-                                    <span className="text-xs font-bold text-slate-400 uppercase">Full Response</span>
-                                </div>
-                                <pre className="p-4 text-sm font-mono text-emerald-400 overflow-auto custom-scrollbar max-h-[500px]">
-                                    {JSON.stringify(result.response, null, 2)}
-                                </pre>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Diff Tab - Side by Side */}
-                    {activeTab === 'diff' && (
-                        <div className="flex-1 flex flex-col overflow-hidden">
-                            <SideBySideDiff
-                                leftJson={leftDiffData}
-                                rightJson={rightDiffData}
-                                leftTitle="Request Payload (Sent)"
-                                rightTitle="Response Payload (Received)"
-                            />
-                        </div>
-                    )}
-
-                    {/* 3-Way Diff Tab */}
-                    {activeTab === 'threeway' && (
-                        <div className="flex-1 flex flex-col overflow-hidden">
-                            <ThreeWayDiff
-                                requestPayload={result.request?.message?.payload || {}}
-                                expectedSchema={result.expectedSchema}
-                                actualResponse={result.response?.payload || result.response || {}}
-                            />
-                        </div>
-                    )}
-
-                    {/* Schema Tab */}
-                    {activeTab === 'schema' && result.expectedSchema && (
-                        <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-4">
-                            <div className="flex items-center justify-between">
-                                <h3 className="text-sm font-bold text-white">Expected Response Schema</h3>
-                                <button
-                                    onClick={() => handleCopy(result.expectedSchema)}
-                                    className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs flex items-center gap-1"
-                                >
-                                    {copied ? <Check size={12} /> : <Copy size={12} />} Copy
-                                </button>
-                            </div>
-
-                            <div className="bg-slate-950 border border-slate-700 rounded-xl overflow-hidden">
-                                <pre className="p-4 text-sm font-mono text-blue-400 overflow-auto custom-scrollbar max-h-[500px]">
-                                    {JSON.stringify(result.expectedSchema, null, 2)}
-                                </pre>
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                {/* Footer */}
-                <div className="flex items-center justify-between px-6 py-3 border-t border-slate-800 bg-slate-900/50 shrink-0">
-                    <div className="flex gap-2">
-                        <button
-                            onClick={() => handleCopy({
-                                namespace: protocolNamespace,
-                                method: protocolMethod,
-                                ...result
-                            })}
-                            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs flex items-center gap-1"
-                        >
-                            <Copy size={12} /> Copy Full Result
-                        </button>
-                        <button
-                            onClick={() => {
-                                const data = JSON.stringify({
-                                    namespace: protocolNamespace,
-                                    method: protocolMethod,
-                                    ...result
-                                }, null, 2);
-                                const blob = new Blob([data], { type: 'application/json' });
-                                const url = URL.createObjectURL(blob);
-                                const a = document.createElement('a');
-                                a.href = url;
-                                a.download = `test_result_${protocolNamespace}_${Date.now()}.json`;
-                                a.click();
-                                URL.revokeObjectURL(url);
-                            }}
-                            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs flex items-center gap-1"
-                        >
-                            <Download size={12} /> Export JSON
-                        </button>
-                    </div>
-                    <button
-                        onClick={onClose}
-                        className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold"
-                    >
-                        Close
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-export default TestResultViewer;

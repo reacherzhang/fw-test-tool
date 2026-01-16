@@ -772,16 +772,19 @@ export function generateProtocolFromDoc(
         if (doc.supportedMethods[methodName]) {
             const methodData = doc.methods[methodName];
 
-            let requestPayload = {};
-            let responseSchema = { type: 'object', required: ['header', 'payload'] };
+            let payload = '{}';
+            let schema = '{"type":"object","required":["header","payload"]}';
 
-            if (methodData?.requestExample?.payload) {
-                requestPayload = methodData.requestExample.payload;
+            if (methodData?.requestExample) {
+                // Use full request example
+                payload = JSON.stringify(methodData.requestExample, null, 2);
             }
 
             if (methodData?.responseExample) {
                 try {
-                    responseSchema = generateSchema(methodData.responseExample, true);
+                    // Generate schema from full response example
+                    const generated = generateSchema(methodData.responseExample, true);
+                    schema = JSON.stringify(generated, null, 2);
                 } catch (e) {
                     warnings.push(`${methodName} 响应 Schema 生成失败`);
                 }
@@ -791,8 +794,8 @@ export function generateProtocolFromDoc(
 
             methods[methodName] = {
                 enabled: true,
-                requestPayload,
-                responseSchema,
+                payload,
+                schema,
             };
         }
     });
