@@ -74,6 +74,14 @@ export const AI_MODELS: Record<AIProvider, string[]> = {
     custom: ['custom-model'],
 };
 
+// 导入文档索引服务
+import {
+    ConfluenceDocIndexService,
+    getDocIndexService,
+    DocIndexConfig,
+    DEFAULT_DOC_INDEX_CONFIG
+} from './confluenceDocIndexService';
+
 /**
  * AI 协议服务类
  */
@@ -81,10 +89,22 @@ export class AIProtocolService {
     private config: AIServiceConfig;
     private confluenceConfig: any;
     private abortController: AbortController | null = null;
+    private docIndexService: ConfluenceDocIndexService | null = null;
+    private useDocIndex: boolean = true;  // 默认使用文档索引
 
-    constructor(aiConfig: AIServiceConfig, confluenceConfig: any) {
+    constructor(aiConfig: AIServiceConfig, confluenceConfig: any, useDocIndex: boolean = true) {
         this.config = aiConfig;
         this.confluenceConfig = confluenceConfig;
+        this.useDocIndex = useDocIndex;
+
+        // 初始化文档索引服务
+        if (useDocIndex && confluenceConfig?.baseUrl) {
+            const indexConfig: Partial<DocIndexConfig> = {
+                confluenceBaseUrl: confluenceConfig.baseUrl,
+                rootPageIds: confluenceConfig.rootPageIds || DEFAULT_DOC_INDEX_CONFIG.rootPageIds,
+            };
+            this.docIndexService = getDocIndexService(indexConfig, aiConfig);
+        }
     }
 
     /**
@@ -113,6 +133,28 @@ export class AIProtocolService {
             this.abortController.abort();
             this.abortController = null;
         }
+        // 同时也取消文档索引构建
+        if (this.docIndexService) {
+            this.docIndexService.abort();
+        }
+    }
+
+    /**
+     * 获取文档索引统计
+     */
+    getIndexStats(): { totalPages: number; lastUpdated: Date | null; cacheStatus: string } | null {
+        return this.docIndexService?.getStats() || null;
+    }
+
+    /**
+     * 刷新文档索引
+     */
+    async refreshIndex(): Promise<number> {
+        if (this.docIndexService) {
+            const index = await this.docIndexService.getIndex(true);
+            return index.items.size;
+        }
+        return 0;
     }
 
     /**
@@ -128,6 +170,30 @@ export class AIProtocolService {
 
         const total = namespaces.length;
 
+        // 如果启用文档索引，先构建索引
+        if (this.useDocIndex && this.docIndexService) {
+            onProgress(0, total, '', {
+                timestamp: Date.now(),
+                type: 'info',
+                message: '正在构建文档索引...'
+            });
+
+            // 给 UI 一点时间渲染消息
+            await new Promise(resolve => setTimeout(resolve, 50));
+
+            try {
+                const index = await this.docIndexService.getIndex();
+                onProgress(0, total, '', {
+                    timestamp: Date.now(),
+                    type: 'info',
+                    message: `文档索引就绪，共 ${index.items.size} 个页面`
+                });
+            } catch (error) {
+                console.warn('[AI Protocol] Failed to build index, falling back to CQL search');
+                this.useDocIndex = false;
+            }
+        }
+
         for (let i = 0; i < namespaces.length; i++) {
             if (this.abortController?.signal.aborted) {
                 onProgress(i, total, '', {
@@ -141,48 +207,87 @@ export class AIProtocolService {
             const namespace = namespaces[i];
 
             try {
-                // 1. 搜索文档
+                // 1. 搜索文档（优先使用索引）
                 onProgress(i, total, namespace, {
                     timestamp: Date.now(),
                     type: 'search',
-                    message: `搜索中...`,
+                    message: this.useDocIndex ? `索引匹配中...` : `CQL 搜索中...`,
                     namespace
                 });
 
-                const searchResults = await this.searchDocuments(namespace);
+                let bestMatch: { title: string; url: string; pageId?: string } | null = null;
+                let matchConfidence = 0;
+                let matchMethod = '';
 
-                if (searchResults.length === 0) {
+                // 优先使用文档索引
+                if (this.useDocIndex && this.docIndexService) {
+                    const matchResult = await this.docIndexService.matchDocument(namespace);
+
+                    if (matchResult.matched && matchResult.document) {
+                        bestMatch = {
+                            title: matchResult.document.title,
+                            url: matchResult.document.url,
+                            pageId: matchResult.document.pageId,
+                        };
+                        matchConfidence = matchResult.document.confidence;
+                        matchMethod = matchResult.document.matchReason;
+
+                        onProgress(i, total, namespace, {
+                            timestamp: Date.now(),
+                            type: 'search',
+                            message: `✓ 匹配到: "${bestMatch.title}" (${Math.round(matchConfidence * 100)}% ${matchMethod})`,
+                            namespace
+                        });
+                    } else {
+                        onProgress(i, total, namespace, {
+                            timestamp: Date.now(),
+                            type: 'info',
+                            message: `索引中未找到匹配，尝试 CQL 搜索...`,
+                            namespace
+                        });
+
+                        // 回退到 CQL 搜索
+                        const searchResults = await this.searchDocuments(namespace);
+                        if (searchResults.length > 0) {
+                            bestMatch = await this.selectBestDocument(namespace, searchResults, strategy.semanticSearch);
+                            matchMethod = 'CQL 搜索';
+                            matchConfidence = 0.5;
+                        }
+                    }
+                } else {
+                    // 使用原有的 CQL 搜索
+                    const searchResults = await this.searchDocuments(namespace);
+
+                    if (searchResults.length > 0) {
+                        onProgress(i, total, namespace, {
+                            timestamp: Date.now(),
+                            type: 'search',
+                            message: `找到 ${searchResults.length} 个候选文档`,
+                            namespace
+                        });
+
+                        if (strategy.semanticSearch) {
+                            onProgress(i, total, namespace, {
+                                timestamp: Date.now(),
+                                type: 'analyze',
+                                message: `AI 分析最佳匹配...`,
+                                namespace
+                            });
+                        }
+
+                        bestMatch = await this.selectBestDocument(namespace, searchResults, strategy.semanticSearch);
+                        matchConfidence = 0.5;
+                    }
+                }
+
+                // 如果没找到匹配，使用默认配置
+                if (!bestMatch) {
                     onProgress(i, total, namespace, {
                         timestamp: Date.now(),
                         type: 'info',
                         message: `未找到相关文档，使用默认配置`,
                         namespace
                     });
-
-                    results.set(namespace, this.createDefaultProtocol(namespace));
-                    continue;
-                }
-
-                onProgress(i, total, namespace, {
-                    timestamp: Date.now(),
-                    type: 'search',
-                    message: `找到 ${searchResults.length} 个候选文档`,
-                    namespace
-                });
-
-                // 2. AI 选择最佳匹配
-                if (strategy.semanticSearch) {
-                    onProgress(i, total, namespace, {
-                        timestamp: Date.now(),
-                        type: 'analyze',
-                        message: `AI 分析最佳匹配...`,
-                        namespace
-                    });
-                }
-
-                const bestMatch = await this.selectBestDocument(namespace, searchResults, strategy.semanticSearch);
-
-                if (!bestMatch) {
                     results.set(namespace, this.createDefaultProtocol(namespace));
                     continue;
                 }
@@ -194,8 +299,13 @@ export class AIProtocolService {
                     namespace
                 });
 
-                // 3. 获取并分析文档内容
+                // 获取并分析文档内容
                 if (strategy.deepAnalysis) {
+                    // 检查取消状态
+                    if (this.abortController?.signal.aborted) {
+                        throw new Error('Aborted');
+                    }
+
                     onProgress(i, total, namespace, {
                         timestamp: Date.now(),
                         type: 'extract',
@@ -204,7 +314,18 @@ export class AIProtocolService {
                     });
 
                     const docContent = await this.fetchDocumentContent(bestMatch.url);
+
+                    // 再次检查取消状态
+                    if (this.abortController?.signal.aborted) {
+                        throw new Error('Aborted');
+                    }
+
                     const protocol = await this.analyzeDocument(namespace, docContent, bestMatch, strategy.generateTestCases);
+
+                    // 再次检查取消状态
+                    if (this.abortController?.signal.aborted) {
+                        throw new Error('Aborted');
+                    }
 
                     results.set(namespace, protocol);
 
@@ -340,7 +461,7 @@ ${candidates.map((c, i) => `${i + 1}. 标题: "${c.title}"
         try {
             const response = await this.callAI([
                 { role: 'user', content: prompt }
-            ], 5);
+            ]);
 
             const index = parseInt(response.trim()) - 1;
             if (index >= 0 && index < candidates.length) {
@@ -372,6 +493,11 @@ ${candidates.map((c, i) => `${i + 1}. 标题: "${c.title}"
 
             if (!pageId) {
                 throw new Error('无法解析页面 ID');
+            }
+
+            // 如果有文档索引服务，优先使用它（因为它处理了认证和 Cookie）
+            if (this.docIndexService) {
+                return await this.docIndexService.fetchDocumentContent(pageId);
             }
 
             const baseUrl = this.confluenceConfig.baseUrl.replace(/\/$/, '');
@@ -420,34 +546,49 @@ ${candidates.map((c, i) => `${i + 1}. 标题: "${c.title}"
 文档内容:
 ${truncatedContent}
 
+请遵循以下步骤进行分析：
+1. **识别交互方式**：查看文档中的交互方式表，确定支持的方法（GET, SET, PUSH）。
+2. **提取 Request Payload (JSON 示例)**：
+   - 生成纯粹的 JSON 数据示例，用于发送请求。
+   - **不要使用 Schema 格式**。
+   - **必须生成具体的示例值**：不要使用 "string", "integer" 等类型描述。
+   - 对于敏感字段（如 key, password, token），使用 "***" 或 "REPLACE_ME"。
+3. **提取 Response Payload (JSON Schema)**：
+   - **必须生成标准的 JSON Schema 格式**，用于验证响应。
+   - 包含 "type", "properties" 等关键字。
+   - **利用表格中的“必填”列**：将标记为“必填（Y）”的字段添加到 "required" 数组中。
+   - 字段的示例值可以放在 "default" 或 "examples" 字段中。
+
 请以 JSON 格式输出分析结果，格式如下:
 {
   "description": "协议功能描述",
   "methods": {
     "GET": {
       "enabled": true/false,
-      "payload": { ... },  // 请求 payload JSON 对象
-      "schema": { ... },   // 响应 JSON Schema
+      "payload": { ... },  // Request Payload: JSON 数据示例
+      "response": { ... },   // Response Payload: JSON Schema (包含 required)
       "description": "GET 方法描述"
     },
-    "SET": { ... },
+    "SET": {
+      "enabled": true/false,
+      "payload": { ... },  // Request Payload: JSON 数据示例
+      "response": { ... },   // Response Payload: JSON Schema (包含 required)
+      "description": "SET 方法描述"
+    },
     "PUSH": { ... }
   },
   "confidence": 0.0-1.0
 }
 
 注意:
-1. payload 是请求时发送的数据结构示例
-2. schema 是响应的 JSON Schema，用于验证响应格式
-3. 如果文档中没有明确说明某个方法，设置 enabled 为 false
-4. confidence 表示你对分析结果的置信度
-
-只输出 JSON，不要其他内容。`;
+1. 只输出 JSON，不要其他内容。
+2. 确保 JSON 格式合法。
+3. **Request Payload 必须是 JSON 示例，Response Payload 必须是 JSON Schema。**`;
 
         try {
             const response = await this.callAI([
                 { role: 'user', content: prompt }
-            ], 60);
+            ]);
 
             // 解析 AI 响应
             const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -468,9 +609,9 @@ ${truncatedContent}
                         payload: typeof methodData.payload === 'object'
                             ? JSON.stringify(methodData.payload, null, 2)
                             : '{}',
-                        schema: typeof methodData.schema === 'object'
-                            ? JSON.stringify(methodData.schema, null, 2)
-                            : '{"type":"object"}',
+                        schema: typeof methodData.response === 'object'
+                            ? JSON.stringify(methodData.response, null, 2)
+                            : (typeof methodData.schema === 'object' ? JSON.stringify(methodData.schema, null, 2) : '{}'),
                         description: methodData.description,
                     };
                 }
@@ -511,104 +652,177 @@ ${truncatedContent}
     }
 
     /**
-     * 调用 AI API
+     * 调用 AI API (带重试)
      */
-    private async callAI(messages: Array<{ role: string; content: string }>, timeoutSeconds: number = 30): Promise<string> {
+    private async callAI(messages: Array<{ role: string; content: string }>, timeoutSeconds: number = 60): Promise<string> {
         const { provider, apiEndpoint, apiKey, model, azureDeploymentName, azureApiVersion } = this.config;
+        const maxRetries = 2; // 用户要求重试2次
 
-        let url: string;
-        let headers: Record<string, string>;
-        let body: any;
+        // 移除 endpoint 结尾的斜杠，避免双斜杠问题
+        const cleanEndpoint = apiEndpoint.replace(/\/+$/, '');
 
-        switch (provider) {
-            case 'azure':
-                url = `${apiEndpoint}/openai/deployments/${azureDeploymentName}/chat/completions?api-version=${azureApiVersion || '2024-02-15-preview'}`;
-                headers = {
-                    'Content-Type': 'application/json',
-                    'api-key': apiKey,
-                };
-                body = { messages, max_tokens: 4096 };
-                break;
+        // 创建 Abort Promise
+        const abortPromise = new Promise<any>((_, reject) => {
+            if (this.abortController?.signal.aborted) reject(new Error('Aborted'));
+            this.abortController?.signal.addEventListener('abort', () => reject(new Error('Aborted')));
+        });
 
-            case 'ollama':
-                url = `${apiEndpoint}/api/chat`;
-                headers = { 'Content-Type': 'application/json' };
-                body = { model, messages, stream: false };
-                break;
+        let lastError: any;
 
-            case 'custom':
-            case 'openai':
-            default:
-                url = `${apiEndpoint}/chat/completions`;
-                headers = {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${apiKey}`,
-                };
-                body = { model, messages, max_tokens: 4096 };
-                break;
-        }
-
-        // 使用 Electron 原生请求绕过 CORS
-        if (window.electronAPI?.nativeRequest) {
-            try {
-                const result = await window.electronAPI.nativeRequest({
-                    url,
-                    method: 'POST',
-                    headers,
-                    body: JSON.stringify(body),
-                    // timeout: timeoutSeconds * 1000, // nativeRequest 可能不支持 timeout，暂移除
-                });
-
-                const isOk = result.status >= 200 && result.status < 300;
-
-                if (!isOk) {
-                    throw new Error(`API 请求失败: ${result.status} - ${result.text?.slice(0, 200)}`);
-                }
-
-                // 解析响应
-                if (provider === 'ollama') {
-                    return result.data?.message?.content || '';
-                } else {
-                    return result.data?.choices?.[0]?.message?.content || '';
-                }
-            } catch (error: any) {
-                throw new Error(`AI 请求失败: ${error.message}`);
-            }
-        } else {
-            // 回退到浏览器 fetch
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            // 每次尝试前检查是否取消
+            if (this.abortController?.signal.aborted) throw new Error('Aborted');
 
             try {
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers,
-                    body: JSON.stringify(body),
-                    signal: controller.signal,
-                });
+                let url: string;
+                let headers: Record<string, string>;
+                let body: any;
 
-                clearTimeout(timeoutId);
+                switch (provider) {
+                    case 'azure':
+                        url = `${cleanEndpoint}/openai/deployments/${azureDeploymentName}/chat/completions?api-version=${azureApiVersion || '2024-02-15-preview'}`;
+                        headers = {
+                            'Content-Type': 'application/json',
+                            'api-key': apiKey,
+                        };
+                        body = { messages, max_tokens: 4096 };
+                        break;
 
-                if (!response.ok) {
-                    const text = await response.text();
-                    throw new Error(`API 请求失败: ${response.status} - ${text.slice(0, 200)}`);
+                    case 'ollama':
+                        url = `${cleanEndpoint}/api/chat`;
+                        headers = { 'Content-Type': 'application/json' };
+                        body = { model, messages, stream: false };
+                        break;
+
+                    case 'custom':
+                    case 'openai':
+                    default:
+                        // 如果用户输入了完整的 /chat/completions 路径，则直接使用
+                        if (cleanEndpoint.endsWith('/chat/completions')) {
+                            url = cleanEndpoint;
+                        } else {
+                            url = `${cleanEndpoint}/chat/completions`;
+                        }
+
+                        headers = {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${apiKey}`,
+                        };
+                        body = { model, messages, max_tokens: 4096 };
+                        break;
                 }
 
-                const data = await response.json();
+                // 使用 Electron 原生请求绕过 CORS
+                if (window.electronAPI?.nativeRequest) {
+                    // 发起请求前再次检查是否取消
+                    if (this.abortController?.signal.aborted) {
+                        throw new Error('Aborted');
+                    }
 
-                if (provider === 'ollama') {
-                    return data?.message?.content || '';
+                    const requestPromise = window.electronAPI.nativeRequest({
+                        url,
+                        method: 'POST',
+                        headers,
+                        body: JSON.stringify(body),
+                        timeout: timeoutSeconds * 1000,
+                    });
+
+                    // 使用 Promise.race 实现立即取消
+                    const result = await Promise.race([requestPromise, abortPromise]);
+
+                    const isOk = result.status >= 200 && result.status < 300;
+
+                    if (!isOk) {
+                        throw new Error(`API 请求失败: ${result.status} - ${result.text?.slice(0, 200)}`);
+                    }
+
+                    // 解析响应
+                    if (provider === 'ollama') {
+                        return result.data?.message?.content || '';
+                    } else {
+                        return result.data?.choices?.[0]?.message?.content || '';
+                    }
                 } else {
-                    return data?.choices?.[0]?.message?.content || '';
+                    // 回退到浏览器 fetch
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
+
+                    // 监听外部取消信号
+                    const onAbort = () => controller.abort();
+                    this.abortController?.signal.addEventListener('abort', onAbort);
+
+                    try {
+                        const response = await fetch(url, {
+                            method: 'POST',
+                            headers,
+                            body: JSON.stringify(body),
+                            signal: controller.signal,
+                        });
+
+                        clearTimeout(timeoutId);
+                        this.abortController?.signal.removeEventListener('abort', onAbort);
+
+                        if (!response.ok) {
+                            const text = await response.text();
+                            throw new Error(`API 请求失败: ${response.status} - ${text.slice(0, 200)}`);
+                        }
+
+                        const data = await response.json();
+
+                        if (provider === 'ollama') {
+                            return data?.message?.content || '';
+                        } else {
+                            return data?.choices?.[0]?.message?.content || '';
+                        }
+                    } catch (error: any) {
+                        clearTimeout(timeoutId);
+                        this.abortController?.signal.removeEventListener('abort', onAbort);
+                        if (error.name === 'AbortError') {
+                            if (this.abortController?.signal.aborted) {
+                                throw new Error('Aborted');
+                            }
+                            throw new Error('请求超时');
+                        }
+                        throw error;
+                    }
                 }
             } catch (error: any) {
-                clearTimeout(timeoutId);
-                if (error.name === 'AbortError') {
-                    throw new Error('请求超时');
+                if (error.message === 'Aborted') {
+                    throw error; // 立即抛出取消错误，停止重试
                 }
-                throw error;
+
+                console.warn(`[AI] Attempt ${attempt + 1} failed: ${error.message}`);
+                lastError = error;
+
+                // 只有超时或网络错误才重试
+                const isTimeout = error.message.includes('timeout') || error.message.includes('超时') || error.message.includes('socket');
+
+                if (attempt < maxRetries && isTimeout) {
+                    // 检查是否已取消
+                    if (this.abortController?.signal.aborted) throw new Error('Aborted');
+
+                    console.log(`[AI] Retrying... (${maxRetries - attempt} left)`);
+
+                    // 使用 Promise.race 让等待可被中断
+                    await Promise.race([
+                        new Promise(r => setTimeout(r, 1000)),
+                        new Promise((_, reject) => {
+                            if (this.abortController?.signal.aborted) reject(new Error('Aborted'));
+                            this.abortController?.signal.addEventListener('abort', () => reject(new Error('Aborted')));
+                        })
+                    ]).catch(e => { if (e.message === 'Aborted') throw e; });
+
+                    continue;
+                }
+
+                // 如果是最后一次尝试，或者不是可重试的错误，则抛出
+                if (attempt === maxRetries) {
+                    throw error;
+                }
             }
         }
+
+        throw lastError || new Error('AI request failed');
     }
 
     /**
@@ -728,10 +942,26 @@ ${truncatedContent}
     }
 
     /**
-     * 延迟函数
+     * 延迟函数 (可被 abort 信号中断)
      */
     private delay(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms));
+        return new Promise((resolve) => {
+            const timeoutId = setTimeout(resolve, ms);
+
+            // 监听 abort 信号
+            const onAbort = () => {
+                clearTimeout(timeoutId);
+                resolve();  // 立即返回，不抛出错误
+            };
+
+            if (this.abortController?.signal.aborted) {
+                clearTimeout(timeoutId);
+                resolve();
+                return;
+            }
+
+            this.abortController?.signal.addEventListener('abort', onAbort, { once: true });
+        });
     }
 }
 

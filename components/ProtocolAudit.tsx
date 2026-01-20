@@ -4,7 +4,7 @@ import {
     CheckCircle, XCircle, AlertTriangle, Edit3, FolderOpen,
     RefreshCw, Copy, Zap, ArrowRight, Download, Upload, FileJson,
     Package, Clock, History, Send, Check, X, Wand2, BarChart3, FileText, MoreVertical, Settings, Search,
-    CheckCircle2, HelpCircle, AlertCircle, Circle, Info, Activity, ArrowDownCircle, Save, Bell, AlignLeft
+    CheckCircle2, HelpCircle, AlertCircle, Circle, Info, Activity, ArrowDownCircle, Save, Bell, AlignLeft, ArrowUp, ArrowDown
 } from 'lucide-react';
 import Ajv from 'ajv';
 import { CloudSession, Device } from '../types';
@@ -38,6 +38,7 @@ interface ProtocolDefinition {
         [key in RequestMethod]?: MethodTest;
     };
     reviewStatus?: 'UNVERIFIED' | 'VERIFIED';
+    verificationMode?: 'direct' | 'manual';
 }
 
 interface AuditProject {
@@ -141,8 +142,10 @@ const inferSchemaFromData = (data: any): any => {
 // Helper to check if an object looks like a JSON Schema
 const isLikelySchema = (obj: any): boolean => {
     if (!obj || typeof obj !== 'object') return false;
+    // Check for explicit schema keywords. 
+    // Note: We do NOT treat empty objects as schemas anymore, treating them as empty payloads instead.
     const schemaKeywords = ['$schema', 'type', 'properties', 'items', 'required', 'allOf', 'anyOf', 'oneOf', 'not', 'enum', 'const'];
-    return schemaKeywords.some(k => k in obj) || Object.keys(obj).length === 0;
+    return schemaKeywords.some(k => k in obj);
 };
 
 interface ProtocolTestSuite {
@@ -539,117 +542,87 @@ const TestPlanPanel: React.FC<{
     onExportSuite: (s: ProtocolTestSuite) => void;
     onDeleteSuite: (id: string) => void;
     onDeleteProtocol: (id: string) => void;
+    onMoveProtocol: (id: string, direction: 'up' | 'down') => void;
 }> = ({
     suites, selectedSuiteId, selectedProtocolId, onSelectSuite, onSelectProtocol,
     searchTerm, onSearchChange, expandedSuites, toggleSuiteExpand,
     selectedProtocols, onToggleProtocolSelection, onToggleSuiteSelection,
     verificationErrorSuiteId, getProtocolStatus, STATUS_CONFIG, onQuickRun, runningTest,
     onAddSuite, onImportSuite, onAutoGen, mqttConnected, targetDevice, devices, targetDeviceId, setTargetDeviceId,
-    onShowStats, onEditSuite, onExportSuite, onDeleteSuite, onDeleteProtocol
+    onShowStats, onEditSuite, onExportSuite, onDeleteSuite, onDeleteProtocol, onMoveProtocol
 }) => {
         return (
             <div className="w-80 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0 overflow-hidden h-full">
                 {/* Toolbar */}
                 <div className="p-3 border-b border-slate-800 flex gap-2">
-                    <button onClick={onAddSuite} className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors" title="New Suite"><Plus size={16} /></button>
-                    <label className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors cursor-pointer" title="Import Suite">
-                        <Upload size={16} />
-                        <input type="file" accept=".json" className="hidden" onChange={onImportSuite} />
-                    </label>
-                    <button onClick={onAutoGen} disabled={!mqttConnected || !targetDevice} className="flex-1 px-3 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                        <Wand2 size={14} /> Auto Gen
+                    <div className="flex-1 relative">
+                        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                        <input value={searchTerm} onChange={e => onSearchChange(e.target.value)} placeholder="搜索协议..." className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2 text-xs text-slate-300 outline-none focus:border-indigo-500 transition-colors" />
+                        {searchTerm && <button onClick={() => onSearchChange('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"><XCircle size={12} /></button>}
+                    </div>
+                    <button onClick={onAutoGen} disabled={!mqttConnected || !targetDevice} className="px-3 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed transition-all" title="从设备自动生成协议">
+                        <Wand2 size={14} /> 自动生成
                     </button>
                 </div>
 
-                {/* Device Selector */}
+                {/* Device Selector - 移到更合理的位置 */}
                 <div className="px-3 py-2 border-b border-slate-800">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">目标设备</label>
                     <select value={targetDeviceId} onChange={(e) => setTargetDeviceId(e.target.value)} className="w-full bg-slate-800 text-white text-sm rounded-lg px-3 py-2 outline-none border border-slate-700 focus:border-indigo-500">
-                        <option value="">Select Device...</option>
+                        <option value="">选择设备...</option>
                         {devices.map(d => <option key={d.id} value={d.id}>{d.name} ({d.ip})</option>)}
                     </select>
                 </div>
 
-                {/* Search */}
-                <div className="px-3 py-2 border-b border-slate-800">
-                    <div className="relative">
-                        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-                        <input value={searchTerm} onChange={e => onSearchChange(e.target.value)} placeholder="Search protocols..." className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-300 outline-none focus:border-indigo-500 transition-colors" />
-                        {searchTerm && <button onClick={() => onSearchChange('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"><XCircle size={12} /></button>}
-                    </div>
-                </div>
-
-                {/* Tree View */}
+                {/* Flat Protocol List */}
                 <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
-                    <div className="flex items-center justify-between px-2 py-1 mb-1">
-                        <div className="text-[10px] font-bold text-slate-500 uppercase">Test Suites</div>
-                    </div>
-                    {suites.map(suite => {
-                        const isSuiteMatch = !searchTerm || suite.name.toLowerCase().includes(searchTerm.toLowerCase());
-                        const matchingProtocols = suite.protocols.filter(p => !searchTerm || p.namespace.toLowerCase().includes(searchTerm.toLowerCase()) || p.name.toLowerCase().includes(searchTerm.toLowerCase()));
-                        const displayProtocols = isSuiteMatch ? suite.protocols : matchingProtocols;
+                    {(() => {
+                        // Flatten protocols from the selected suite (or first suite)
+                        const activeSuite = suites.find(s => s.id === selectedSuiteId) || suites[0];
+                        if (!activeSuite) return <div className="text-center text-slate-500 py-8 text-xs">No protocols found</div>;
 
-                        if (!isSuiteMatch && matchingProtocols.length === 0) return null;
+                        const displayProtocols = activeSuite.protocols.filter(p => !searchTerm || p.namespace.toLowerCase().includes(searchTerm.toLowerCase()) || p.name.toLowerCase().includes(searchTerm.toLowerCase()));
 
-                        const isError = verificationErrorSuiteId === suite.id;
-                        const isExpanded = expandedSuites.has(suite.id) || isError || !!searchTerm;
-                        const isSelected = selectedSuiteId === suite.id && !selectedProtocolId;
+                        return displayProtocols.map(protocol => {
+                            const isProtoSelected = selectedProtocolId === protocol.id;
 
-                        return (
-                            <div key={suite.id} className="select-none">
-                                <div className={`group flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${isSelected ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white'} ${isError ? 'ring-1 ring-red-500 bg-red-500/10' : ''}`}
-                                    onClick={() => onSelectSuite(suite.id)}>
-                                    <button onClick={(e) => { e.stopPropagation(); toggleSuiteExpand(suite.id); }} className={`p-0.5 rounded hover:bg-white/10 ${isSelected ? 'text-white' : 'text-slate-500'}`}>
-                                        {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                                    </button>
+                            // 基于 reviewStatus 直接决定图标和颜色
+                            const isVerified = protocol.reviewStatus === 'VERIFIED';
+                            const StatusIcon = isVerified ? CheckCircle2 : AlertTriangle;
+                            const statusColor = isVerified ? 'text-emerald-500' : 'text-amber-500';
+                            const statusTitle = isVerified ? '已审核' : '未审核';
+
+                            return (
+                                <div key={protocol.id} className={`group/proto flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-all ${isProtoSelected ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/20' : `text-slate-400 hover:bg-slate-800 hover:text-slate-200`}`}
+                                    onClick={(e) => { e.stopPropagation(); onSelectProtocol(protocol); }}>
+
                                     <div onClick={e => e.stopPropagation()} className="flex items-center">
-                                        <input type="checkbox" checked={suite.protocols.length > 0 && suite.protocols.every(p => selectedProtocols.has(p.id))}
-                                            onChange={(e) => onToggleSuiteSelection(suite, e.target.checked)}
-                                            className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-indigo-500 cursor-pointer" />
+                                        <input type="checkbox" checked={selectedProtocols.has(protocol.id)} onChange={(e) => onToggleProtocolSelection(protocol.id, e.target.checked)}
+                                            className={`w-4 h-4 rounded border-slate-600 bg-slate-800 accent-emerald-500 cursor-pointer ${isProtoSelected ? 'border-white/50' : ''}`} />
                                     </div>
-                                    <FolderOpen size={16} className={isSelected ? 'text-white' : 'text-indigo-400'} />
-                                    <span className="flex-1 text-sm font-medium truncate">{suite.name}</span>
-                                    <div className={`flex items-center opacity-0 group-hover:opacity-100 transition-opacity ${isSelected ? 'text-white' : 'text-slate-400'}`}>
-                                        <button onClick={(e) => { e.stopPropagation(); onEditSuite(suite); }} className="p-1 hover:text-indigo-300"><Edit3 size={12} /></button>
-                                        <button onClick={(e) => { e.stopPropagation(); onExportSuite(suite); }} className="p-1 hover:text-emerald-300"><Download size={12} /></button>
-                                        <button onClick={(e) => { e.stopPropagation(); onDeleteSuite(suite.id); }} className="p-1 hover:text-red-300"><Trash2 size={12} /></button>
+
+                                    <span className="flex-1 text-sm font-medium truncate font-mono" title={protocol.namespace}>{protocol.namespace}</span>
+
+                                    {/* Delete Button - Visible on Hover */}
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            onDeleteProtocol(protocol.id);
+                                        }}
+                                        className={`p-1 rounded-md opacity-0 group-hover/proto:opacity-100 transition-opacity ${isProtoSelected ? 'hover:bg-indigo-500 text-indigo-200 hover:text-white' : 'hover:bg-slate-700 text-slate-500 hover:text-red-400'}`}
+                                        title="删除协议"
+                                    >
+                                        <Trash2 size={14} />
+                                    </button>
+
+                                    {/* Status Icon (Right aligned) - 基于审核状态 */}
+                                    <div title={statusTitle}>
+                                        <StatusIcon size={16} className={`${isProtoSelected ? 'text-white/80' : statusColor} shrink-0`} />
                                     </div>
                                 </div>
-                                {isExpanded && (
-                                    <div className="ml-4 pl-2 border-l border-slate-800 mt-1 space-y-0.5">
-                                        {displayProtocols.map(protocol => {
-                                            const isProtoSelected = selectedProtocolId === protocol.id;
-                                            const protoStatus = getProtocolStatus(protocol);
-                                            const statusCfg = STATUS_CONFIG[protoStatus];
-                                            const statusIconMap: Record<string, typeof Circle> = { 'verified_passed': CheckCircle2, 'verified_failed': AlertCircle, 'unverified': AlertTriangle, 'never_tested': CheckCircle2 };
-                                            const StatusIcon = statusIconMap[protoStatus] || Circle;
-                                            const statusColorMap: Record<string, string> = { 'verified_passed': 'text-emerald-500', 'verified_failed': 'text-red-500', 'unverified': 'text-red-500', 'never_tested': 'text-emerald-500' };
-                                            const statusColor = statusColorMap[protoStatus] || 'text-slate-600';
-
-                                            return (
-                                                <div key={protocol.id} className={`group/proto flex items-center gap-2 px-2 py-2 rounded-md cursor-pointer transition-colors ${isProtoSelected ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : `text-slate-400 ${statusCfg.bgHover} hover:text-slate-200 border border-transparent`}`}
-                                                    onClick={(e) => { e.stopPropagation(); onSelectProtocol(protocol); }}>
-                                                    <div onClick={e => e.stopPropagation()} className="flex items-center">
-                                                        <input type="checkbox" checked={selectedProtocols.has(protocol.id)} onChange={(e) => onToggleProtocolSelection(protocol.id, e.target.checked)} className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-indigo-500 cursor-pointer" />
-                                                    </div>
-                                                    <StatusIcon size={14} className={`${statusColor} shrink-0`} />
-                                                    <span className="flex-1 text-sm font-mono truncate" title={protocol.name || protocol.namespace}>{protocol.name || protocol.namespace}</span>
-                                                    <div className="flex items-center opacity-0 group-hover/proto:opacity-100 transition-opacity">
-                                                        <button onClick={(e) => { e.stopPropagation(); onQuickRun(protocol); }} className="p-1 text-slate-500 hover:text-emerald-400 transition-all" title="Quick Run">
-                                                            {runningTest?.startsWith(protocol.id) ? <RefreshCw size={12} className="animate-spin" /> : <Play size={12} />}
-                                                        </button>
-                                                        <button onClick={(e) => { e.stopPropagation(); onDeleteProtocol(protocol.id); }} className="p-1 text-slate-500 hover:text-red-400 transition-all" title="Delete Protocol">
-                                                            <Trash2 size={12} />
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            );
-                                        })}
-                                        {suite.protocols.length === 0 && <div className="text-[10px] text-slate-600 italic px-2 py-1">No protocols</div>}
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
+                            );
+                        });
+                    })()}
                 </div>
                 <div className="p-2 border-t border-slate-800">
                     <button onClick={onShowStats} className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-colors">
@@ -780,7 +753,7 @@ const WorkbenchPanel: React.FC<{
 interface SchemaNode {
     id: string;
     key: string;
-    type: 'string' | 'number' | 'boolean' | 'object' | 'array' | 'null' | 'any';
+    type: 'string' | 'number' | 'boolean' | 'object' | 'array' | 'null' | 'any' | 'int';
     value: any;
     required?: boolean;
     children?: SchemaNode[];
@@ -794,6 +767,7 @@ const getTypeColor = (type: string) => {
         case 'boolean': return 'text-purple-400';
         case 'object': return 'text-amber-400';
         case 'array': return 'text-orange-400';
+        case 'int': return 'text-blue-400';
         default: return 'text-slate-400';
     }
 };
@@ -813,6 +787,7 @@ const SchemaTreeItem: React.FC<{
     const handleValueChange = (val: string) => {
         let newValue: any = val;
         if (node.type === 'number') newValue = Number(val);
+        if (node.type === 'int') newValue = parseInt(val, 10);
         if (node.type === 'boolean') newValue = val === 'true';
         onUpdate(node.id, { value: newValue });
     };
@@ -874,7 +849,7 @@ const SchemaTreeItem: React.FC<{
                                 if (newType === 'object') newValue = {};
                                 if (newType === 'array') newValue = [];
                                 if (newType === 'boolean') newValue = false;
-                                if (newType === 'number') newValue = 0;
+                                if (newType === 'number' || newType === 'int') newValue = 0;
                                 if (newType === 'string') newValue = '';
                                 onUpdate(node.id, { type: newType, value: newValue });
                             }}
@@ -886,8 +861,7 @@ const SchemaTreeItem: React.FC<{
                             <option value="boolean" className="text-amber-400 bg-slate-900">boolean</option>
                             <option value="object" className="text-purple-400 bg-slate-900">object</option>
                             <option value="array" className="text-cyan-400 bg-slate-900">array</option>
-                            <option value="null" className="text-slate-400 bg-slate-900">null</option>
-                            <option value="any" className="text-slate-300 bg-slate-900">any</option>
+                            <option value="int" className="text-blue-400 bg-slate-900">int</option>
                         </select>
                     </div>
 
@@ -966,7 +940,8 @@ const PayloadEditor: React.FC<{
     const [jsonContent, setJsonContent] = useState('');
     const isInternalChange = useRef(false);
 
-    // Convert JSON to Nodes
+    // --- JSON <-> Nodes Converters (Payload Mode) ---
+
     const jsonToNodes = (data: any, parentType: 'object' | 'array' = 'object'): SchemaNode[] => {
         if (typeof data !== 'object' || data === null) return [];
         return Object.entries(data).map(([key, val]) => {
@@ -977,14 +952,13 @@ const PayloadEditor: React.FC<{
                 key,
                 type: type as any,
                 value: (type === 'object' || type === 'array') ? null : val,
-                required: true, // Default to true (Select All by default)
+                required: true,
                 parentType,
                 children: (type === 'object' || type === 'array') ? jsonToNodes(val, type as any) : undefined
             };
         });
     };
 
-    // Convert Nodes to JSON
     const nodesToJson = (nodes: SchemaNode[], parentType: 'object' | 'array'): any => {
         if (parentType === 'array') {
             return nodes.map(node => {
@@ -1006,6 +980,96 @@ const PayloadEditor: React.FC<{
         }
     };
 
+    // --- Schema <-> Nodes Converters (Schema Mode) ---
+
+    const schemaToNodes = (schema: any): SchemaNode[] => {
+        if (!schema || typeof schema !== 'object') return [];
+        // Handle Object Schema
+        if (schema.properties) {
+            return Object.entries(schema.properties).map(([key, propSchema]: [string, any]) => {
+                const id = Math.random().toString(36).substr(2, 9);
+                const node: SchemaNode = {
+                    id,
+                    key,
+                    type: propSchema.type || 'string',
+                    value: propSchema.default ?? (propSchema.examples?.[0] ?? null),
+                    required: schema.required?.includes(key) ?? false,
+                    parentType: 'object',
+                    children: []
+                };
+
+                if (propSchema.type === 'object') {
+                    node.children = schemaToNodes(propSchema);
+                } else if (propSchema.type === 'array' && propSchema.items) {
+                    node.children = [singleSchemaToNode(propSchema.items, 'items', 'array')];
+                }
+                return node;
+            });
+        }
+        return [];
+    };
+
+    const singleSchemaToNode = (schema: any, key: string, parentType: 'object' | 'array'): SchemaNode => {
+        const id = Math.random().toString(36).substr(2, 9);
+        const node: SchemaNode = {
+            id,
+            key,
+            type: schema.type || 'string',
+            value: schema.default ?? null,
+            required: true,
+            parentType,
+            children: []
+        };
+
+        if (schema.type === 'object') {
+            node.children = schemaToNodes(schema);
+        } else if (schema.type === 'array' && schema.items) {
+            node.children = [singleSchemaToNode(schema.items, 'items', 'array')];
+        }
+        return node;
+    };
+
+    const nodesToSchema = (nodes: SchemaNode[]): any => {
+        const properties: any = {};
+        const required: string[] = [];
+
+        nodes.forEach(node => {
+            let schema: any = { type: node.type };
+
+            if (node.type === 'object') {
+                Object.assign(schema, nodesToSchema(node.children || []));
+            } else if (node.type === 'array') {
+                if (node.children && node.children.length > 0) {
+                    schema.items = singleNodeToSchema(node.children[0]);
+                } else {
+                    schema.items = { type: 'string' };
+                }
+            }
+
+            properties[node.key] = schema;
+            if (node.required) required.push(node.key);
+        });
+
+        const result: any = { type: 'object', properties };
+        if (required.length > 0) result.required = required;
+        return result;
+    };
+
+    const singleNodeToSchema = (node: SchemaNode): any => {
+        let schema: any = { type: node.type };
+        if (node.type === 'object') {
+            Object.assign(schema, nodesToSchema(node.children || []));
+        } else if (node.type === 'array') {
+            if (node.children && node.children.length > 0) {
+                schema.items = singleNodeToSchema(node.children[0]);
+            } else {
+                schema.items = { type: 'string' };
+            }
+        }
+        return schema;
+    };
+
+
     // Helper: Construct Full Message
     const getWrappedMessage = (payloadVal: any) => {
         if (mode === 'schema') return payloadVal; // Schema mode shows raw schema
@@ -1024,7 +1088,6 @@ const PayloadEditor: React.FC<{
     // Helper: Extract Payload from Full Message
     const extractPayload = (fullMsg: any) => {
         if (mode === 'schema') return fullMsg;
-        // If it has a payload property, use it. Otherwise assume the whole thing is payload (fallback)
         return fullMsg.payload !== undefined ? fullMsg.payload : fullMsg;
     };
 
@@ -1036,7 +1099,13 @@ const PayloadEditor: React.FC<{
         }
         try {
             const parsed = JSON.parse(value || '{}');
-            setNodes(jsonToNodes(parsed));
+
+            if (mode === 'schema') {
+                setNodes(schemaToNodes(parsed));
+            } else {
+                setNodes(jsonToNodes(parsed));
+            }
+
             setParseError(null);
 
             // Sync JSON content for JSON view
@@ -1057,14 +1126,12 @@ const PayloadEditor: React.FC<{
             onChange(JSON.stringify(payload, null, 2));
             setParseError(null);
         } catch {
-            // Invalid JSON, don't update parent yet
             setParseError('Invalid JSON');
         }
     };
 
     const handleViewSwitch = (newView: 'tree' | 'json') => {
         if (newView === 'json') {
-            // Refresh JSON content when switching to JSON view to ensure it's up to date
             try {
                 const parsed = JSON.parse(value || '{}');
                 const wrapped = getWrappedMessage(parsed);
@@ -1074,15 +1141,18 @@ const PayloadEditor: React.FC<{
             }
         }
         setView(newView);
-    }; // Only re-parse if value changes externally or we switch views? 
-    // Actually we should only sync when switching TO tree view or init.
-    // But for now, simple sync is fine if we debounce or handle carefully.
-    // To avoid loop, we rely on the fact that nodesToJson produces stable output if nodes don't change.
+    };
 
     const handleTreeUpdate = (newNodes: SchemaNode[]) => {
         isInternalChange.current = true;
         setNodes(newNodes);
-        const json = nodesToJson(newNodes, 'object');
+
+        let json;
+        if (mode === 'schema') {
+            json = nodesToSchema(newNodes);
+        } else {
+            json = nodesToJson(newNodes, 'object');
+        }
         onChange(JSON.stringify(json, null, 2));
     };
 
@@ -1091,10 +1161,7 @@ const PayloadEditor: React.FC<{
         const updateRecursive = (currentNodes: SchemaNode[]): SchemaNode[] => {
             return currentNodes.map(node => {
                 if (node.id === id) {
-                    // Apply updates
                     const updatedNode = { ...node, ...updates };
-
-                    // Cascading Selection: If 'required' is updated, apply to all children recursively
                     if (updates.required !== undefined && updatedNode.children) {
                         const setChildrenRequired = (children: SchemaNode[], isRequired: boolean): SchemaNode[] => {
                             return children.map(child => ({
@@ -1162,8 +1229,6 @@ const PayloadEditor: React.FC<{
         };
         handleTreeUpdate([...nodes, newNode]);
     };
-
-
 
     return (
         <div className="flex flex-col h-full bg-slate-950">
@@ -1396,6 +1461,12 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     const [runningTest, setRunningTest] = useState<string | null>(null); // protocolId:method
     const [verificationErrorSuiteId, setVerificationErrorSuiteId] = useState<string | null>(null);
     const [unverifiedProtocolsModal, setUnverifiedProtocolsModal] = useState<{ show: boolean; protocols: ProtocolDefinition[] }>({ show: false, protocols: [] });
+    const [confirmationModal, setConfirmationModal] = useState<{
+        show: boolean;
+        title: string;
+        message: string;
+        onConfirm: () => void;
+    }>({ show: false, title: '', message: '', onConfirm: () => { } });
 
     // Toast message system (replaces alert)
     const [toastMessage, setToastMessage] = useState<{ show: boolean; type: 'error' | 'success' | 'warning' | 'info'; message: string }>({ show: false, type: 'info', message: '' });
@@ -1406,6 +1477,20 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
     // P1 Optimization: Test Progress Tracking
     const [testProgress, setTestProgress] = useState<{ current: number; total: number; currentProtocol: string; startTime: number } | null>(null);
+
+    // Audit Confirmation State
+    const [auditConfirmation, setAuditConfirmation] = useState<{
+        show: boolean;
+        protocol: ProtocolDefinition | null;
+        method: RequestMethod | null;
+    }>({ show: false, protocol: null, method: null });
+
+    // Verification Modal
+    const [verificationModal, setVerificationModal] = useState<{
+        show: boolean;
+        protocol: ProtocolDefinition | null;
+        mode: 'direct' | 'manual';
+    }>({ show: false, protocol: null, mode: 'manual' });
 
     // Stop test control
     const stopTestRef = useRef(false);
@@ -1453,6 +1538,27 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     // Copy Protocol
     const [showCopyProtocolModal, setShowCopyProtocolModal] = useState(false);
     const [copyTargetSuiteId, setCopyTargetSuiteId] = useState<string>('');
+
+    // Unsaved Changes Detection
+    const [originalProtocol, setOriginalProtocol] = useState<ProtocolDefinition | null>(null);
+    const [showUnsavedChangesModal, setShowUnsavedChangesModal] = useState(false);
+    const [pendingNavigation, setPendingNavigation] = useState<(() => void) | null>(null);
+
+    // Check if protocol has unsaved changes
+    const hasUnsavedChanges = useCallback(() => {
+        if (!originalProtocol || !newProtocol.id) return false;
+        return JSON.stringify(originalProtocol) !== JSON.stringify(newProtocol);
+    }, [originalProtocol, newProtocol]);
+
+    // Safe navigation with unsaved changes check
+    const safeNavigate = useCallback((action: () => void) => {
+        if (hasUnsavedChanges()) {
+            setPendingNavigation(() => action);
+            setShowUnsavedChangesModal(true);
+        } else {
+            action();
+        }
+    }, [hasUnsavedChanges]);
 
     const handleCopyProtocol = () => {
         if (!selectedSuiteId || !newProtocol || !copyTargetSuiteId) return;
@@ -1659,10 +1765,16 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     };
 
     const deleteSuite = (id: string) => {
-        if (confirm('Are you sure you want to delete this suite?')) {
-            setSuites(suites.filter(s => s.id !== id));
-            if (selectedSuiteId === id) setSelectedSuiteId(null);
-        }
+        setConfirmationModal({
+            show: true,
+            title: '删除测试库',
+            message: '确定要删除这个测试库吗？此操作不可恢复。',
+            onConfirm: () => {
+                setSuites(prev => prev.filter(s => s.id !== id));
+                if (selectedSuiteId === id) setSelectedSuiteId(null);
+                setConfirmationModal({ show: false, title: '', message: '', onConfirm: () => { } });
+            }
+        });
     };
 
     const importSuite = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1692,6 +1804,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         a.click();
         URL.revokeObjectURL(url);
     };
+
+
 
     // Protocol Actions
     const addProtocolToSuite = () => {
@@ -1749,29 +1863,45 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
         if (isUpdate) {
             showToast('success', '协议已保存');
-            // Stay on page
+            // Update original protocol to reset dirty state
+            // The logic above calculates hasChanges. Let's simplify: after save, current newProtocol IS the original
+            setOriginalProtocol(JSON.parse(JSON.stringify(newProtocol)));
         } else {
             showToast('success', '协议已创建');
             setSelectedProtocolId(protocolId);
             setRightPanelTab('edit');
-            setNewProtocol(prev => ({ ...prev, id: protocolId }));
+            const created = { ...newProtocol, id: protocolId, reviewStatus: 'UNVERIFIED' as const };
+            setNewProtocol(created);
+            setOriginalProtocol(JSON.parse(JSON.stringify(created)));
         }
     };
 
     const startEditingProtocol = (protocol: ProtocolDefinition) => {
-        setNewProtocol(JSON.parse(JSON.stringify(protocol))); // Deep copy
+        const protocolCopy = JSON.parse(JSON.stringify(protocol)); // Deep copy
+        setNewProtocol(protocolCopy);
+        setOriginalProtocol(protocolCopy); // 保存原始状态用于脏数据检测
         setSelectedProtocolId(protocol.id);
         setRightPanelTab('edit');
     };
 
     const deleteProtocol = (protocolId: string) => {
         if (!selectedSuiteId) return;
-        if (confirm('Delete this protocol?')) {
-            setSuites(suites.map(s => {
-                if (s.id !== selectedSuiteId) return s;
-                return { ...s, protocols: s.protocols.filter(p => p.id !== protocolId) };
-            }));
-        }
+        setConfirmationModal({
+            show: true,
+            title: '删除协议',
+            message: '确定要删除这个协议吗？',
+            onConfirm: () => {
+                setSuites(prev => prev.map(s => {
+                    if (s.id !== selectedSuiteId) return s;
+                    return { ...s, protocols: s.protocols.filter(p => p.id !== protocolId) };
+                }));
+                if (selectedProtocolId === protocolId) {
+                    setSelectedProtocolId(null);
+                    setRightPanelTab('overview');
+                }
+                setConfirmationModal({ show: false, title: '', message: '', onConfirm: () => { } });
+            }
+        });
     };
 
     const updateProtocolMethod = (protocolId: string, method: RequestMethod, updates: Partial<MethodTest>) => {
@@ -1792,6 +1922,23 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                     };
                 })
             };
+        }));
+    };
+
+    const moveProtocol = (protocolId: string, direction: 'up' | 'down') => {
+        if (!selectedSuiteId) return;
+        setSuites(prev => prev.map(s => {
+            if (s.id !== selectedSuiteId) return s;
+            const index = s.protocols.findIndex(p => p.id === protocolId);
+            if (index === -1) return s;
+            if (direction === 'up' && index === 0) return s;
+            if (direction === 'down' && index === s.protocols.length - 1) return s;
+
+            const newProtocols = [...s.protocols];
+            const swapIndex = direction === 'up' ? index - 1 : index + 1;
+            [newProtocols[index], newProtocols[swapIndex]] = [newProtocols[swapIndex], newProtocols[index]];
+
+            return { ...s, protocols: newProtocols, updatedAt: Date.now() };
         }));
     };
 
@@ -1831,7 +1978,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         return new Promise((resolve) => {
             const messageId = md5(crypto.randomUUID()).toLowerCase();
             const timestamp = Math.floor(Date.now() / 1000);
-            const sign = md5(messageId + session.key + String(timestamp));
+            const sign = md5(messageId + session.key + String(timestamp)).toLowerCase();
 
             const message = {
                 header: {
@@ -1907,6 +2054,10 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     };
 
     // Test Execution
+    const initiateProtocolTest = (protocol: ProtocolDefinition, method: RequestMethod) => {
+        setAuditConfirmation({ show: true, protocol, method });
+    };
+
     const runSingleTest = async (protocol: ProtocolDefinition, methodName: RequestMethod, showViewer: boolean = false, testCase?: TestCase): Promise<DetailedTestResult> => {
         if (!targetDevice || !mqttConnected) {
             addTestLog('ERROR', 'Target device not connected');
@@ -1956,6 +2107,13 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         const ts = Math.floor(Date.now() / 1000);
         // Use standard signature generation: md5(messageId + key + timestamp)
         // Matches logic in ProtocolLab.tsx and fetchDeviceAbility
+
+        console.log('[ProtocolAudit] Signature Params:', {
+            requestId,
+            keyPrefix: session.key ? session.key.substring(0, 4) + '***' : 'undefined',
+            timestamp: ts
+        });
+
         const sign = md5(requestId + session.key + String(ts)).toLowerCase();
 
         const finalPayload = {
@@ -2685,13 +2843,20 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             <div className="h-12 border-b border-slate-800 flex items-center px-4 justify-between bg-slate-900 shrink-0">
                 <div className="flex items-center gap-3">
                     <button
-                        onClick={() => setViewMode('DASHBOARD')}
+                        onClick={() => safeNavigate(() => setViewMode('DASHBOARD'))}
                         className="text-slate-400 hover:text-white flex items-center gap-1 text-sm"
                     >
                         <ChevronLeft size={16} /> Dashboard
                     </button>
                     <div className="h-4 w-px bg-slate-700"></div>
-                    <span className="font-bold text-white">{activeProject?.name}</span>
+                    {/* 协议库名称 - 可点击跳转到测试结果列表 */}
+                    <button
+                        onClick={() => safeNavigate(() => setSelectedProtocolId(null))}
+                        className="font-bold text-white hover:text-indigo-400 transition-colors cursor-pointer"
+                        title="点击返回测试结果列表"
+                    >
+                        {activeProject?.name}
+                    </button>
                     <span className="text-xs text-slate-500 px-2 py-0.5 bg-slate-800 rounded-full">
                         {activeProject?.targetDeviceName || 'No Device'}
                     </span>
@@ -2712,22 +2877,21 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                             {(selectedSuite?.executionConfig?.timeout || DEFAULT_EXECUTION_CONFIG.timeout) / 1000}s
                         </span>
                     </button>
-                    {/* Run/Stop */}
-                    {!selectedProtocolId && (
-                        isRunning ? (
-                            <button onClick={stopTests} className="p-2 bg-red-600 hover:bg-red-500 text-white rounded-lg shadow-lg shadow-red-900/20 transition-all" title="Stop">
-                                <XCircle size={18} />
-                            </button>
-                        ) : (
-                            <button
-                                onClick={() => runAllTests()}
-                                disabled={!mqttConnected || !selectedSuite || selectedSuite.protocols.length === 0 || selectedProtocols.size === 0}
-                                className="p-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-900/20 transition-all"
-                                title={selectedProtocols.size > 0 ? `Run (${selectedProtocols.size})` : 'Run'}
-                            >
-                                <Play size={18} />
-                            </button>
-                        )
+                    {/* Run/Stop - 始终显示，不受 selectedProtocolId 限制 */}
+                    {isRunning ? (
+                        <button onClick={stopTests} className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg shadow-lg shadow-red-900/20 transition-all font-bold flex items-center gap-2" title="停止测试">
+                            <XCircle size={16} /> 停止
+                        </button>
+                    ) : (
+                        <button
+                            onClick={() => safeNavigate(() => runAllTests())}
+                            disabled={!mqttConnected || !selectedSuite || selectedSuite.protocols.length === 0 || selectedProtocols.size === 0}
+                            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-900/20 transition-all font-bold flex items-center gap-2"
+                            title={selectedProtocols.size > 0 ? `运行 ${selectedProtocols.size} 个选中的协议` : '请先选择要运行的协议'}
+                        >
+                            <Play size={16} fill="currentColor" />
+                            <span>运行 {selectedProtocols.size > 0 ? `(${selectedProtocols.size})` : ''}</span>
+                        </button>
                     )}
                     {/* Report */}
                     {currentRun && (
@@ -2736,10 +2900,10 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         </button>
                     )}
                     {/* Add Protocol */}
-                    <button onClick={() => {
+                    <button onClick={() => safeNavigate(() => {
                         resetProtocolWizard();
                         setIsAddingProtocol(true);
-                    }} className="p-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg shadow-lg shadow-indigo-900/20 transition-all" title="Add Protocol">
+                    })} className="p-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg shadow-lg shadow-indigo-900/20 transition-all" title="Add Protocol">
                         <Plus size={18} />
                     </button>
                 </div>
@@ -2771,13 +2935,17 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         selectedSuiteId={selectedSuiteId}
                         selectedProtocolId={selectedProtocolId}
                         onSelectSuite={(id) => {
-                            setSelectedSuiteId(id);
-                            setSelectedProtocolId(null);
-                            setRightPanelTab('overview');
+                            safeNavigate(() => {
+                                setSelectedSuiteId(id);
+                                setSelectedProtocolId(null);
+                                setRightPanelTab('overview');
+                            });
                         }}
                         onSelectProtocol={(p) => {
-                            setSelectedSuiteId(suites.find(s => s.protocols.some(proto => proto.id === p.id))?.id || null);
-                            startEditingProtocol(p);
+                            safeNavigate(() => {
+                                setSelectedSuiteId(suites.find(s => s.protocols.some(proto => proto.id === p.id))?.id || null);
+                                startEditingProtocol(p);
+                            });
                         }}
                         searchTerm={searchTerm}
                         onSearchChange={setSearchTerm}
@@ -2810,21 +2978,22 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         verificationErrorSuiteId={verificationErrorSuiteId}
                         getProtocolStatus={getProtocolStatus}
                         STATUS_CONFIG={STATUS_CONFIG}
-                        onQuickRun={(p) => runAllTests([p])}
+                        onQuickRun={(p) => safeNavigate(() => runAllTests([p]))}
                         runningTest={runningTest}
-                        onAddSuite={() => setIsAddingSuite(true)}
+                        onAddSuite={() => safeNavigate(() => setIsAddingSuite(true))}
                         onImportSuite={importSuite}
-                        onAutoGen={() => setShowProtocolGenerator(true)}
+                        onAutoGen={() => safeNavigate(() => setShowProtocolGenerator(true))}
                         mqttConnected={mqttConnected}
                         targetDevice={targetDevice}
                         devices={devices}
                         targetDeviceId={targetDeviceId}
                         setTargetDeviceId={setTargetDeviceId}
-                        onShowStats={() => setShowStatsDashboard(true)}
+                        onShowStats={() => safeNavigate(() => setShowStatsDashboard(true))}
                         onEditSuite={startEditingSuite}
                         onExportSuite={exportSuite}
                         onDeleteSuite={deleteSuite}
                         onDeleteProtocol={deleteProtocol}
+                        onMoveProtocol={moveProtocol}
                     />
 
                     <WorkbenchPanel>
@@ -2940,82 +3109,91 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                         {selectedProtocolId && (
                                             <div className="flex-1 overflow-hidden flex flex-col bg-slate-900/50 rounded-xl m-2 mt-1 border border-slate-800 relative">
                                                 {/* Consolidated Header & Tabs */}
-                                                <div className="flex items-center justify-between px-4 border-b border-slate-800 shrink-0 h-10 bg-slate-900/50">
-                                                    {/* Left: Tabs */}
-                                                    <div className="flex gap-1 h-full">
-                                                        {(['edit', 'review'] as const).map(tab => (
-                                                            <button
-                                                                key={tab}
-                                                                onClick={() => setRightPanelTab(tab)}
-                                                                className={`px-5 h-full border-b-2 transition-colors text-sm font-bold uppercase tracking-wider ${(rightPanelTab === tab || (rightPanelTab === 'overview' && tab === 'edit'))
-                                                                    ? 'border-indigo-500 text-indigo-400'
-                                                                    : 'border-transparent text-slate-500 hover:text-slate-300'
-                                                                    }`}
-                                                            >
-                                                                {tab === 'edit' ? 'Edit' : 'Workbench'}
-                                                            </button>
-                                                        ))}
+                                                <div className="flex items-center justify-between px-4 border-b border-slate-800 shrink-0 h-14 bg-slate-900">
+                                                    {/* Left: Back Button, Protocol Name & Status Badge */}
+                                                    <div className="flex items-center gap-4">
+                                                        {/* 返回测试列表按钮 */}
+                                                        <button
+                                                            onClick={() => safeNavigate(() => setSelectedProtocolId(null))}
+                                                            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
+                                                            title="返回测试列表"
+                                                        >
+                                                            <ChevronLeft size={18} />
+                                                        </button>
+
+                                                        <div className="text-lg font-bold text-white font-mono tracking-tight">
+                                                            {newProtocol.namespace || 'New Protocol'}
+                                                        </div>
+
+                                                        {/* Status Badge - Clickable for Verification */}
+                                                        <button
+                                                            onClick={() => setVerificationModal({ show: true, protocol: newProtocol, mode: newProtocol.verificationMode || 'manual' })}
+                                                            className={`px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-all hover:scale-105 active:scale-95 ${newProtocol.reviewStatus === 'VERIFIED'
+                                                                ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-900/20'
+                                                                : 'bg-amber-500 text-white shadow-lg shadow-amber-900/20'
+                                                                }`}
+                                                        >
+                                                            {newProtocol.reviewStatus === 'VERIFIED' ? (
+                                                                <><CheckCircle2 size={12} strokeWidth={3} /> 已审核</>
+                                                            ) : (
+                                                                <><AlertTriangle size={12} strokeWidth={3} /> 未审核</>
+                                                            )}
+                                                        </button>
                                                     </div>
 
-                                                    {/* Right: Protocol Info & Actions */}
-                                                    <div className="flex items-center gap-3">
-                                                        <span className="text-sm font-mono text-slate-400">{newProtocol.namespace || 'Protocol'}</span>
-                                                        <span className={`text-xs font-bold px-2 py-1 rounded ${newProtocol.reviewStatus === 'VERIFIED' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}`}>
-                                                            {newProtocol.reviewStatus === 'VERIFIED' ? 'Verified' : 'Unverified'}
-                                                        </span>
 
-                                                        {/* Protocol Actions (Moved from below) */}
-                                                        <div className="flex items-center gap-2 ml-2 pl-2 border-l border-slate-700">
-                                                            <button
-                                                                onClick={() => setShowCopyProtocolModal(true)}
-                                                                className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-2 text-xs font-bold transition-colors"
-                                                                title="Copy Protocol"
-                                                            >
-                                                                <Copy size={14} /> 复制
+
+                                                    {/* Protocol Actions (Moved from below) */}
+                                                    <div className="flex items-center gap-2 ml-2 pl-2 border-l border-slate-700">
+                                                        <button
+                                                            onClick={() => setShowCopyProtocolModal(true)}
+                                                            className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-2 text-xs font-bold transition-colors"
+                                                            title="Copy Protocol"
+                                                        >
+                                                            <Copy size={14} /> 复制
+                                                        </button>
+                                                        <div className="relative group">
+                                                            <button className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-2 text-xs font-bold transition-colors">
+                                                                <FolderOpen size={14} /> 模板
                                                             </button>
-                                                            <div className="relative group">
-                                                                <button className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-2 text-xs font-bold transition-colors">
-                                                                    <FolderOpen size={14} /> 模板
-                                                                </button>
-                                                                <div className="absolute right-0 top-full mt-2 w-72 bg-slate-900 border border-slate-700 rounded-xl shadow-xl overflow-hidden hidden group-hover:block z-50">
-                                                                    <div className="p-2 bg-slate-800/50 border-b border-slate-700">
-                                                                        <div className="text-xs font-bold text-slate-400 uppercase mb-1">选择协议模板</div>
-                                                                        <div className="flex gap-1 flex-wrap">
-                                                                            {(['all', 'control', 'system', 'config', 'ota', 'sensor'] as const).map(cat => (
-                                                                                <button key={cat} onClick={(e) => { e.stopPropagation(); setTemplateCategory(cat); }}
-                                                                                    className={`px-2 py-0.5 text-xs rounded ${templateCategory === cat ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-400 hover:text-white'}`}>
-                                                                                    {cat === 'all' ? '全部' : cat.toUpperCase()}
-                                                                                </button>
-                                                                            ))}
-                                                                        </div>
-                                                                    </div>
-                                                                    <div className="max-h-48 overflow-y-auto custom-scrollbar p-1">
-                                                                        {PROTOCOL_TEMPLATES.filter(tpl => templateCategory === 'all' || tpl.category === templateCategory).map(tpl => (
-                                                                            <button key={tpl.namespace} onClick={() => {
-                                                                                const methods: any = {};
-                                                                                ALL_METHODS.forEach(m => {
-                                                                                    if (tpl.methods.includes(m)) {
-                                                                                        const preset = tpl.presets?.[m];
-                                                                                        methods[m] = { enabled: true, payload: preset?.payload || '{}', schema: preset?.schema || '{}' };
-                                                                                    } else {
-                                                                                        methods[m] = { enabled: false, payload: '{}', schema: '{}' };
-                                                                                    }
-                                                                                });
-                                                                                setNewProtocol(p => ({ ...p, namespace: tpl.namespace, name: tpl.namespace, description: tpl.description, methods }));
-                                                                                addTestLog('INFO', `应用模板: ${tpl.name}`);
-                                                                            }} className="w-full text-left p-2 hover:bg-slate-800 rounded-lg">
-                                                                                <div className="text-sm font-bold text-white">{tpl.name}</div>
-                                                                                <div className="text-xs text-slate-500 font-mono truncate">{tpl.namespace}</div>
+                                                            <div className="absolute right-0 top-full mt-2 w-72 bg-slate-900 border border-slate-700 rounded-xl shadow-xl overflow-hidden hidden group-hover:block z-50">
+                                                                <div className="p-2 bg-slate-800/50 border-b border-slate-700">
+                                                                    <div className="text-xs font-bold text-slate-400 uppercase mb-1">选择协议模板</div>
+                                                                    <div className="flex gap-1 flex-wrap">
+                                                                        {(['all', 'control', 'system', 'config', 'ota', 'sensor'] as const).map(cat => (
+                                                                            <button key={cat} onClick={(e) => { e.stopPropagation(); setTemplateCategory(cat); }}
+                                                                                className={`px-2 py-0.5 text-xs rounded ${templateCategory === cat ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-400 hover:text-white'}`}>
+                                                                                {cat === 'all' ? '全部' : cat.toUpperCase()}
                                                                             </button>
                                                                         ))}
                                                                     </div>
                                                                 </div>
+                                                                <div className="max-h-48 overflow-y-auto custom-scrollbar p-1">
+                                                                    {PROTOCOL_TEMPLATES.filter(tpl => templateCategory === 'all' || tpl.category === templateCategory).map(tpl => (
+                                                                        <button key={tpl.namespace} onClick={() => {
+                                                                            const methods: any = {};
+                                                                            ALL_METHODS.forEach(m => {
+                                                                                if (tpl.methods.includes(m)) {
+                                                                                    const preset = tpl.presets?.[m];
+                                                                                    methods[m] = { enabled: true, payload: preset?.payload || '{}', schema: preset?.schema || '{}' };
+                                                                                } else {
+                                                                                    methods[m] = { enabled: false, payload: '{}', schema: '{}' };
+                                                                                }
+                                                                            });
+                                                                            setNewProtocol(p => ({ ...p, namespace: tpl.namespace, name: tpl.namespace, description: tpl.description, methods }));
+                                                                            addTestLog('INFO', `应用模板: ${tpl.name}`);
+                                                                        }} className="w-full text-left p-2 hover:bg-slate-800 rounded-lg">
+                                                                            <div className="text-sm font-bold text-white">{tpl.name}</div>
+                                                                            <div className="text-xs text-slate-500 font-mono truncate">{tpl.namespace}</div>
+                                                                        </button>
+                                                                    ))}
+                                                                </div>
                                                             </div>
-                                                            <button onClick={addProtocolToSuite}
-                                                                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold uppercase shadow-lg shadow-emerald-900/20 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5">
-                                                                <Save size={14} /> {newProtocol.id ? '保存' : '创建'}
-                                                            </button>
                                                         </div>
+                                                        <button onClick={addProtocolToSuite}
+                                                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold uppercase shadow-lg shadow-emerald-900/20 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5">
+                                                            <Save size={14} /> {newProtocol.id ? '保存' : '创建'}
+                                                        </button>
                                                     </div>
                                                 </div>
 
@@ -3075,126 +3253,57 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                         </div>
 
                                                         {/* Method Editor Area */}
-                                                        {(rightPanelTab === 'edit' || rightPanelTab === 'overview') && (
-                                                            <div className="flex-1 flex min-h-0 border-t border-slate-800">
-                                                                {/* Left: Request Payload */}
-                                                                <div className="w-1/2 flex flex-col border-r border-slate-800 bg-slate-950">
-                                                                    <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
-                                                                        <div className="flex items-center gap-2">
-                                                                            <span className={`w-2.5 h-2.5 rounded-full ${METHOD_COLORS[editingMethod]?.bg || 'bg-slate-500'}`} />
-                                                                            <span className="text-xs font-bold text-slate-300 uppercase">Request Payload</span>
-                                                                            <span className="text-xs text-slate-500 font-normal ml-2">(发送给设备的数据)</span>
-                                                                        </div>
-                                                                        <div className="flex items-center gap-2">
-                                                                            <button onClick={() => {
-                                                                                setJsonExampleInput('');
-                                                                                setJsonExtractMode('payload');
-                                                                                setShowJsonToSchemaModal(true);
-                                                                            }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
-                                                                                <Copy size={12} /> 从示例提取
-                                                                            </button>
-                                                                            <button onClick={() => {
-                                                                                const currentPayload = newProtocol.methods[editingMethod]?.payload || '{}';
-                                                                                try {
-                                                                                    const formatted = JSON.stringify(JSON.parse(currentPayload), null, 2);
-                                                                                    setNewProtocol(p => ({
-                                                                                        ...p,
-                                                                                        methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], payload: formatted } }
-                                                                                    }));
-                                                                                    showToast('success', '格式化成功');
-                                                                                } catch (e) {
-                                                                                    showToast('error', 'JSON 格式错误，无法格式化');
-                                                                                }
-                                                                            }} className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors">
-                                                                                <AlignLeft size={12} /> 格式化
-                                                                            </button>
-                                                                        </div>
+                                                        <div className="flex-1 flex min-h-0 border-t border-slate-800">
+                                                            {/* Left: Request Payload */}
+                                                            <div className="w-1/2 flex flex-col border-r border-slate-800 bg-slate-950">
+                                                                <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
+                                                                    <div className="flex items-center gap-2">
+                                                                        <span className={`w-2.5 h-2.5 rounded-full ${METHOD_COLORS[editingMethod]?.bg || 'bg-slate-500'}`} />
+                                                                        <span className="text-xs font-bold text-slate-300 uppercase">Request Payload</span>
+                                                                        <span className="text-xs text-slate-500 font-normal ml-2">(发送给设备的数据)</span>
                                                                     </div>
-                                                                    <div className="flex-1 overflow-hidden relative group/editor">
-                                                                        {newProtocol.methods[editingMethod]?.enabled ? (
-                                                                            editingMethod === 'PUSH' ? (
-                                                                                <div className="flex flex-col items-center justify-center h-full text-slate-500 p-6 text-center">
-                                                                                    <Bell size={32} className="mb-3 opacity-50" />
-                                                                                    <p className="text-xs font-bold mb-1">PUSH 方法</p>
-                                                                                    <p className="text-[10px] max-w-[180px] text-slate-600">设备主动推送消息，无需配置请求载荷</p>
-                                                                                </div>
-                                                                            ) : (
-                                                                                <div className="absolute inset-0 overflow-hidden">
-                                                                                    <PayloadEditor
-                                                                                        value={newProtocol.methods[editingMethod]?.payload || '{}'}
-                                                                                        onChange={(v) => setNewProtocol(p => ({
-                                                                                            ...p,
-                                                                                            methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], payload: v } }
-                                                                                        }))}
-                                                                                        mode="payload"
-                                                                                        protocol={newProtocol}
-                                                                                        method={editingMethod}
-                                                                                        session={session}
-                                                                                    />
-                                                                                    {/* JSON Error Indicator */}
-                                                                                    {(() => {
-                                                                                        try {
-                                                                                            JSON.parse(newProtocol.methods[editingMethod]?.payload || '{}');
-                                                                                            return null;
-                                                                                        } catch (e) {
-                                                                                            return (
-                                                                                                <div className="absolute bottom-4 right-4 px-3 py-1.5 bg-red-500/10 border border-red-500/50 rounded text-red-400 text-xs font-mono flex items-center gap-2 backdrop-blur-sm shadow-lg">
-                                                                                                    <AlertTriangle size={12} /> JSON 格式错误
-                                                                                                </div>
-                                                                                            );
-                                                                                        }
-                                                                                    })()}
-                                                                                </div>
-                                                                            )
-                                                                        ) : (
-                                                                            <div className="flex flex-col items-center justify-center h-full text-slate-600">
-                                                                                <p className="text-sm">方法未启用</p>
-                                                                                <button onClick={() => {
-                                                                                    setNewProtocol(p => ({
-                                                                                        ...p,
-                                                                                        methods: { ...p.methods, [editingMethod]: { ...(p.methods[editingMethod] || { payload: '{}', schema: '{}' }), enabled: true } }
-                                                                                    }));
-                                                                                }} className="mt-2 text-indigo-400 hover:text-indigo-300 text-xs underline">
-                                                                                    启用 {editingMethod}
-                                                                                </button>
-                                                                            </div>
-                                                                        )}
+                                                                    <div className="flex items-center gap-2">
+                                                                        <button onClick={() => {
+                                                                            setJsonExampleInput('');
+                                                                            setJsonExtractMode('payload');
+                                                                            setShowJsonToSchemaModal(true);
+                                                                        }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
+                                                                            <Copy size={12} /> 从示例提取
+                                                                        </button>
+                                                                        <button onClick={() => {
+                                                                            const currentPayload = newProtocol.methods[editingMethod]?.payload || '{}';
+                                                                            try {
+                                                                                const formatted = JSON.stringify(JSON.parse(currentPayload), null, 2);
+                                                                                setNewProtocol(p => ({
+                                                                                    ...p,
+                                                                                    methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], payload: formatted } }
+                                                                                }));
+                                                                                showToast('success', '格式化成功');
+                                                                            } catch (e) {
+                                                                                showToast('error', 'JSON 格式错误，无法格式化');
+                                                                            }
+                                                                        }} className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors">
+                                                                            <AlignLeft size={12} /> 格式化
+                                                                        </button>
                                                                     </div>
                                                                 </div>
-
-                                                                {/* Right: Response Schema */}
-                                                                <div className="w-1/2 flex flex-col bg-slate-950">
-                                                                    <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
-                                                                        <div className="flex items-center gap-2">
-                                                                            <span className={`w-2.5 h-2.5 rounded-full ${METHOD_COLORS[editingMethod]?.bg || 'bg-slate-500'}`} />
-                                                                            <span className="text-xs font-bold text-slate-300 uppercase">Response Payload</span>
-                                                                            <span className="text-xs text-slate-500 font-normal ml-2">(用于验证设备响应)</span>
-                                                                        </div>
-                                                                        <div className="flex items-center gap-2">
-                                                                            <button onClick={() => {
-                                                                                setJsonExampleInput('');
-                                                                                setJsonExtractMode('schema_payload');
-                                                                                setShowJsonToSchemaModal(true);
-                                                                            }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
-                                                                                <Copy size={12} /> 从示例提取 Payload
-                                                                            </button>
-                                                                            <button onClick={() => {
-                                                                                setShowSchemaPreview(true);
-                                                                            }} className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors">
-                                                                                <FileJson size={12} /> 查看 Schema
-                                                                            </button>
-                                                                        </div>
-                                                                    </div>
-                                                                    <div className="flex-1 overflow-hidden relative">
-                                                                        {newProtocol.methods[editingMethod]?.enabled ? (
+                                                                <div className="flex-1 overflow-hidden relative group/editor">
+                                                                    {newProtocol.methods[editingMethod]?.enabled ? (
+                                                                        editingMethod === 'PUSH' ? (
+                                                                            <div className="flex flex-col items-center justify-center h-full text-slate-500 p-6 text-center">
+                                                                                <Bell size={32} className="mb-3 opacity-50" />
+                                                                                <p className="text-xs font-bold mb-1">PUSH 方法</p>
+                                                                                <p className="text-[10px] max-w-[180px] text-slate-600">设备主动推送消息，无需配置请求载荷</p>
+                                                                            </div>
+                                                                        ) : (
                                                                             <div className="absolute inset-0 overflow-hidden">
                                                                                 <PayloadEditor
-                                                                                    value={newProtocol.methods[editingMethod]?.schema || '{}'}
+                                                                                    value={newProtocol.methods[editingMethod]?.payload || '{}'}
                                                                                     onChange={(v) => setNewProtocol(p => ({
                                                                                         ...p,
-                                                                                        methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], schema: v } }
+                                                                                        methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], payload: v } }
                                                                                     }))}
-                                                                                    mode="schema"
+                                                                                    mode="payload"
                                                                                     protocol={newProtocol}
                                                                                     method={editingMethod}
                                                                                     session={session}
@@ -3202,7 +3311,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                                                 {/* JSON Error Indicator */}
                                                                                 {(() => {
                                                                                     try {
-                                                                                        JSON.parse(newProtocol.methods[editingMethod]?.schema || '{}');
+                                                                                        JSON.parse(newProtocol.methods[editingMethod]?.payload || '{}');
                                                                                         return null;
                                                                                     } catch (e) {
                                                                                         return (
@@ -3213,173 +3322,93 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                                                     }
                                                                                 })()}
                                                                             </div>
-                                                                        ) : (
-                                                                            <div className="flex items-center justify-center h-full text-slate-600 text-sm">
-                                                                                方法未启用
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                )}
-
-                                                {/* Workbench Tab Content (Phase 3) */}
-                                                {rightPanelTab === 'review' && (
-                                                    <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
-                                                        {/* 1. Protocol Status Header */}
-                                                        <div className={`p-4 rounded-xl border flex items-center justify-between ${newProtocol.reviewStatus === 'VERIFIED' ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
-                                                            <div className="flex items-center gap-3">
-                                                                {newProtocol.reviewStatus === 'VERIFIED' ? (
-                                                                    <ShieldCheck size={24} className="text-emerald-400" />
-                                                                ) : (
-                                                                    <AlertTriangle size={24} className="text-red-400" />
-                                                                )}
-                                                                <div>
-                                                                    <div className={`text-lg font-bold ${newProtocol.reviewStatus === 'VERIFIED' ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                                        {newProtocol.reviewStatus === 'VERIFIED' ? 'Protocol Verified' : 'Unverified'}
-                                                                    </div>
-                                                                    <div className="text-xs text-slate-400">
-                                                                        {newProtocol.reviewStatus === 'VERIFIED'
-                                                                            ? '此协议已通过审核，可以运行测试'
-                                                                            : '请审核协议配置后标记为已验证'}
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                            {newProtocol.reviewStatus !== 'VERIFIED' && (
-                                                                <button
-                                                                    onClick={() => {
-                                                                        setNewProtocol(p => ({ ...p, reviewStatus: 'VERIFIED' }));
-                                                                        if (selectedSuiteId && newProtocol.id) {
-                                                                            setSuites(prev => prev.map(s => {
-                                                                                if (s.id !== selectedSuiteId) return s;
-                                                                                return {
-                                                                                    ...s,
-                                                                                    protocols: s.protocols.map(p =>
-                                                                                        p.id === newProtocol.id ? { ...p, reviewStatus: 'VERIFIED' as const } : p
-                                                                                    ),
-                                                                                    updatedAt: Date.now()
-                                                                                };
-                                                                            }));
-                                                                        }
-                                                                    }}
-                                                                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold flex items-center gap-2"
-                                                                >
-                                                                    <ShieldCheck size={16} /> Mark as Verified
-                                                                </button>
-                                                            )}
-                                                        </div>
-
-                                                        {/* 2. Methods Workbench */}
-                                                        <div className="space-y-6">
-                                                            {getEnabledMethods().map(method => {
-                                                                const methodConfig = newProtocol.methods[method];
-                                                                if (!methodConfig) return null;
-
-                                                                // Determine if Interactive (Phase 3 Logic)
-                                                                const isInteractive = (method !== 'GET' && method !== 'DELETE') && (methodConfig.payload !== '{}' && !!methodConfig.payload);
-                                                                const lastResult = methodConfig.lastResult;
-
-                                                                return (
-                                                                    <div key={method} className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden transition-all hover:border-slate-600">
-                                                                        {/* Method Header */}
-                                                                        <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between bg-slate-900/30">
-                                                                            <div className="flex items-center gap-3">
-                                                                                <span className={`text-sm font-bold px-2 py-0.5 rounded ${getMethodColorClasses(method)}`}>{method}</span>
-                                                                                <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${isInteractive
-                                                                                    ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400'
-                                                                                    : 'bg-slate-500/10 border-slate-500/30 text-slate-400'}`}>
-                                                                                    {isInteractive ? 'Interactive Mode' : 'Auto Mode'}
-                                                                                </span>
-                                                                            </div>
-                                                                            {lastResult && (
-                                                                                <span className={`text-xs font-bold px-2 py-1 rounded-full flex items-center gap-1 ${lastResult.status === 'PASS' ? 'bg-emerald-500/20 text-emerald-400' :
-                                                                                    lastResult.status === 'FAIL' ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'
-                                                                                    }`}>
-                                                                                    {lastResult.status === 'PASS' ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
-                                                                                    {lastResult.status}
-                                                                                </span>
-                                                                            )}
+                                                                        )
+                                                                    ) : (
+                                                                        <div className="flex flex-col items-center justify-center h-full text-slate-600">
+                                                                            <p className="text-sm">方法未启用</p>
+                                                                            <button onClick={() => {
+                                                                                setNewProtocol(p => ({
+                                                                                    ...p,
+                                                                                    methods: { ...p.methods, [editingMethod]: { ...(p.methods[editingMethod] || { payload: '{}', schema: '{}' }), enabled: true } }
+                                                                                }));
+                                                                            }} className="mt-2 text-indigo-400 hover:text-indigo-300 text-xs underline">
+                                                                                启用 {editingMethod}
+                                                                            </button>
                                                                         </div>
+                                                                    )}
+                                                                </div>
+                                                            </div>
 
-                                                                        <div className="p-4">
-                                                                            {/* Interactive Input Area */}
-                                                                            {isInteractive && (
-                                                                                <div className="mb-4 space-y-2">
-                                                                                    <div className="flex items-center justify-between">
-                                                                                        <label className="text-xs font-bold text-slate-500 uppercase flex items-center gap-2">
-                                                                                            <Edit3 size={12} /> Request Payload
-                                                                                        </label>
-                                                                                        <span className="text-[10px] text-slate-600">Edit parameters before running</span>
-                                                                                    </div>
-                                                                                    <div className="bg-slate-950 border border-slate-700 rounded-lg overflow-hidden max-h-[200px] overflow-y-auto custom-scrollbar">
-                                                                                        <PayloadEditor
-                                                                                            value={methodConfig.payload}
-                                                                                            onChange={(v) => setNewProtocol(p => ({
-                                                                                                ...p,
-                                                                                                methods: {
-                                                                                                    ...p.methods,
-                                                                                                    [method]: { ...p.methods[method], payload: v }
-                                                                                                }
-                                                                                            }))}
-                                                                                            mode="payload"
-                                                                                            protocol={newProtocol}
-                                                                                            method={method}
-                                                                                            session={session}
-                                                                                        />
-                                                                                    </div>
-                                                                                </div>
-                                                                            )}
-
-                                                                            {/* Action & Result Area */}
-                                                                            <div className="flex items-start gap-4">
-                                                                                <button
-                                                                                    onClick={async () => {
-                                                                                        setRunningTest(`${newProtocol.id}:${method}`);
-                                                                                        await runSingleTest(newProtocol, method as RequestMethod);
-                                                                                        setRunningTest(null);
-                                                                                    }}
-                                                                                    disabled={!mqttConnected || !targetDevice || isRunning}
-                                                                                    className={`shrink-0 px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2 transition-all shadow-lg ${isInteractive
-                                                                                        ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-900/20'
-                                                                                        : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-900/20'
-                                                                                        } disabled:opacity-50 disabled:cursor-not-allowed`}
-                                                                                >
-                                                                                    {runningTest === `${newProtocol.id}:${method}` ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} />}
-                                                                                    {isInteractive ? 'Send Request' : 'Run Verification'}
-                                                                                </button>
-
-                                                                                {/* Last Result Summary */}
-                                                                                {lastResult ? (
-                                                                                    <div className={`flex-1 rounded-lg p-3 text-xs font-mono border ${lastResult.status === 'PASS' ? 'bg-emerald-900/10 border-emerald-500/20' :
-                                                                                        lastResult.status === 'FAIL' ? 'bg-red-900/10 border-red-500/20' : 'bg-slate-900/50 border-slate-800'
-                                                                                        }`}>
-                                                                                        <div className="flex justify-between text-slate-500 mb-1">
-                                                                                            <span>Duration: {lastResult.duration}ms</span>
-                                                                                            <span>{new Date().toLocaleTimeString()}</span>
+                                                            {/* Right: Response Schema */}
+                                                            <div className="w-1/2 flex flex-col bg-slate-950">
+                                                                <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
+                                                                    <div className="flex items-center gap-2">
+                                                                        <span className={`w-2.5 h-2.5 rounded-full ${METHOD_COLORS[editingMethod]?.bg || 'bg-slate-500'}`} />
+                                                                        <span className="text-xs font-bold text-slate-300 uppercase">Response Payload</span>
+                                                                        <span className="text-xs text-slate-500 font-normal ml-2">(用于验证设备响应)</span>
+                                                                    </div>
+                                                                    <div className="flex items-center gap-2">
+                                                                        <button onClick={() => {
+                                                                            setJsonExampleInput('');
+                                                                            setJsonExtractMode('schema_payload');
+                                                                            setShowJsonToSchemaModal(true);
+                                                                        }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
+                                                                            <Copy size={12} /> 从示例提取 Payload
+                                                                        </button>
+                                                                        <button onClick={() => {
+                                                                            setShowSchemaPreview(true);
+                                                                        }} className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors">
+                                                                            <FileJson size={12} /> 查看 Schema
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex-1 overflow-hidden relative">
+                                                                    {newProtocol.methods[editingMethod]?.enabled ? (
+                                                                        <div className="absolute inset-0 overflow-hidden">
+                                                                            <PayloadEditor
+                                                                                value={newProtocol.methods[editingMethod]?.schema || '{}'}
+                                                                                onChange={(v) => setNewProtocol(p => ({
+                                                                                    ...p,
+                                                                                    methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], schema: v } }
+                                                                                }))}
+                                                                                mode={(() => {
+                                                                                    try {
+                                                                                        const obj = JSON.parse(newProtocol.methods[editingMethod]?.schema || '{}');
+                                                                                        return isLikelySchema(obj) ? 'schema' : 'payload';
+                                                                                    } catch {
+                                                                                        return 'payload';
+                                                                                    }
+                                                                                })()}
+                                                                                protocol={newProtocol}
+                                                                                method={editingMethod}
+                                                                                session={session}
+                                                                            />
+                                                                            {/* JSON Error Indicator */}
+                                                                            {(() => {
+                                                                                try {
+                                                                                    JSON.parse(newProtocol.methods[editingMethod]?.schema || '{}');
+                                                                                    return null;
+                                                                                } catch (e) {
+                                                                                    return (
+                                                                                        <div className="absolute bottom-4 right-4 px-3 py-1.5 bg-red-500/10 border border-red-500/50 rounded text-red-400 text-xs font-mono flex items-center gap-2 backdrop-blur-sm shadow-lg">
+                                                                                            <AlertTriangle size={12} /> JSON 格式错误
                                                                                         </div>
-                                                                                        {lastResult.error ? (
-                                                                                            <div className="text-red-400 break-all">{lastResult.error}</div>
-                                                                                        ) : (
-                                                                                            <div className="text-emerald-400 flex items-center gap-2">
-                                                                                                <CheckCircle2 size={12} /> Response Verified Successfully
-                                                                                            </div>
-                                                                                        )}
-                                                                                    </div>
-                                                                                ) : (
-                                                                                    <div className="flex-1 flex items-center text-xs text-slate-600 italic py-2">
-                                                                                        Ready to run...
-                                                                                    </div>
-                                                                                )}
-                                                                            </div>
+                                                                                    );
+                                                                                }
+                                                                            })()}
                                                                         </div>
-                                                                    </div>
-                                                                );
-                                                            })}
+                                                                    ) : (
+                                                                        <div className="flex items-center justify-center h-full text-slate-600 text-sm">
+                                                                            方法未启用
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            </div>
                                                         </div>
                                                     </div>
                                                 )}
+
+
 
                                             </div>
                                         )}
@@ -3873,6 +3902,126 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         }}
                     />
 
+                    {/* Test Progress Modal */}
+                    {testProgress && (
+                        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[200]">
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl p-8 w-[400px] flex flex-col items-center shadow-2xl">
+                                <div className="relative w-16 h-16 mb-4">
+                                    <svg className="w-full h-full transform -rotate-90">
+                                        <circle cx="32" cy="32" r="28" stroke="currentColor" strokeWidth="4" fill="none" className="text-slate-800" />
+                                        <circle cx="32" cy="32" r="28" stroke="currentColor" strokeWidth="4" fill="none" className="text-indigo-500 transition-all duration-300 ease-out"
+                                            strokeDasharray={175.9}
+                                            strokeDashoffset={175.9 - (175.9 * testProgress.current) / testProgress.total}
+                                        />
+                                    </svg>
+                                    <div className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white">
+                                        {Math.round((testProgress.current / testProgress.total) * 100)}%
+                                    </div>
+                                </div>
+                                <h3 className="text-lg font-bold text-white mb-1">Running Tests...</h3>
+                                <p className="text-sm text-slate-400 mb-6 text-center truncate w-full px-4">
+                                    {testProgress.currentProtocol}
+                                </p>
+                                <div className="flex gap-4 text-xs font-mono text-slate-500">
+                                    <span>Total: {testProgress.total}</span>
+                                    <span>Current: {testProgress.current}</span>
+                                </div>
+                                <button onClick={stopTests} className="mt-6 px-6 py-2 bg-slate-800 hover:bg-red-900/30 text-slate-300 hover:text-red-400 rounded-lg text-sm font-bold transition-colors border border-slate-700 hover:border-red-500/30">
+                                    Stop Execution
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Audit Confirmation Modal */}
+                    {auditConfirmation.show && auditConfirmation.protocol && auditConfirmation.method && (
+                        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[150]" onClick={() => setAuditConfirmation({ show: false, protocol: null, method: null })}>
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[600px] max-h-[90vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-lg font-black text-white mb-4 flex items-center gap-2">
+                                    <Activity size={20} className="text-indigo-400" />
+                                    Run Protocol Test
+                                </h3>
+
+                                <div className="mb-6">
+                                    <div className="text-sm text-slate-400 mb-2">Protocol: <span className="text-white font-bold">{auditConfirmation.protocol.namespace}</span></div>
+                                    <div className="text-sm text-slate-400">Method: <span className={`font-bold ${METHOD_COLORS[auditConfirmation.method as RequestMethod]?.text || 'text-slate-400'}`}>{auditConfirmation.method}</span></div>
+                                </div>
+
+                                {/* Test Method Selection */}
+                                <div className="space-y-4 mb-6">
+                                    <div className="text-xs font-bold text-slate-500 uppercase">Verification Mode</div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <button
+                                            className="p-4 rounded-xl border border-slate-700 bg-slate-800/50 hover:bg-slate-800 text-left transition-all group focus:ring-2 ring-indigo-500"
+                                        >
+                                            <div className="font-bold text-white mb-1 group-hover:text-emerald-400">Direct Fetch / Wait</div>
+                                            <div className="text-xs text-slate-500">Use default payload or wait for device push. Suitable for GET/monitoring.</div>
+                                        </button>
+                                        <button
+                                            className="p-4 rounded-xl border border-slate-700 bg-slate-800/50 hover:bg-slate-800 text-left transition-all group focus:ring-2 ring-indigo-500"
+                                        >
+                                            <div className="font-bold text-white mb-1 group-hover:text-amber-400">Manual Modification</div>
+                                            <div className="text-xs text-slate-500">Manually modify the payload before sending. Required for strict audit.</div>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Payload Editor */}
+                                <div className="flex-1 min-h-[200px] border border-slate-700 rounded-lg overflow-hidden bg-slate-950 flex flex-col mb-6">
+                                    <div className="px-3 py-2 border-b border-slate-800 bg-slate-900/50 text-xs font-bold text-slate-400">
+                                        Request Payload
+                                    </div>
+                                    <div className="flex-1 relative">
+                                        <PayloadEditor
+                                            value={auditConfirmation.protocol.methods[auditConfirmation.method]?.payload || '{}'}
+                                            onChange={(v) => {
+                                                if (auditConfirmation.protocol && auditConfirmation.method) {
+                                                    const p = auditConfirmation.protocol;
+                                                    const m = auditConfirmation.method;
+                                                    setNewProtocol(prev => ({
+                                                        ...prev,
+                                                        methods: {
+                                                            ...prev.methods,
+                                                            [m]: { ...prev.methods[m], payload: v }
+                                                        }
+                                                    }));
+                                                }
+                                            }}
+                                            mode="payload"
+                                            protocol={auditConfirmation.protocol}
+                                            method={auditConfirmation.method}
+                                            session={session}
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="flex justify-end gap-3">
+                                    <button
+                                        onClick={() => setAuditConfirmation({ show: false, protocol: null, method: null })}
+                                        className="px-4 py-2 text-slate-400 hover:text-white"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={async () => {
+                                            const { protocol, method } = auditConfirmation;
+                                            if (!protocol || !method) return;
+                                            setAuditConfirmation({ show: false, protocol: null, method: null });
+                                            setRunningTest(`${protocol.id}:${method}`);
+                                            await runSingleTest(protocol, method);
+                                            setRunningTest(null);
+                                        }}
+                                        className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold shadow-lg shadow-emerald-900/20"
+                                    >
+                                        Confirm & Run
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+
+
                     {/* Add Protocol Modal */}
                     {
                         isAddingProtocol && (
@@ -3923,7 +4072,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                 // We should modify addProtocolToSuite to accept params or use a temp state.
                                                 // But addProtocolToSuite reads newProtocol directly.
                                                 // The input onChange already updated newProtocol.
-                                                // So we just need to ensure methods are initialized if empty.
+                                                // So we need to ensure methods are initialized if empty.
 
                                                 if (Object.keys(newProtocol.methods || {}).length === 0) {
                                                     setNewProtocol(prev => ({ ...prev, methods }));
@@ -4179,11 +4328,163 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                             summary: run.summary
                         }))}
                         onClearHistory={() => {
-                            if (confirm('确定要清除所有测试历史记录吗？')) {
-                                setTestHistory([]);
-                            }
+                            setConfirmationModal({
+                                show: true,
+                                title: '清除历史记录',
+                                message: '确定要清除所有测试历史记录吗？',
+                                onConfirm: () => {
+                                    setTestHistory([]);
+                                    setConfirmationModal({ show: false, title: '', message: '', onConfirm: () => { } });
+                                }
+                            });
                         }}
                     />
+
+                    {/* Confirmation Modal */}
+                    {confirmationModal.show && (
+                        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[200]" onClick={() => setConfirmationModal({ ...confirmationModal, show: false })}>
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[400px] shadow-2xl" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-lg font-bold text-white mb-2">{confirmationModal.title}</h3>
+                                <p className="text-slate-400 text-sm mb-6">{confirmationModal.message}</p>
+                                <div className="flex justify-end gap-3">
+                                    <button
+                                        onClick={() => setConfirmationModal({ ...confirmationModal, show: false })}
+                                        className="px-4 py-2 text-slate-400 hover:text-white font-bold transition-colors"
+                                    >
+                                        取消
+                                    </button>
+                                    <button
+                                        onClick={confirmationModal.onConfirm}
+                                        className="px-6 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg font-bold transition-colors"
+                                    >
+                                        确认
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    {/* Verification Configuration Modal - 验证配置模态框 */}
+                    {verificationModal.show && verificationModal.protocol && (
+                        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[150]" onClick={() => setVerificationModal({ ...verificationModal, show: false })}>
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[500px] shadow-2xl" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-lg font-black text-white mb-4 flex items-center gap-2">
+                                    <ShieldCheck size={20} className="text-emerald-400" />
+                                    协议审核
+                                </h3>
+
+                                <p className="text-sm text-slate-400 mb-6">
+                                    确认 <span className="text-white font-bold">{verificationModal.protocol.namespace}</span> 协议的配置已正确无误？
+                                </p>
+
+                                {/* 协议当前状态预览 */}
+                                <div className="bg-slate-800/50 rounded-xl p-4 mb-6 border border-slate-700">
+                                    <div className="text-xs font-bold text-slate-400 uppercase mb-2">当前协议信息</div>
+                                    <div className="grid grid-cols-2 gap-3 text-sm">
+                                        <div>
+                                            <span className="text-slate-500">命名空间：</span>
+                                            <span className="text-white font-mono">{verificationModal.protocol.namespace}</span>
+                                        </div>
+                                        <div>
+                                            <span className="text-slate-500">已启用方法：</span>
+                                            <span className="text-white">
+                                                {ALL_METHODS.filter(m => verificationModal.protocol?.methods[m]?.enabled).join(', ') || '无'}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="flex justify-between gap-3 pt-4 border-t border-slate-800">
+                                    {/* 左侧：跳转编辑 */}
+                                    <button
+                                        onClick={() => {
+                                            setVerificationModal({ ...verificationModal, show: false });
+                                            setRightPanelTab('edit');
+                                        }}
+                                        className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg font-bold transition-colors flex items-center gap-2"
+                                    >
+                                        <Edit3 size={14} /> 返回编辑
+                                    </button>
+
+                                    {/* 右侧：确认操作 */}
+                                    <div className="flex gap-3">
+                                        <button
+                                            onClick={() => setVerificationModal({ ...verificationModal, show: false })}
+                                            className="px-4 py-2 text-slate-400 hover:text-white font-bold transition-colors"
+                                        >
+                                            取消
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                if (verificationModal.protocol) {
+                                                    const updatedProtocol = {
+                                                        ...verificationModal.protocol,
+                                                        reviewStatus: 'VERIFIED' as const,
+                                                        verificationMode: 'direct' as const
+                                                    };
+                                                    setNewProtocol(updatedProtocol);
+
+                                                    // Update in suite
+                                                    if (selectedSuiteId) {
+                                                        setSuites(prev => prev.map(s => {
+                                                            if (s.id !== selectedSuiteId) return s;
+                                                            return {
+                                                                ...s,
+                                                                protocols: s.protocols.map(p =>
+                                                                    p.id === updatedProtocol.id ? updatedProtocol : p
+                                                                ),
+                                                                updatedAt: Date.now()
+                                                            };
+                                                        }));
+                                                    }
+
+                                                    setVerificationModal({ ...verificationModal, show: false });
+                                                    showToast('success', '协议已标记为已审核');
+                                                }
+                                            }}
+                                            className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold shadow-lg shadow-emerald-900/20 transition-all flex items-center gap-2"
+                                        >
+                                            <CheckCircle2 size={16} /> 确认审核
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Unsaved Changes Modal */}
+                    {showUnsavedChangesModal && (
+                        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[200]" onClick={() => setShowUnsavedChangesModal(false)}>
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[400px] shadow-2xl" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-lg font-black text-white mb-4 flex items-center gap-2">
+                                    <AlertTriangle size={20} className="text-amber-500" />
+                                    未保存的更改
+                                </h3>
+                                <p className="text-slate-400 mb-6 text-sm">
+                                    当前协议有未保存的更改。继续操作可能会导致更改丢失或被忽略。是否继续？
+                                </p>
+                                <div className="flex justify-end gap-3">
+                                    <button
+                                        onClick={() => setShowUnsavedChangesModal(false)}
+                                        className="px-4 py-2 text-slate-400 hover:text-white font-bold transition-colors"
+                                    >
+                                        取消
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setShowUnsavedChangesModal(false);
+                                            if (pendingNavigation) {
+                                                pendingNavigation();
+                                                setPendingNavigation(null);
+                                            }
+                                        }}
+                                        className="px-6 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg font-bold shadow-lg shadow-red-900/20 transition-all"
+                                    >
+                                        忽略更改并继续
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             </div >
         </div >

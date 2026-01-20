@@ -101,7 +101,7 @@ function createWindow() {
 
 // 通用的原生请求处理器，绕过所有浏览器层面的限制
 // 支持自动跟随重定向
-ipcMain.handle('http:request', async (event, { url, method, headers, body, followRedirects = true, maxRedirects = 5 }) => {
+ipcMain.handle('http:request', async (event, { url, method, headers, body, followRedirects = true, maxRedirects = 5, timeout = 30000 }) => {
   const makeRequest = (requestUrl, redirectCount = 0) => {
     return new Promise((resolve, reject) => {
       const parsedUrl = new URL(requestUrl);
@@ -115,7 +115,7 @@ ipcMain.handle('http:request', async (event, { url, method, headers, body, follo
         rejectUnauthorized: false
       };
 
-      console.log(`[HTTP] Request: ${options.method} ${requestUrl}`);
+      console.log(`[HTTP] Request: ${options.method} ${requestUrl} (timeout: ${timeout}ms)`);
 
       const req = protocol.request(options, (res) => {
         let responseBody = '';
@@ -175,9 +175,9 @@ ipcMain.handle('http:request', async (event, { url, method, headers, body, follo
       });
 
       // 设置超时
-      req.setTimeout(30000, () => {
+      req.setTimeout(timeout, () => {
         req.destroy();
-        reject(new Error('Request timeout (30s)'));
+        reject(new Error(`Request timeout (${timeout}ms)`));
       });
 
       if (body) {
@@ -288,7 +288,7 @@ ipcMain.handle('confluence:clearCookies', async (event, { baseUrl }) => {
 });
 
 // 带 Cookie 的 HTTP 请求（用于 Confluence API 调用）
-ipcMain.handle('http:requestWithCookies', async (event, { url, method, headers, body, cookies }) => {
+ipcMain.handle('http:requestWithCookies', async (event, { url, method, headers, body, cookies, timeout = 30000 }) => {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
     const protocol = parsedUrl.protocol === 'https:' ? https : http;
@@ -311,7 +311,7 @@ ipcMain.handle('http:requestWithCookies', async (event, { url, method, headers, 
       rejectUnauthorized: false
     };
 
-    console.log(`[HTTP+Cookie] Request: ${options.method} ${url}`);
+    console.log(`[HTTP+Cookie] Request: ${options.method} ${url} (timeout: ${timeout}ms)`);
 
     const req = protocol.request(options, (res) => {
       let responseBody = '';
@@ -338,9 +338,9 @@ ipcMain.handle('http:requestWithCookies', async (event, { url, method, headers, 
       reject(e);
     });
 
-    req.setTimeout(30000, () => {
+    req.setTimeout(timeout, () => {
       req.destroy();
-      reject(new Error('Request timeout (30s)'));
+      reject(new Error(`Request timeout (${timeout}ms)`));
     });
 
     if (body) {

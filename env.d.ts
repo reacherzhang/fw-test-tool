@@ -23,6 +23,7 @@ interface Window {
       body?: any;
       followRedirects?: boolean;  // 是否自动跟随重定向，默认 true
       maxRedirects?: number;      // 最大重定向次数，默认 5
+      timeout?: number;           // 超时时间 (ms)，默认 30000
     }) => Promise<{
       status: number;
       data: any;
@@ -42,6 +43,7 @@ interface Window {
       headers?: Record<string, string>;
       body?: any;
       cookies: any[];
+      timeout?: number;
     }) => Promise<{ status: number; data: any; text?: string; headers?: any }>;
 
     // MQTT IPC 接口

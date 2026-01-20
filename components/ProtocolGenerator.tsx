@@ -3,7 +3,7 @@
  * 从设备 Ability + Confluence 文档自动生成协议库
  */
 
-import React, { useState, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import {
     Wand2, BookOpen, RefreshCw, CheckCircle, XCircle, AlertTriangle,
     Settings, Play, ExternalLink, ChevronDown, ChevronRight, Check,
@@ -98,7 +98,7 @@ interface ProtocolGenerationState {
     abilityNamespaces: string[];
     parsedDocs: Map<string, ParsedProtocolDoc>;
     aiGeneratedProtocols: Map<string, AIGeneratedProtocol>;
-    progress: { current: number; total: number; namespace: string };
+    progress: { current: number; total: number; namespace: string; message?: string };
     error?: string;
 }
 
@@ -185,8 +185,19 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
     const [aiProcessLogs, setAIProcessLogs] = useState<AIProcessLog[]>([]);
     const [aiProcessingTime, setAIProcessingTime] = useState<number>(0);
     const [aiTokensUsed, setAITokensUsed] = useState<number>(0);
+    const [aiProcessingStarted, setAIProcessingStarted] = useState(false);  // 标记 AI 处理是否已开始
+    const [aiSelectedNamespaces, setAISelectedNamespaces] = useState<Set<string>>(new Set());  // AI 处理时选中的协议
     const aiServiceRef = useRef<AIProtocolService | null>(null);
+    const aiSessionIdRef = useRef<number>(0);  // 用于跟踪当前 AI 处理会话，取消时增加 ID 使之前的任务失效
     const aiLogsContainerRef = useRef<HTMLDivElement>(null);
+    const logsEndRef = useRef<HTMLDivElement>(null);
+
+    // 自动滚动日志
+    useEffect(() => {
+        if (state.status === 'ai-processing' && logsEndRef.current) {
+            logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+    }, [aiProcessLogs, state.status]);
 
     // 保存配置
     const saveConfig = useCallback(() => {
@@ -419,68 +430,126 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
             return;
         }
 
+        // 检查是否有选中的协议
+        if (aiSelectedNamespaces.size === 0) {
+            setAIConfigTestResult({ success: false, message: '请至少选择一个协议' });
+            return;
+        }
+
+        // 获取选中的协议列表
+        const namespacesToProcess = Array.from(aiSelectedNamespaces);
+
+        // 1. 立即标记为已开始，让 UI 切换到进度界面
+        setAIProcessingStarted(true);
+
+        // 生成新的 session ID，使之前的任何异步任务失效
+        const currentSessionId = Date.now();
+        aiSessionIdRef.current = currentSessionId;
+
+        // 2. 先更新状态，立即渲染 UI
         setState(prev => ({
             ...prev,
             status: 'ai-processing',
             aiGeneratedProtocols: new Map(),
-            progress: { current: 0, total: state.abilityNamespaces.length, namespace: '' }
+            progress: { current: 0, total: namespacesToProcess.length, namespace: '' }
         }));
 
         setAIProcessLogs([]);
         setAIProcessingTime(0);
         setAITokensUsed(0);
 
-        // 启动计时器
-        const startTime = Date.now();
-        const timerId = setInterval(() => {
-            setAIProcessingTime(Math.floor((Date.now() - startTime) / 1000));
-        }, 1000);
+        // 3. 延迟执行实际逻辑，避免阻塞 UI 渲染
+        setTimeout(async () => {
+            // 检查 session ID 是否仍然有效
+            if (aiSessionIdRef.current !== currentSessionId) {
+                console.log('[AI Processing] Session invalidated, aborting');
+                return;
+            }
 
-        try {
-            const service = new AIProtocolService(aiConfig, config);
-            aiServiceRef.current = service;
-
-            const results = await service.processProtocols(
-                state.abilityNamespaces,
-                aiStrategy,
-                (current, total, namespace, log) => {
-                    setState(prev => ({
-                        ...prev,
-                        progress: { current, total, namespace }
-                    }));
-
-                    setAIProcessLogs(prev => [...prev, log]);
-
-                    // 自动滚动日志
-                    if (aiLogsContainerRef.current) {
-                        aiLogsContainerRef.current.scrollTop = aiLogsContainerRef.current.scrollHeight;
-                    }
+            // 启动计时器
+            const startTime = Date.now();
+            const timerId = setInterval(() => {
+                // 检查 session ID
+                if (aiSessionIdRef.current !== currentSessionId) {
+                    clearInterval(timerId);
+                    return;
                 }
-            );
+                setAIProcessingTime(Math.floor((Date.now() - startTime) / 1000));
+            }, 1000);
 
-            // 估算 Token 消耗
-            const tokens = estimateTokens(state.abilityNamespaces.length, aiStrategy);
-            setAITokensUsed(tokens);
+            try {
+                // 创建带有 rootPageIds 的配置，用于文档索引
+                const confluenceConfigWithIndex = {
+                    ...config,
+                    rootPageIds: ['69701229'],  // 设备通用消息指令集-新版
+                };
+                const service = new AIProtocolService(aiConfig, confluenceConfigWithIndex);
+                aiServiceRef.current = service;
 
-            setState(prev => ({
-                ...prev,
-                status: 'reviewing',
-                aiGeneratedProtocols: results,
-            }));
+                const results = await service.processProtocols(
+                    namespacesToProcess,  // 使用选中的协议
+                    aiStrategy,
+                    (current, total, namespace, log) => {
+                        // 检查 session ID 是否仍然有效
+                        if (aiSessionIdRef.current !== currentSessionId) {
+                            return;  // 忽略过期的回调
+                        }
 
-            // 默认全选
-            setSelectedProtocols(new Set(state.abilityNamespaces));
+                        setState(prev => ({
+                            ...prev,
+                            progress: { current, total, namespace, message: log.message }
+                        }));
 
-        } catch (error: any) {
-            setState(prev => ({
-                ...prev,
-                status: 'error',
-                error: error.message || 'AI 处理失败',
-            }));
-        } finally {
-            clearInterval(timerId);
-            aiServiceRef.current = null;
-        }
+                        setAIProcessLogs(prev => [...prev, log]);
+                    }
+                );
+
+                // 检查 session ID 是否仍然有效
+                if (aiSessionIdRef.current !== currentSessionId) {
+                    console.log('[AI Processing] Session invalidated after processing, discarding results');
+                    return;
+                }
+
+                // 估算 Token 消耗
+                const tokens = estimateTokens(namespacesToProcess.length, aiStrategy);
+                setAITokensUsed(tokens);
+
+                setState(prev => ({
+                    ...prev,
+                    status: 'reviewing',
+                    aiGeneratedProtocols: results,
+                }));
+
+                // 默认全选处理过的协议
+                setSelectedProtocols(new Set(namespacesToProcess));
+
+            } catch (error: any) {
+                // 检查 session ID 是否仍然有效
+                if (aiSessionIdRef.current !== currentSessionId) {
+                    console.log('[AI Processing] Session invalidated, ignoring error');
+                    return;
+                }
+
+                // 如果是 Aborted 错误，不显示错误
+                if (error.message === 'Aborted') {
+                    console.log('[AI Processing] Aborted by user');
+                    return;
+                }
+
+                setState(prev => ({
+                    ...prev,
+                    status: 'error',
+                    error: error.message || 'AI 处理失败',
+                }));
+            } finally {
+                clearInterval(timerId);
+                // 只有当 session ID 匹配时才清理
+                if (aiSessionIdRef.current === currentSessionId) {
+                    aiServiceRef.current = null;
+                    setAIProcessingStarted(false);
+                }
+            }
+        }, 100);  // 减少延迟，加快响应
     };
 
     // 确认生成
@@ -534,6 +603,7 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                 progress: { current: 0, total: 0, namespace: '' },
             });
             setDocMatchMode(null);
+            setAIProcessingStarted(false);  // 重置 AI 开始标记
         }, 1500);
     };
 
@@ -810,13 +880,20 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                 <div
                                     onClick={() => {
                                         setDocMatchMode('ai');
+                                        // 更新 session ID，使之前的任何异步任务失效
+                                        aiSessionIdRef.current = Date.now();
+                                        aiServiceRef.current?.abort();
+                                        aiServiceRef.current = null;
                                         // 强制重置所有 AI 相关状态
+                                        setAIProcessingStarted(false);
                                         setState(prev => ({
                                             ...prev,
                                             status: 'ai-processing',
                                             aiGeneratedProtocols: new Map(),
                                             progress: { current: 0, total: prev.abilityNamespaces.length, namespace: '' }
                                         }));
+                                        // 默认全选所有协议
+                                        setAISelectedNamespaces(new Set(state.abilityNamespaces));
                                         setAIProcessLogs([]);
                                         setAIProcessingTime(0);
                                         setAITokensUsed(0);
@@ -857,8 +934,8 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
 
                     {state.status === 'ai-processing' && (
                         <div className="flex flex-col h-full">
-                            {state.progress.current === 0 && state.aiGeneratedProtocols.size === 0 ? (
-                                // AI 配置界面
+                            {!aiProcessingStarted && state.progress.current === 0 && state.aiGeneratedProtocols.size === 0 ? (
+                                // AI 配置界面（只有在未点击开始按钮时才显示）
                                 <div className="max-w-3xl mx-auto w-full">
                                     <div className="text-center mb-6">
                                         <div className="w-12 h-12 bg-purple-500/20 rounded-xl flex items-center justify-center mx-auto mb-3">
@@ -972,18 +1049,68 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                             </div>
                                         </div>
 
+                                        {/* 协议选择 */}
+                                        <div className="border-t border-slate-700 pt-6">
+                                            <div className="flex items-center justify-between mb-4">
+                                                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                                                    <FileText size={16} className="text-cyan-400" /> 选择要处理的协议
+                                                </h4>
+                                                <div className="flex items-center gap-3">
+                                                    <span className="text-xs text-slate-400">
+                                                        已选 <span className="text-white font-bold">{aiSelectedNamespaces.size}</span> / {state.abilityNamespaces.length}
+                                                    </span>
+                                                    <button
+                                                        onClick={() => {
+                                                            if (aiSelectedNamespaces.size === state.abilityNamespaces.length) {
+                                                                setAISelectedNamespaces(new Set());
+                                                            } else {
+                                                                setAISelectedNamespaces(new Set(state.abilityNamespaces));
+                                                            }
+                                                        }}
+                                                        className="text-xs text-purple-400 hover:text-purple-300"
+                                                    >
+                                                        {aiSelectedNamespaces.size === state.abilityNamespaces.length ? '取消全选' : '全选'}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="bg-slate-900/50 border border-slate-800 rounded-lg max-h-48 overflow-y-auto custom-scrollbar">
+                                                {state.abilityNamespaces.map((ns, idx) => (
+                                                    <label
+                                                        key={ns}
+                                                        className={`flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-slate-800/50 transition-colors ${idx !== state.abilityNamespaces.length - 1 ? 'border-b border-slate-800' : ''
+                                                            }`}
+                                                    >
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={aiSelectedNamespaces.has(ns)}
+                                                            onChange={(e) => {
+                                                                const newSet = new Set(aiSelectedNamespaces);
+                                                                if (e.target.checked) {
+                                                                    newSet.add(ns);
+                                                                } else {
+                                                                    newSet.delete(ns);
+                                                                }
+                                                                setAISelectedNamespaces(newSet);
+                                                            }}
+                                                            className="w-4 h-4 accent-purple-500 shrink-0"
+                                                        />
+                                                        <span className="text-sm text-slate-300 font-mono truncate">{ns}</span>
+                                                    </label>
+                                                ))}
+                                            </div>
+                                        </div>
+
                                         {/* 预估信息 */}
                                         <div className="bg-slate-900/50 rounded-lg p-4 flex items-center justify-between text-xs text-slate-400">
                                             <div>
-                                                待处理协议: <span className="text-white font-bold">{state.abilityNamespaces.length}</span> 个
+                                                待处理协议: <span className="text-white font-bold">{aiSelectedNamespaces.size}</span> 个
                                             </div>
                                             <div>
-                                                预计消耗 Token: <span className="text-white font-bold">~{estimateTokens(state.abilityNamespaces.length, aiStrategy).toLocaleString()}</span>
+                                                预计消耗 Token: <span className="text-white font-bold">~{estimateTokens(aiSelectedNamespaces.size, aiStrategy).toLocaleString()}</span>
                                             </div>
                                             <div>
                                                 预计耗时: <span className="text-white font-bold">
-                                                    {Math.ceil(estimateProcessingTime(state.abilityNamespaces.length, aiStrategy).min / 60)}-
-                                                    {Math.ceil(estimateProcessingTime(state.abilityNamespaces.length, aiStrategy).max / 60)} 分钟
+                                                    {aiSelectedNamespaces.size === 0 ? '0' : `${Math.ceil(estimateProcessingTime(aiSelectedNamespaces.size, aiStrategy).min / 60)}-${Math.ceil(estimateProcessingTime(aiSelectedNamespaces.size, aiStrategy).max / 60)}`} 分钟
                                                 </span>
                                             </div>
                                         </div>
@@ -991,57 +1118,82 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
 
                                     <div className="flex justify-between mt-6">
                                         <button
-                                            onClick={() => setState(prev => ({ ...prev, status: 'selecting-mode' }))}
+                                            onClick={() => {
+                                                // 更新 session ID，使之前的异步任务失效
+                                                aiSessionIdRef.current = Date.now();
+                                                aiServiceRef.current?.abort();
+                                                aiServiceRef.current = null;
+                                                setAIProcessingStarted(false);
+                                                setState(prev => ({ ...prev, status: 'selecting-mode' }));
+                                            }}
                                             className="px-4 py-2 text-slate-400 hover:text-white"
                                         >
                                             返回选择
                                         </button>
                                         <button
                                             onClick={startAIProcessing}
-                                            disabled={!aiConfig.apiKey}
+                                            disabled={!aiConfig.apiKey || aiSelectedNamespaces.size === 0}
                                             className="px-6 py-2 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white rounded-xl font-bold text-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                         >
                                             <Sparkles size={16} />
-                                            开始 AI 智能匹配
+                                            {aiSelectedNamespaces.size === 0 ? '请选择协议' : '开始 AI 智能匹配'}
                                         </button>
                                     </div>
                                 </div>
                             ) : (
                                 // AI 处理进度界面
-                                <div className="max-w-3xl mx-auto w-full flex flex-col h-full">
-                                    <div className="text-center mb-8">
-                                        <div className="inline-block p-3 bg-purple-500/10 rounded-full mb-4 relative">
-                                            <Bot size={32} className="text-purple-400" />
-                                            <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full animate-pulse" />
-                                        </div>
-                                        <h3 className="text-xl font-bold text-white mb-2">AI 智能匹配中</h3>
-                                        <div className="w-96 mx-auto mt-4 h-2 bg-slate-700 rounded-full overflow-hidden">
-                                            <div
-                                                className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-500"
-                                                style={{ width: `${(state.progress.current / state.progress.total) * 100}%` }}
-                                            />
-                                        </div>
-                                        <div className="flex justify-between w-96 mx-auto mt-2 text-xs text-slate-400">
-                                            <span>{state.progress.current} / {state.progress.total}</span>
-                                            <span>{Math.round((state.progress.current / state.progress.total) * 100)}%</span>
-                                        </div>
-                                        <p className="text-sm text-indigo-300 font-mono mt-2 h-6">
-                                            {state.progress.namespace ? `正在处理: ${state.progress.namespace}` : '准备中...'}
-                                        </p>
+                                <div className="flex flex-col h-full">
+                                    {/* 顶部进度区域 - 固定高度 */}
+                                    <div className="text-center mb-4 shrink-0">
+                                        {state.progress.message?.includes('构建文档索引') ? (
+                                            // 索引构建动画
+                                            <div className="mb-4">
+                                                <div className="inline-block p-4 bg-indigo-500/10 rounded-full mb-4 relative animate-pulse">
+                                                    <BookOpen size={48} className="text-indigo-400" />
+                                                    <div className="absolute -bottom-1 -right-1 bg-slate-900 rounded-full p-1">
+                                                        <Loader2 size={20} className="text-indigo-400 animate-spin" />
+                                                    </div>
+                                                </div>
+                                                <h3 className="text-xl font-bold text-white mb-2">正在构建文档索引</h3>
+                                                <p className="text-sm text-slate-400">这可能需要几分钟，请耐心等待...</p>
+                                            </div>
+                                        ) : (
+                                            // 正常进度条
+                                            <>
+                                                <div className="inline-block p-3 bg-purple-500/10 rounded-full mb-4 relative">
+                                                    <Bot size={32} className="text-purple-400" />
+                                                    <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full animate-pulse" />
+                                                </div>
+                                                <h3 className="text-xl font-bold text-white mb-2">AI 智能匹配中</h3>
+                                                <div className="w-96 mx-auto mt-4 h-2 bg-slate-700 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-500"
+                                                        style={{ width: `${(state.progress.current / state.progress.total) * 100}%` }}
+                                                    />
+                                                </div>
+                                                <div className="flex justify-between w-96 mx-auto mt-2 text-xs text-slate-400">
+                                                    <span>{state.progress.current} / {state.progress.total}</span>
+                                                    <span>{Math.round((state.progress.current / state.progress.total) * 100)}%</span>
+                                                </div>
+                                                <p className="text-sm text-indigo-300 font-mono mt-2 h-6">
+                                                    {state.progress.namespace ? `正在处理: ${state.progress.namespace}` : '准备中...'}
+                                                </p>
+                                            </>
+                                        )}
                                     </div>
 
-                                    {/* 实时日志 */}
-                                    <div className="flex-1 bg-slate-950 border border-slate-800 rounded-xl overflow-hidden flex flex-col mb-6">
-                                        <div className="px-4 py-2 bg-slate-900 border-b border-slate-800 text-xs font-bold text-slate-400 flex justify-between">
+                                    {/* 实时日志 - 弹性填充中间区域 */}
+                                    <div className="flex-1 min-h-0 bg-slate-950 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
+                                        <div className="px-4 py-2 bg-slate-900 border-b border-slate-800 text-xs font-bold text-slate-400 flex justify-between shrink-0">
                                             <span>实时处理日志</span>
                                             <span>⏱️ {Math.floor(aiProcessingTime / 60)}m {aiProcessingTime % 60}s</span>
                                         </div>
                                         <div
                                             ref={aiLogsContainerRef}
-                                            className="flex-1 overflow-y-auto p-4 space-y-2 font-mono text-xs custom-scrollbar"
+                                            className="flex-1 overflow-y-auto p-4 space-y-2 font-mono text-xs custom-scrollbar select-text cursor-text"
                                         >
                                             {aiProcessLogs.map((log, i) => (
-                                                <div key={i} className="flex gap-3">
+                                                <div key={i} className="flex gap-3 hover:bg-slate-900/50 rounded px-1 -mx-1 transition-colors">
                                                     <span className="text-slate-600 shrink-0">
                                                         {new Date(log.timestamp).toLocaleTimeString()}
                                                     </span>
@@ -1061,16 +1213,30 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                             {aiProcessLogs.length === 0 && (
                                                 <div className="text-slate-600 text-center py-8">等待开始...</div>
                                             )}
+                                            <div ref={logsEndRef} />
                                         </div>
                                     </div>
 
-                                    <div className="flex justify-center">
+                                    {/* 底部取消按钮 - 固定在底部 */}
+                                    <div className="shrink-0 pt-4 pb-2 flex justify-center bg-slate-900">
                                         <button
                                             onClick={() => {
+                                                // 更新 session ID，使之前的异步任务失效
+                                                aiSessionIdRef.current = Date.now();
+
+                                                // 立即取消所有请求
                                                 aiServiceRef.current?.abort();
+                                                aiServiceRef.current = null;
+
+                                                setAIProcessingStarted(false);
+                                                setAIProcessLogs(prev => [...prev, {
+                                                    timestamp: Date.now(),
+                                                    type: 'info',
+                                                    message: '用户取消处理'
+                                                }]);
                                                 setState(prev => ({ ...prev, status: 'selecting-mode' }));
                                             }}
-                                            className="px-6 py-2 border border-slate-700 hover:bg-slate-800 text-slate-300 rounded-lg text-sm"
+                                            className="px-6 py-2 border border-slate-600 hover:border-red-500/50 hover:bg-red-500/10 text-slate-300 hover:text-red-400 rounded-lg text-sm transition-colors"
                                         >
                                             取消处理
                                         </button>
