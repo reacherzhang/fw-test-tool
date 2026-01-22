@@ -318,6 +318,55 @@ export const ThreeWayDiff: React.FC<ThreeWayDiffProps & { schemaErrors?: any[], 
     // 从 Schema 提取预期字段
     const requestData = requestMessage || requestPayload;
 
+    /**
+     * 根据 Schema 生成示例数据
+     */
+    const generateExampleFromSchema = (schema: any): any => {
+        if (!schema) return {};
+
+        // Handle string schema
+        if (typeof schema === 'string') {
+            try {
+                schema = JSON.parse(schema);
+            } catch (e) {
+                return {};
+            }
+        }
+
+        if (schema.const !== undefined) return schema.const;
+        if (schema.examples && schema.examples.length > 0) return schema.examples[0];
+        if (schema.default !== undefined) return schema.default;
+
+        if (schema.type === 'object') {
+            const obj: any = {};
+            if (schema.properties) {
+                Object.entries(schema.properties).forEach(([key, value]: [string, any]) => {
+                    obj[key] = generateExampleFromSchema(value);
+                });
+            }
+            return obj;
+        }
+
+        if (schema.type === 'array') {
+            if (schema.items) {
+                // Generate one item as example
+                return [generateExampleFromSchema(schema.items)];
+            }
+            return [];
+        }
+
+        if (schema.type === 'string') {
+            if (schema.enum && schema.enum.length > 0) return schema.enum[0];
+            if (schema.format === 'date-time') return new Date().toISOString();
+            return "String";
+        }
+        if (schema.type === 'number' || schema.type === 'integer') return 0;
+        if (schema.type === 'boolean') return true;
+        if (schema.type === 'null') return null;
+
+        return {}; // Default or unknown types
+    };
+
     // Construct Expected Response Data (Header + Payload Schema)
     const expectedResponseData = useMemo(() => {
         // Mock Header based on Request or Default
@@ -333,7 +382,7 @@ export const ThreeWayDiff: React.FC<ThreeWayDiffProps & { schemaErrors?: any[], 
 
         return {
             header,
-            payload: expectedSchema
+            payload: generateExampleFromSchema(expectedSchema)
         };
     }, [expectedSchema, requestMessage]);
 
@@ -402,7 +451,7 @@ export const ThreeWayDiff: React.FC<ThreeWayDiffProps & { schemaErrors?: any[], 
                 <div className="border-r border-slate-800 flex flex-col overflow-hidden">
                     <div className="px-4 py-2 bg-amber-500/10 border-b border-slate-800 shrink-0 flex items-center justify-between">
                         <div className="font-bold text-amber-400 text-base">EXPECTED</div>
-                        <div className="text-sm text-slate-500">期望结果 (Schema)</div>
+                        <div className="text-sm text-slate-500">期望结果</div>
                     </div>
                     <div
                         ref={expectedRef}

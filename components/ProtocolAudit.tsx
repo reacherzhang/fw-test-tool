@@ -39,6 +39,7 @@ interface ProtocolDefinition {
     };
     reviewStatus?: 'UNVERIFIED' | 'VERIFIED';
     verificationMode?: 'direct' | 'manual';
+    tags?: string[]; // New: Tags for categorization
 }
 
 interface AuditProject {
@@ -228,124 +229,6 @@ const DEFAULT_SUITE: ProtocolTestSuite = {
     updatedAt: Date.now(),
     executionConfig: DEFAULT_EXECUTION_CONFIG
 };
-
-interface ProtocolTemplate {
-    name: string;
-    description: string;
-    namespace: string;
-    methods: RequestMethod[];
-    category: 'control' | 'system' | 'config' | 'ota' | 'sensor';
-    presets?: {
-        [method in RequestMethod]?: {
-            payload: string;
-            schema: string;
-        };
-    };
-}
-
-const PROTOCOL_TEMPLATES: ProtocolTemplate[] = [
-    // Control 类
-    {
-        name: 'Toggle 控制',
-        description: '单通道开关控制',
-        namespace: 'Appliance.Control.Toggle',
-        category: 'control',
-        methods: ['GET', 'SET'],
-        presets: {
-            GET: { payload: '{}', schema: '{"type":"object","properties":{"payload":{"type":"object","properties":{"toggle":{"type":"object","properties":{"onoff":{"type":"number"},"channel":{"type":"number"}}}}}}}' },
-            SET: { payload: '{"toggle":{"onoff":1,"channel":0}}', schema: '{"type":"object"}' }
-        }
-    },
-    {
-        name: 'ToggleX 多通道',
-        description: '多通道开关控制',
-        namespace: 'Appliance.Control.ToggleX',
-        category: 'control',
-        methods: ['GET', 'SET'],
-        presets: {
-            GET: { payload: '{}', schema: '{"type":"object","properties":{"payload":{"type":"object","properties":{"togglex":{"type":"array"}}}}}' },
-            SET: { payload: '{"togglex":[{"channel":0,"onoff":1}]}', schema: '{"type":"object"}' }
-        }
-    },
-    {
-        name: 'Bind 绑定控制',
-        description: '设备绑定操作',
-        namespace: 'Appliance.Control.Bind',
-        category: 'control',
-        methods: ['GET', 'SET']
-    },
-    // System 类
-    {
-        name: 'System All',
-        description: '获取完整系统信息',
-        namespace: 'Appliance.System.All',
-        category: 'system',
-        methods: ['GET'],
-        presets: {
-            GET: { payload: '{}', schema: '{"type":"object","properties":{"payload":{"type":"object","properties":{"all":{"type":"object"}}}}}' }
-        }
-    },
-    {
-        name: 'System Ability',
-        description: '获取设备能力列表',
-        namespace: 'Appliance.System.Ability',
-        category: 'system',
-        methods: ['GET']
-    },
-    {
-        name: 'System Online',
-        description: '设备在线状态',
-        namespace: 'Appliance.System.Online',
-        category: 'system',
-        methods: ['GET', 'PUSH']
-    },
-    // Config 类
-    {
-        name: 'Config Key',
-        description: '设备密钥配置',
-        namespace: 'Appliance.Config.Key',
-        category: 'config',
-        methods: ['GET', 'SET']
-    },
-    {
-        name: 'Config Wifi',
-        description: 'WiFi 配置',
-        namespace: 'Appliance.Config.Wifi',
-        category: 'config',
-        methods: ['GET', 'SET']
-    },
-    // OTA 类
-    {
-        name: 'OTA Firmware',
-        description: '固件升级',
-        namespace: 'Appliance.System.Firmware',
-        category: 'ota',
-        methods: ['GET', 'SET']
-    },
-    {
-        name: 'OTA Progress',
-        description: '升级进度推送',
-        namespace: 'Appliance.System.FirmwareProgress',
-        category: 'ota',
-        methods: ['PUSH']
-    },
-    // Sensor 类
-    {
-        name: 'Sensor Temp',
-        description: '温度传感器数据',
-        namespace: 'Appliance.Sensor.Temperature',
-        category: 'sensor',
-        methods: ['GET', 'PUSH']
-    },
-    {
-        name: 'Sensor Humidity',
-        description: '湿度传感器数据',
-        namespace: 'Appliance.Sensor.Humidity',
-        category: 'sensor',
-        methods: ['GET', 'PUSH']
-    }
-];
-
 // --- Helper Functions ---
 
 const generateSchemaFromJson = (json: any, includeRequired: boolean = true): any => {
@@ -857,7 +740,7 @@ const SchemaTreeItem: React.FC<{
                             style={{ paddingRight: '1.5em' }} // Space for arrow if needed, or just keep it simple
                         >
                             <option value="string" className="text-emerald-400 bg-slate-900">string</option>
-                            <option value="number" className="text-blue-400 bg-slate-900">number</option>
+
                             <option value="boolean" className="text-amber-400 bg-slate-900">boolean</option>
                             <option value="object" className="text-purple-400 bg-slate-900">object</option>
                             <option value="array" className="text-cyan-400 bg-slate-900">array</option>
@@ -991,7 +874,7 @@ const PayloadEditor: React.FC<{
                 const node: SchemaNode = {
                     id,
                     key,
-                    type: propSchema.type || 'string',
+                    type: (propSchema.type === 'integer' || propSchema.type === 'number') ? 'int' : (propSchema.type || 'string'),
                     value: propSchema.default ?? (propSchema.examples?.[0] ?? null),
                     required: schema.required?.includes(key) ?? false,
                     parentType: 'object',
@@ -1014,7 +897,7 @@ const PayloadEditor: React.FC<{
         const node: SchemaNode = {
             id,
             key,
-            type: schema.type || 'string',
+            type: (schema.type === 'integer' || schema.type === 'number') ? 'int' : (schema.type || 'string'),
             value: schema.default ?? null,
             required: true,
             parentType,
@@ -1034,7 +917,7 @@ const PayloadEditor: React.FC<{
         const required: string[] = [];
 
         nodes.forEach(node => {
-            let schema: any = { type: node.type };
+            let schema: any = { type: node.type === 'int' ? 'integer' : node.type };
 
             if (node.type === 'object') {
                 Object.assign(schema, nodesToSchema(node.children || []));
@@ -1056,7 +939,7 @@ const PayloadEditor: React.FC<{
     };
 
     const singleNodeToSchema = (node: SchemaNode): any => {
-        let schema: any = { type: node.type };
+        let schema: any = { type: node.type === 'int' ? 'integer' : node.type };
         if (node.type === 'object') {
             Object.assign(schema, nodesToSchema(node.children || []));
         } else if (node.type === 'array') {
@@ -1521,8 +1404,14 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     const [searchTerm, setSearchTerm] = useState('');
 
 
-    // Phase 1 Optimization: Template Category Filter
-    const [templateCategory, setTemplateCategory] = useState<'all' | 'control' | 'system' | 'config' | 'ota' | 'sensor'>('all');
+    // Phase 1 Optimization: Template Category Filter - REMOVED
+    // const [templateCategory, setTemplateCategory] = useState<'all' | 'control' | 'system' | 'config' | 'ota' | 'sensor'>('all');
+
+    // Import Protocol Modal
+    const [showImportProtocolModal, setShowImportProtocolModal] = useState(false);
+    const [importSourceSuiteId, setImportSourceSuiteId] = useState<string>('');
+    const [importSelectedTags, setImportSelectedTags] = useState<Set<string>>(new Set());
+    const [importSelectedProtocols, setImportSelectedProtocols] = useState<Set<string>>(new Set());
 
     // Phase 1 Optimization: Log Panel
     const [logPanelExpanded, setLogPanelExpanded] = useState(true);
@@ -1545,9 +1434,22 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     const [pendingNavigation, setPendingNavigation] = useState<(() => void) | null>(null);
 
     // Check if protocol has unsaved changes
+    // Check if protocol has unsaved changes
     const hasUnsavedChanges = useCallback(() => {
         if (!originalProtocol || !newProtocol.id) return false;
-        return JSON.stringify(originalProtocol) !== JSON.stringify(newProtocol);
+
+        // Create shallow copies to avoid mutating state during comparison
+        // We want to ignore changes to 'reviewStatus' and 'verificationMode' 
+        // as these are often updated independently of the protocol configuration (and auto-saved)
+        const original = { ...originalProtocol };
+        const current = { ...newProtocol };
+
+        delete original.reviewStatus;
+        delete current.reviewStatus;
+        delete original.verificationMode;
+        delete current.verificationMode;
+
+        return JSON.stringify(original) !== JSON.stringify(current);
     }, [originalProtocol, newProtocol]);
 
     // Safe navigation with unsaved changes check
@@ -1843,7 +1745,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
                     const updatedProtocol = {
                         ...newProtocol,
-                        reviewStatus: hasChanges ? 'UNVERIFIED' : newProtocol.reviewStatus
+                        reviewStatus: hasChanges ? 'UNVERIFIED' : newProtocol.reviewStatus,
+                        tags: newProtocol.tags || [] // Ensure tags are preserved
                     };
 
                     return {
@@ -1856,7 +1759,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                 // Ensure we're adding a new protocol with a unique ID
                 return {
                     ...s,
-                    protocols: [...s.protocols, { ...newProtocol, id: protocolId, reviewStatus: 'UNVERIFIED' }]
+                    protocols: [...s.protocols, { ...newProtocol, id: protocolId, reviewStatus: 'UNVERIFIED', tags: newProtocol.tags || [] }]
                 };
             }
         }));
@@ -1870,7 +1773,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             showToast('success', '协议已创建');
             setSelectedProtocolId(protocolId);
             setRightPanelTab('edit');
-            const created = { ...newProtocol, id: protocolId, reviewStatus: 'UNVERIFIED' as const };
+            const created = { ...newProtocol, id: protocolId, reviewStatus: 'UNVERIFIED' as const, tags: newProtocol.tags || [] };
             setNewProtocol(created);
             setOriginalProtocol(JSON.parse(JSON.stringify(created)));
         }
@@ -1882,6 +1785,14 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         setOriginalProtocol(protocolCopy); // 保存原始状态用于脏数据检测
         setSelectedProtocolId(protocol.id);
         setRightPanelTab('edit');
+
+        // Auto-select first enabled method
+        const firstEnabledMethod = ALL_METHODS.find(m => protocol.methods[m]?.enabled);
+        if (firstEnabledMethod) {
+            setEditingMethod(firstEnabledMethod);
+        } else {
+            setEditingMethod('GET');
+        }
     };
 
     const deleteProtocol = (protocolId: string) => {
@@ -1949,22 +1860,59 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
     // Protocol Generator Handler
     const handleGeneratedProtocols = (protocols: ProtocolDefinition[]) => {
-        const newSuiteId = `suite_${Date.now()}`;
-        const newSuite: ProtocolTestSuite = {
-            id: newSuiteId,
-            name: `Generated Suite ${new Date().toLocaleTimeString()}`,
-            description: `Auto-generated from device ability at ${new Date().toLocaleString()}`,
-            protocols: protocols,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            executionConfig: DEFAULT_EXECUTION_CONFIG
-        };
+        if (selectedSuiteId) {
+            setSuites(prev => prev.map(s => {
+                if (s.id === selectedSuiteId) {
+                    // Merge logic: Update existing by ID, append new
+                    const newProtocolsMap = new Map(protocols.map(p => [p.id, p]));
+                    const updatedProtocols = s.protocols.map(p => {
+                        if (newProtocolsMap.has(p.id)) {
+                            const newP = newProtocolsMap.get(p.id)!;
+                            newProtocolsMap.delete(p.id);
+                            return newP;
+                        }
+                        return p;
+                    });
 
-        setSuites(prev => [...prev, newSuite]);
-        setSelectedSuiteId(newSuiteId);
-        setExpandedSuites(prev => new Set(prev).add(newSuiteId));
+                    return {
+                        ...s,
+                        protocols: [...updatedProtocols, ...Array.from(newProtocolsMap.values())],
+                        updatedAt: Date.now()
+                    };
+                }
+                return s;
+            }));
+            addTestLog('INFO', `Added ${protocols.length} generated protocols to current suite`);
+            showToast('success', `已添加 ${protocols.length} 个协议到当前测试库`);
+        } else {
+            const newSuiteId = `suite_${Date.now()}`;
+            const newSuite: ProtocolTestSuite = {
+                id: newSuiteId,
+                name: `Generated Suite ${new Date().toLocaleTimeString()}`,
+                description: `Auto-generated from device ability at ${new Date().toLocaleString()}`,
+                protocols: protocols,
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+                executionConfig: DEFAULT_EXECUTION_CONFIG
+            };
+
+            const newProject: AuditProject = {
+                id: newSuiteId,
+                name: newSuite.name,
+                protocols: protocols,
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+                status: 'ACTIVE',
+                progress: 0
+            };
+
+            setProjects(prev => [...prev, newProject]);
+            setActiveProject(newProject);
+
+            addTestLog('INFO', `Generated new project with ${protocols.length} protocols`);
+            showToast('success', `已创建新测试库并添加 ${protocols.length} 个协议`);
+        }
         setShowProtocolGenerator(false);
-        addTestLog('INFO', `Generated new suite with ${protocols.length} protocols`);
     };
 
     const fetchDeviceAbility = async (): Promise<any> => {
@@ -2087,33 +2035,16 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         }
 
         // Check if payload is a full message (has header and payload)
-        // This supports the case where the user pasted the full example from Confluence
         let actualPayload = payload;
         if (payload && typeof payload === 'object' && payload.header && payload.payload) {
             actualPayload = payload.payload;
         }
 
         // Prepare Request
-        // Use standard messageId format (md5 of random uuid)
         const requestId = md5(Math.random().toString(36)).toLowerCase();
-
-        // Standard Meross Topic Structure
-        // App publishes to device's subscribe topic
         const topic = `/appliance/${targetDevice.id}/subscribe`;
-        // App expects ACK on its own subscribe topic
         const replyTopic = `/app/${session.uid}-${appid}/subscribe`;
-
-        // Add signature/timestamp
         const ts = Math.floor(Date.now() / 1000);
-        // Use standard signature generation: md5(messageId + key + timestamp)
-        // Matches logic in ProtocolLab.tsx and fetchDeviceAbility
-
-        console.log('[ProtocolAudit] Signature Params:', {
-            requestId,
-            keyPrefix: session.key ? session.key.substring(0, 4) + '***' : 'undefined',
-            timestamp: ts
-        });
-
         const sign = md5(requestId + session.key + String(ts)).toLowerCase();
 
         const finalPayload = {
@@ -2136,10 +2067,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             requestPayload: finalPayload
         });
 
-        // Subscribe to our specific ACK topic
         onMqttSubscribe(replyTopic);
 
-        // Execution Config
         const config = selectedSuite?.executionConfig || DEFAULT_EXECUTION_CONFIG;
         const maxRetries = config.retryCount || 0;
         const timeoutMs = config.timeout || 5000;
@@ -2154,9 +2083,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
             const startTime = Date.now();
             try {
-                // Clear previous message to avoid reading stale data
                 const startMessage = lastMessageRef.current;
-
                 onMqttPublish(topic, JSON.stringify(finalPayload));
 
                 // Wait for response
@@ -2164,126 +2091,59 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                     const timer = setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs);
                     const interval = setInterval(() => {
                         const current = lastMessageRef.current;
-
-                        // Check if we have a new message
                         if (current && current !== startMessage) {
-                            let receivedId = 'N/A';
-                            try { receivedId = JSON.parse(current.message)?.header?.messageId; } catch (e) { }
-
-                            console.log('[ProtocolAudit] Poll Debug:', {
-                                expectedTopic: replyTopic,
-                                receivedTopic: current.topic,
-                                expectedId: requestId,
-                                receivedId: receivedId
-                            });
                             try {
                                 const json = JSON.parse(current.message);
-                                console.log('[ProtocolAudit] Parsed JSON messageId:', json.header?.messageId, 'Expected:', requestId);
-
-                                // STRATEGY 1: Match by messageId (Most reliable)
-                                if (json.header && json.header.messageId === requestId) {
-                                    console.log('[ProtocolAudit] Matched response by messageId:', requestId);
+                                if ((json.header && json.header.messageId === requestId) ||
+                                    (current.topic === replyTopic && json.header && json.header.namespace === protocol.namespace)) {
                                     clearInterval(interval);
                                     clearTimeout(timer);
                                     resolve(json);
-                                    return;
                                 }
-
-                                // STRATEGY 2: Match by Topic + Namespace (Fallback)
-                                if (current.topic === replyTopic) {
-                                    // Log mismatch for debugging
-                                    if (json.header?.messageId !== requestId) {
-                                        console.warn('[ProtocolAudit] Topic matched but messageId mismatch. Expected:', requestId, 'Got:', json.header?.messageId);
-                                    }
-
-                                    // Fallback: accept if namespace matches (for devices that don't return messageId correctly)
-                                    if (json.header && json.header.namespace === protocol.namespace) {
-                                        console.log('[ProtocolAudit] Accepting response based on namespace match');
-                                        clearInterval(interval);
-                                        clearTimeout(timer);
-                                        resolve(json);
-                                        return;
-                                    }
-                                }
-                            } catch (e) {
-                                // Ignore invalid JSON
-                            }
+                            } catch (e) { }
                         }
-                    }, 50);
+                    }, 100);
                 });
 
-                const endTime = Date.now();
-                const duration = endTime - startTime;
+                const duration = Date.now() - startTime;
 
-                // Validate Schema
+                // Validate Response
                 let schemaErrors: any[] = [];
                 let status: 'PASS' | 'FAIL' = 'PASS';
                 let errorMsg = undefined;
 
                 if (methodConfig.schema) {
-                    let schemaObj;
                     try {
-                        schemaObj = JSON.parse(methodConfig.schema);
-                    } catch (e) {
-                        status = 'FAIL';
-                        errorMsg = 'Invalid JSON in Expected Schema';
-                    }
+                        const schemaObj = JSON.parse(methodConfig.schema);
+                        let activeSchema = schemaObj;
+                        let validate;
 
-
-
-                    if (schemaObj) {
-                        try {
-                            let validate;
-                            let activeSchema = schemaObj;
-
-                            // Check if it's a Schema or Data
-                            if (!isLikelySchema(schemaObj)) {
-                                console.log('[ProtocolAudit] Detected JSON Payload Example, inferring schema...');
+                        if (!isLikelySchema(schemaObj)) {
+                            activeSchema = inferSchemaFromData(schemaObj);
+                            validate = new Ajv({ allErrors: true }).compile(activeSchema);
+                        } else {
+                            try {
+                                validate = new Ajv({ allErrors: true }).compile(schemaObj);
+                            } catch (e) {
                                 activeSchema = inferSchemaFromData(schemaObj);
                                 validate = new Ajv({ allErrors: true }).compile(activeSchema);
-                            } else {
-                                try {
-                                    // Try compiling as Schema
-                                    validate = new Ajv({ allErrors: true }).compile(schemaObj);
-                                } catch (e) {
-                                    // Fallback to inference if compilation fails
-                                    console.log('[ProtocolAudit] Schema compilation failed, falling back to inference...', e);
-                                    activeSchema = inferSchemaFromData(schemaObj);
-                                    validate = new Ajv({ allErrors: true }).compile(activeSchema);
-                                }
                             }
-
-                            // Determine validation target: Full Response vs Payload
-                            // If schema doesn't explicitly define 'header' or 'payload' properties,
-                            // and the response has a 'payload' property, we assume the schema is for the payload.
-                            let targetData = response;
-                            // Use activeSchema (which might be inferred) to check structure
-                            const isFullSchema = activeSchema.properties && ('header' in activeSchema.properties || 'payload' in activeSchema.properties);
-
-                            if (!isFullSchema && response && typeof response === 'object' && 'payload' in response) {
-                                targetData = response.payload;
-                            }
-
-                            console.log('[ProtocolAudit] Validation Debug:', {
-                                schema: activeSchema,
-                                targetData: targetData,
-                                isFullSchema,
-                                responseKeys: Object.keys(response || {})
-                            });
-
-                            const valid = validate(targetData);
-                            if (!valid) {
-                                console.warn('[ProtocolAudit] Validation Failed:', validate.errors);
-                                status = 'FAIL';
-                                schemaErrors = validate.errors || [];
-                                errorMsg = 'Schema validation failed';
-                            } else {
-                                console.log('[ProtocolAudit] Validation Passed');
-                            }
-                        } catch (e: any) {
-                            status = 'FAIL';
-                            errorMsg = `Invalid schema: ${e.message || 'Unknown error'}`;
                         }
+
+                        let targetData = response;
+                        const isFullSchema = activeSchema.properties && ('header' in activeSchema.properties || 'payload' in activeSchema.properties);
+                        if (!isFullSchema && response && typeof response === 'object' && 'payload' in response) {
+                            targetData = response.payload;
+                        }
+
+                        if (!validate(targetData)) {
+                            status = 'FAIL';
+                            schemaErrors = validate.errors || [];
+                            errorMsg = 'Schema validation failed';
+                        }
+                    } catch (e: any) {
+                        status = 'FAIL';
+                        errorMsg = `Invalid schema: ${e.message}`;
                     }
                 }
 
@@ -2333,8 +2193,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                 }
 
             } catch (e: any) {
-                const endTime = Date.now();
-                const duration = endTime - startTime;
+                const duration = Date.now() - startTime;
                 const isTimeout = e.message === 'TIMEOUT';
 
                 if (!lastResult) {
@@ -2359,11 +2218,11 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
                 if (retryCount < maxRetries) {
                     retryCount++;
-                    await new Promise(r => setTimeout(r, 1000)); // Wait before retry
+                    await new Promise(r => setTimeout(r, 1000));
                     continue;
                 }
+                break;
             }
-            break;
         }
 
         return lastResult || {
@@ -2893,12 +2752,15 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                             <span>运行 {selectedProtocols.size > 0 ? `(${selectedProtocols.size})` : ''}</span>
                         </button>
                     )}
-                    {/* Report */}
-                    {currentRun && (
-                        <button onClick={() => setShowReportModal(true)} className="p-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-lg shadow-blue-900/20 transition-all" title="Report">
-                            <FileJson size={18} />
-                        </button>
-                    )}
+                    {/* Import Protocol */}
+                    <button onClick={() => safeNavigate(() => {
+                        setImportSourceSuiteId('');
+                        setImportSelectedTags(new Set());
+                        setImportSelectedProtocols(new Set());
+                        setShowImportProtocolModal(true);
+                    })} className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg shadow-lg shadow-slate-900/20 transition-all border border-slate-700" title="导入协议">
+                        <Download size={18} />
+                    </button>
                     {/* Add Protocol */}
                     <button onClick={() => safeNavigate(() => {
                         resetProtocolWizard();
@@ -3152,44 +3014,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                         >
                                                             <Copy size={14} /> 复制
                                                         </button>
-                                                        <div className="relative group">
-                                                            <button className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 flex items-center gap-2 text-xs font-bold transition-colors">
-                                                                <FolderOpen size={14} /> 模板
-                                                            </button>
-                                                            <div className="absolute right-0 top-full mt-2 w-72 bg-slate-900 border border-slate-700 rounded-xl shadow-xl overflow-hidden hidden group-hover:block z-50">
-                                                                <div className="p-2 bg-slate-800/50 border-b border-slate-700">
-                                                                    <div className="text-xs font-bold text-slate-400 uppercase mb-1">选择协议模板</div>
-                                                                    <div className="flex gap-1 flex-wrap">
-                                                                        {(['all', 'control', 'system', 'config', 'ota', 'sensor'] as const).map(cat => (
-                                                                            <button key={cat} onClick={(e) => { e.stopPropagation(); setTemplateCategory(cat); }}
-                                                                                className={`px-2 py-0.5 text-xs rounded ${templateCategory === cat ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-400 hover:text-white'}`}>
-                                                                                {cat === 'all' ? '全部' : cat.toUpperCase()}
-                                                                            </button>
-                                                                        ))}
-                                                                    </div>
-                                                                </div>
-                                                                <div className="max-h-48 overflow-y-auto custom-scrollbar p-1">
-                                                                    {PROTOCOL_TEMPLATES.filter(tpl => templateCategory === 'all' || tpl.category === templateCategory).map(tpl => (
-                                                                        <button key={tpl.namespace} onClick={() => {
-                                                                            const methods: any = {};
-                                                                            ALL_METHODS.forEach(m => {
-                                                                                if (tpl.methods.includes(m)) {
-                                                                                    const preset = tpl.presets?.[m];
-                                                                                    methods[m] = { enabled: true, payload: preset?.payload || '{}', schema: preset?.schema || '{}' };
-                                                                                } else {
-                                                                                    methods[m] = { enabled: false, payload: '{}', schema: '{}' };
-                                                                                }
-                                                                            });
-                                                                            setNewProtocol(p => ({ ...p, namespace: tpl.namespace, name: tpl.namespace, description: tpl.description, methods }));
-                                                                            addTestLog('INFO', `应用模板: ${tpl.name}`);
-                                                                        }} className="w-full text-left p-2 hover:bg-slate-800 rounded-lg">
-                                                                            <div className="text-sm font-bold text-white">{tpl.name}</div>
-                                                                            <div className="text-xs text-slate-500 font-mono truncate">{tpl.namespace}</div>
-                                                                        </button>
-                                                                    ))}
-                                                                </div>
-                                                            </div>
-                                                        </div>
+
                                                         <button onClick={addProtocolToSuite}
                                                             className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold uppercase shadow-lg shadow-emerald-900/20 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5">
                                                             <Save size={14} /> {newProtocol.id ? '保存' : '创建'}
@@ -3541,6 +3366,133 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                             </div>
                         )
                     }
+                    {/* Import Protocol Modal */}
+                    {
+                        showImportProtocolModal && (
+                            <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[100]" onClick={() => setShowImportProtocolModal(false)}>
+                                <div className="bg-slate-900 border border-slate-700 rounded-2xl w-[900px] max-h-[85vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+                                    <div className="flex items-center justify-between p-6 border-b border-slate-800">
+                                        <h3 className="text-xl font-black text-white flex items-center gap-2">
+                                            <Download size={24} className="text-indigo-400" />
+                                            导入协议
+                                        </h3>
+                                        <button onClick={() => setShowImportProtocolModal(false)} className="text-slate-400 hover:text-white">
+                                            <X size={24} />
+                                        </button>
+                                    </div>
+
+                                    <div className="flex-1 overflow-hidden flex">
+                                        {/* Left Sidebar: Filters */}
+                                        <div className="w-64 bg-slate-950 border-r border-slate-800 p-4 flex flex-col gap-6">
+                                            {/* Source Project Filter */}
+                                            <div>
+                                                <label className="text-xs font-bold text-slate-500 uppercase mb-2 block">来源项目</label>
+                                                <select
+                                                    value={importSourceSuiteId}
+                                                    onChange={e => {
+                                                        setImportSourceSuiteId(e.target.value);
+                                                        setImportSelectedTags(new Set());
+                                                        setImportSelectedProtocols(new Set());
+                                                    }}
+                                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+                                                >
+                                                    <option value="">选择项目...</option>
+                                                    {projects.filter(p => p.id !== activeProject?.id).map(p => (
+                                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        </div>
+
+                                        {/* Right: Protocol List */}
+                                        <div className="flex-1 flex flex-col bg-slate-900">
+                                            {(() => {
+                                                const sourceProject = projects.find(p => p.id === importSourceSuiteId);
+                                                const sourceProtocols = sourceProject ? sourceProject.protocols : [];
+
+                                                return (
+                                                    <>
+                                                        <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                                                            {sourceProtocols.length === 0 ? (
+                                                                <div className="text-center text-slate-500 mt-10">
+                                                                    {importSourceSuiteId ? '该项目没有可用的协议' : '请先选择一个来源项目'}
+                                                                </div>
+                                                            ) : (
+                                                                <div className="space-y-2">
+                                                                    {sourceProtocols.map(p => (
+                                                                        <div key={p.id}
+                                                                            className={`p-3 rounded-lg border cursor-pointer flex items-center justify-between transition-colors ${importSelectedProtocols.has(p.id) ? 'bg-indigo-900/20 border-indigo-500/50' : 'bg-slate-800/50 border-slate-700 hover:border-slate-600'}`}
+                                                                            onClick={() => {
+                                                                                const newSet = new Set(importSelectedProtocols);
+                                                                                if (newSet.has(p.id)) newSet.delete(p.id);
+                                                                                else newSet.add(p.id);
+                                                                                setImportSelectedProtocols(newSet);
+                                                                            }}
+                                                                        >
+                                                                            <div>
+                                                                                <div className="font-bold text-white text-sm font-mono">{p.namespace}</div>
+                                                                                <div className="text-xs text-slate-500 mt-1 flex gap-2">
+                                                                                    {Object.keys(p.methods).filter(m => p.methods[m as RequestMethod]?.enabled).map(m => (
+                                                                                        <span key={m} className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${getMethodColorClasses(m)}`}>
+                                                                                            {m}
+                                                                                        </span>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </div>
+                                                                            {importSelectedProtocols.has(p.id) && <CheckCircle2 size={18} className="text-indigo-400" />}
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                        </div>
+
+                                                        <div className="p-4 border-t border-slate-800 flex justify-end gap-3 bg-slate-950">
+                                                            <button onClick={() => setShowImportProtocolModal(false)} className="px-4 py-2 text-slate-400 hover:text-white text-sm font-bold">取消</button>
+                                                            <button
+                                                                onClick={() => {
+                                                                    const sourceProject = projects.find(p => p.id === importSourceSuiteId);
+                                                                    const sourceProtocols = sourceProject ? sourceProject.protocols : [];
+                                                                    const protocolsToImport = sourceProtocols.filter(p => importSelectedProtocols.has(p.id));
+
+                                                                    if (protocolsToImport.length === 0) return;
+
+                                                                    setSuites(prev => prev.map(s => {
+                                                                        if (s.id === selectedSuiteId) {
+                                                                            const newProtocols = protocolsToImport.map(p => ({
+                                                                                ...p,
+                                                                                id: Math.random().toString(36).substr(2, 9),
+                                                                                reviewStatus: 'UNVERIFIED' as const,
+                                                                                lastRun: undefined
+                                                                            }));
+                                                                            return {
+                                                                                ...s,
+                                                                                protocols: [...s.protocols, ...newProtocols],
+                                                                                updatedAt: Date.now()
+                                                                            };
+                                                                        }
+                                                                        return s;
+                                                                    }));
+
+                                                                    showToast('success', `成功导入 ${protocolsToImport.length} 个协议`);
+                                                                    setShowImportProtocolModal(false);
+                                                                    setImportSelectedProtocols(new Set());
+                                                                    setImportSelectedTags(new Set());
+                                                                }}
+                                                                disabled={importSelectedProtocols.size === 0}
+                                                                className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                                                            >
+                                                                导入选中协议 ({importSelectedProtocols.size})
+                                                            </button>
+                                                        </div>
+                                                    </>
+                                                );
+                                            })()}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )
+                    }
 
                     {/* Report Export Modal */}
                     {
@@ -3623,6 +3575,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                             </div>
                         )
                     }
+
+
 
                     {/* JSON Extract Modal (Payload / Schema) */}
                     {
@@ -3787,6 +3741,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         generateSchema={generateSchemaFromJson}
                         deviceName={targetDevice?.name}
                         onFetchAbility={fetchDeviceAbility}
+                        existingProtocols={suites.find(s => s.id === selectedSuiteId)?.protocols || []}
                     />
 
 
@@ -4041,12 +3996,24 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                             />
                                         </div>
                                         <div>
-                                            <label className="text-sm text-slate-400 block mb-2">Description</label>
                                             <textarea
                                                 value={newProtocol.description || ''}
                                                 onChange={(e) => setNewProtocol(prev => ({ ...prev, description: e.target.value }))}
                                                 className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-indigo-500 outline-none h-24 resize-none"
                                                 placeholder="Optional description"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-sm text-slate-400 block mb-2">Tags (comma separated)</label>
+                                            <input
+                                                type="text"
+                                                value={newProtocol.tags?.join(', ') || ''}
+                                                onChange={(e) => {
+                                                    const tags = e.target.value.split(',').map(t => t.trim()).filter(t => t);
+                                                    setNewProtocol(prev => ({ ...prev, tags }));
+                                                }}
+                                                className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-indigo-500 outline-none"
+                                                placeholder="e.g. control, system, v1"
                                             />
                                         </div>
                                     </div>

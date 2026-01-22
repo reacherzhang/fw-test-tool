@@ -1,4 +1,4 @@
-/**
+﻿/**
  * AI 协议服务
  * 调用第三方 AI API 进行协议文档的智能检索、分析和生成
  */
@@ -183,32 +183,56 @@ export class AIProtocolService {
 
             try {
                 const index = await this.docIndexService.getIndex();
+
+                // 检查索引是否为空（可能是认证失败但没抛出错误的情况）
+                if (index.items.size === 0) {
+                    onProgress(0, total, '', {
+                        timestamp: Date.now(),
+                        type: 'error',
+                        message: '⚠️ 文档索引为空，可能是 Confluence 认证失败。请先在浏览器中登录 Confluence，然后重试。'
+                    });
+                    this.useDocIndex = false;
+                } else {
+                    onProgress(0, total, '', {
+                        timestamp: Date.now(),
+                        type: 'info',
+                        message: `文档索引就绪，共 ${index.items.size} 个页面`
+                    });
+                }
+            } catch (error: any) {
+                // 特殊处理 Confluence 认证错误
+                if (error.code === 'CONFLUENCE_AUTH_ERROR' ||
+                    error.message?.includes('认证') ||
+                    error.message?.includes('登录') ||
+                    error.message?.includes('LDAP')) {
+                    onProgress(0, total, '', {
+                        timestamp: Date.now(),
+                        type: 'error',
+                        message: `❌ Confluence 访问失败：${error.message || '认证已过期'}。请先在浏览器中打开 Confluence 并完成登录，然后重新尝试。`
+                    });
+                    // 不继续处理，直接返回空结果
+                    return results;
+                }
+
+                console.warn('[AI Protocol] Failed to build index, falling back to CQL search:', error.message);
                 onProgress(0, total, '', {
                     timestamp: Date.now(),
                     type: 'info',
-                    message: `文档索引就绪，共 ${index.items.size} 个页面`
+                    message: '索引构建失败，切换到 CQL 搜索模式...'
                 });
-            } catch (error) {
-                console.warn('[AI Protocol] Failed to build index, falling back to CQL search');
                 this.useDocIndex = false;
             }
         }
 
-        for (let i = 0; i < namespaces.length; i++) {
-            if (this.abortController?.signal.aborted) {
-                onProgress(i, total, '', {
-                    timestamp: Date.now(),
-                    type: 'info',
-                    message: '处理已取消'
-                });
-                break;
-            }
+        // 并发控制：恢复为线性处理（concurrency = 1），避免日志错位和潜在的竞争问题
+        const concurrency = 1;
+        const queue = namespaces.map((ns, index) => ({ ns, index }));
+        let processedCount = 0;
 
-            const namespace = namespaces[i];
-
+        const processItem = async (namespace: string, i: number) => {
             try {
                 // 1. 搜索文档（优先使用索引）
-                onProgress(i, total, namespace, {
+                onProgress(processedCount, total, namespace, {
                     timestamp: Date.now(),
                     type: 'search',
                     message: this.useDocIndex ? `索引匹配中...` : `CQL 搜索中...`,
@@ -232,14 +256,14 @@ export class AIProtocolService {
                         matchConfidence = matchResult.document.confidence;
                         matchMethod = matchResult.document.matchReason;
 
-                        onProgress(i, total, namespace, {
+                        onProgress(processedCount, total, namespace, {
                             timestamp: Date.now(),
                             type: 'search',
                             message: `✓ 匹配到: "${bestMatch.title}" (${Math.round(matchConfidence * 100)}% ${matchMethod})`,
                             namespace
                         });
                     } else {
-                        onProgress(i, total, namespace, {
+                        onProgress(processedCount, total, namespace, {
                             timestamp: Date.now(),
                             type: 'info',
                             message: `索引中未找到匹配，尝试 CQL 搜索...`,
@@ -259,7 +283,7 @@ export class AIProtocolService {
                     const searchResults = await this.searchDocuments(namespace);
 
                     if (searchResults.length > 0) {
-                        onProgress(i, total, namespace, {
+                        onProgress(processedCount, total, namespace, {
                             timestamp: Date.now(),
                             type: 'search',
                             message: `找到 ${searchResults.length} 个候选文档`,
@@ -267,7 +291,7 @@ export class AIProtocolService {
                         });
 
                         if (strategy.semanticSearch) {
-                            onProgress(i, total, namespace, {
+                            onProgress(processedCount, total, namespace, {
                                 timestamp: Date.now(),
                                 type: 'analyze',
                                 message: `AI 分析最佳匹配...`,
@@ -282,17 +306,17 @@ export class AIProtocolService {
 
                 // 如果没找到匹配，使用默认配置
                 if (!bestMatch) {
-                    onProgress(i, total, namespace, {
+                    onProgress(processedCount, total, namespace, {
                         timestamp: Date.now(),
                         type: 'info',
                         message: `未找到相关文档，使用默认配置`,
                         namespace
                     });
                     results.set(namespace, this.createDefaultProtocol(namespace));
-                    continue;
+                    return;
                 }
 
-                onProgress(i, total, namespace, {
+                onProgress(processedCount, total, namespace, {
                     timestamp: Date.now(),
                     type: 'analyze',
                     message: `选择最佳匹配: "${bestMatch.title}"`,
@@ -306,7 +330,7 @@ export class AIProtocolService {
                         throw new Error('Aborted');
                     }
 
-                    onProgress(i, total, namespace, {
+                    onProgress(processedCount, total, namespace, {
                         timestamp: Date.now(),
                         type: 'extract',
                         message: `深度分析文档内容...`,
@@ -329,7 +353,7 @@ export class AIProtocolService {
 
                     results.set(namespace, protocol);
 
-                    onProgress(i, total, namespace, {
+                    onProgress(processedCount, total, namespace, {
                         timestamp: Date.now(),
                         type: 'extract',
                         message: `成功生成 ${Object.keys(protocol.methods).filter(m => protocol.methods[m]?.enabled).join('/')} 方法`,
@@ -344,7 +368,8 @@ export class AIProtocolService {
                     });
                 }
 
-                onProgress(i + 1, total, namespace, {
+                processedCount++;
+                onProgress(processedCount, total, namespace, {
                     timestamp: Date.now(),
                     type: 'complete',
                     message: `✓`,
@@ -352,7 +377,7 @@ export class AIProtocolService {
                 });
 
             } catch (error: any) {
-                onProgress(i, total, namespace, {
+                onProgress(processedCount, total, namespace, {
                     timestamp: Date.now(),
                     type: 'error',
                     message: `处理失败: ${error.message}`,
@@ -360,11 +385,33 @@ export class AIProtocolService {
                 });
 
                 results.set(namespace, this.createDefaultProtocol(namespace, [`处理错误: ${error.message}`]));
+                processedCount++;
             }
 
             // 避免 API 限流
             await this.delay(500);
+        };
+
+        const workers = Array(concurrency).fill(null).map(async () => {
+            while (queue.length > 0) {
+                if (this.abortController?.signal.aborted) break;
+                const item = queue.shift();
+                if (!item) break;
+                await processItem(item.ns, item.index);
+            }
+        });
+
+        await Promise.all(workers);
+
+        if (this.abortController?.signal.aborted) {
+            onProgress(processedCount, total, '', {
+                timestamp: Date.now(),
+                type: 'info',
+                message: '处理已取消'
+            });
         }
+
+
 
         return results;
     }
@@ -475,7 +522,7 @@ ${candidates.map((c, i) => `${i + 1}. 标题: "${c.title}"
     }
 
     /**
-     * 获取文档内容
+     * 获取文档内容（返回 Markdown 格式，保留表格结构）
      */
     private async fetchDocumentContent(docUrl: string): Promise<string> {
         try {
@@ -497,6 +544,10 @@ ${candidates.map((c, i) => `${i + 1}. 标题: "${c.title}"
 
             // 如果有文档索引服务，优先使用它（因为它处理了认证和 Cookie）
             if (this.docIndexService) {
+                const htmlContent = await this.docIndexService.fetchDocumentHtml(pageId);
+                if (htmlContent) {
+                    return this.htmlToMarkdown(htmlContent);
+                }
                 return await this.docIndexService.fetchDocumentContent(pageId);
             }
 
@@ -509,9 +560,9 @@ ${candidates.map((c, i) => `${i + 1}. 标题: "${c.title}"
                 throw new Error('获取页面内容失败');
             }
 
-            // 提取 HTML 内容并转换为纯文本
+            // 提取 HTML 内容并转换为 Markdown（保留表格结构）
             const htmlContent = response.data.body?.storage?.value || '';
-            return this.htmlToText(htmlContent);
+            return this.htmlToMarkdown(htmlContent);
         } catch (error) {
             console.error('Fetch document content error:', error);
             return '';
@@ -519,7 +570,375 @@ ${candidates.map((c, i) => `${i + 1}. 标题: "${c.title}"
     }
 
     /**
+     * 从HTML内容中提取表格里包含链接引用的字段
+     * 返回格式: { linkedFields: Map<fieldName, {pageId, linkText}>, titleLinkedFields: Map<fieldName, {title, linkText}> }
+     */
+    private extractLinkedFieldsFromHtml(htmlContent: string): {
+        linkedFields: Map<string, { pageId: string; linkText: string }>;
+        titleLinkedFields: Map<string, { title: string; linkText: string }>;
+    } {
+        const linkedFields = new Map<string, { pageId: string; linkText: string }>();
+        const titleLinkedFields = new Map<string, { title: string; linkText: string }>();
+
+        try {
+            // 匹配表格行中的链接引用，格式类似：
+            // <tr><td>fieldName</td><td>Y/N</td><td>object</td><td><a href="...pageId=xxx">描述文字</a></td></tr>
+            // 或者 <ac:link><ri:page ri:content-title="..." ri:space-key="..."/><ac:link-body>描述</ac:link-body></ac:link>
+
+            // 模式1: 标准 HTML 链接格式 (pageId in href)
+            const htmlLinkRegex = /<tr[^>]*>[\s\S]*?<td[^>]*>([^<]+)<\/td>[\s\S]*?<td[^>]*>[YN]?<\/td>[\s\S]*?<td[^>]*>(object|array)<\/td>[\s\S]*?<td[^>]*>[\s\S]*?<a[^>]+href="[^"]*pageId=(\d+)"[^>]*>([^<]*)<\/a>[\s\S]*?<\/td>[\s\S]*?<\/tr>/gi;
+
+            let match;
+            while ((match = htmlLinkRegex.exec(htmlContent)) !== null) {
+                const fieldName = match[1]?.trim();
+                const pageId = match[3];
+                const linkText = match[4];
+
+                if (fieldName && pageId) {
+                    linkedFields.set(fieldName, { pageId, linkText: linkText || fieldName });
+                    console.log(`[AI Protocol] Found linked field (HTML): ${fieldName} -> pageId=${pageId} (${linkText})`);
+                }
+            }
+
+            // 模式2: Confluence Storage Format 链接 (ri-content-id)
+            const confluenceIdRegex = /<td[^>]*>([a-zA-Z_][a-zA-Z0-9_]*)<\/td>[\s\S]*?<td[^>]*>[YN]?<\/td>[\s\S]*?<td[^>]*>(?:object|array)<\/td>[\s\S]*?<td[^>]*>[\s\S]*?<ac:link>[\s\S]*?<ri:page[^>]+ri-content-id="(\d+)"[\s\S]*?<\/ac:link>[\s\S]*?<\/td>/gi;
+
+            while ((match = confluenceIdRegex.exec(htmlContent)) !== null) {
+                const fieldName = match[1]?.trim();
+                const pageId = match[2];
+
+                if (fieldName && pageId && !linkedFields.has(fieldName)) {
+                    linkedFields.set(fieldName, { pageId, linkText: fieldName });
+                    console.log(`[AI Protocol] Found linked field (Confluence ri-content-id): ${fieldName} -> pageId=${pageId}`);
+                }
+            }
+
+            // 模式3: 简化版 - 直接在 object/array 类型字段后查找 pageId
+            const simplePageIdRegex = /([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:<\/[^>]+>)?\s*(?:<[^>]+>\s*)*(?:Y|N|是|否)?\s*(?:<\/[^>]+>)?\s*(?:<[^>]+>\s*)*(?:object|array)\s*(?:<\/[^>]+>)?\s*(?:<[^>]+>\s*)*[\s\S]{0,200}?pageId[=:](\d+)/gi;
+
+            while ((match = simplePageIdRegex.exec(htmlContent)) !== null) {
+                const fieldName = match[1]?.trim();
+                const pageId = match[2];
+
+                if (fieldName && pageId && !linkedFields.has(fieldName)) {
+                    linkedFields.set(fieldName, { pageId, linkText: fieldName });
+                    console.log(`[AI Protocol] Found linked field (simple pageId): ${fieldName} -> pageId=${pageId}`);
+                }
+            }
+
+            // 模式4: Confluence Wiki 链接格式 (ri:content-title) - 收集标题，后续查询 pageId
+            const wikiLinkRegex = /<td[^>]*>\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*<\/td>[\s\S]*?<td[^>]*>\s*[YN是否]?\s*<\/td>[\s\S]*?<td[^>]*>\s*(?:object|array)\s*<\/td>[\s\S]*?<td[^>]*>[\s\S]*?<ri:page[^>]+ri:content-title="([^"]+)"[\s\S]*?<\/td>/gi;
+
+            while ((match = wikiLinkRegex.exec(htmlContent)) !== null) {
+                const fieldName = match[1]?.trim();
+                const contentTitle = match[2];
+
+                if (fieldName && contentTitle && !linkedFields.has(fieldName) && !titleLinkedFields.has(fieldName)) {
+                    titleLinkedFields.set(fieldName, { title: contentTitle, linkText: contentTitle });
+                    console.log(`[AI Protocol] Found linked field (Wiki title): ${fieldName} -> title="${contentTitle}"`);
+                }
+            }
+
+            // 模式5: 更宽松的匹配 - 查找任何包含 viewpage.action?pageId= 的链接
+            const viewpageRegex = /([a-zA-Z_][a-zA-Z0-9_]*)[\s\S]{0,500}?viewpage\.action\?pageId=(\d+)/gi;
+
+            // 只处理表格中的情况
+            const tableRegex = /<table[\s\S]*?<\/table>/gi;
+            let tableMatch;
+            while ((tableMatch = tableRegex.exec(htmlContent)) !== null) {
+                const tableContent = tableMatch[0];
+
+                // 在每个表格中查找行
+                const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+                let rowMatch;
+                while ((rowMatch = rowRegex.exec(tableContent)) !== null) {
+                    const rowContent = rowMatch[1];
+
+                    // 提取单元格
+                    const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+                    const cells: string[] = [];
+                    let cellMatch;
+                    while ((cellMatch = cellRegex.exec(rowContent)) !== null) {
+                        cells.push(cellMatch[1]);
+                    }
+
+                    // 检查是否是我们要找的格式
+                    // 格式1: 字段名 | 必填 | 类型 | 描述 (>= 4 columns)
+                    // 格式2: 字段名 | 类型 | 描述 (3 columns)
+                    if (cells.length >= 3) {
+                        const fieldNameCell = cells[0].replace(/<[^>]+>/g, '').trim();
+                        let typeCell = '';
+                        let descCell = '';
+
+                        if (cells.length >= 4) {
+                            typeCell = cells[2].replace(/<[^>]+>/g, '').trim().toLowerCase();
+                            descCell = cells[3];
+                        } else {
+                            typeCell = cells[1].replace(/<[^>]+>/g, '').trim().toLowerCase();
+                            descCell = cells[2];
+                        }
+
+                        if ((typeCell === 'object' || typeCell === 'array') && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(fieldNameCell)) {
+                            // 在描述中查找 pageId
+                            const pageIdMatch = descCell.match(/pageId[=:](\d+)/i) ||
+                                descCell.match(/ri-content-id="(\d+)"/i) ||
+                                descCell.match(/content-id="(\d+)"/i);
+
+                            if (pageIdMatch && !linkedFields.has(fieldNameCell)) {
+                                const pageId = pageIdMatch[1];
+                                // 尝试提取链接文字
+                                const linkTextMatch = descCell.match(/<a[^>]*>([^<]*)<\/a>/i) ||
+                                    descCell.match(/<ac:link-body>([^<]*)<\/ac:link-body>/i);
+                                const linkText = linkTextMatch ? linkTextMatch[1].trim() : fieldNameCell;
+
+                                linkedFields.set(fieldNameCell, { pageId, linkText });
+                                console.log(`[AI Protocol] Found linked field (table cell): ${fieldNameCell} -> pageId=${pageId} (${linkText})`);
+                            }
+
+                            // 在描述中查找 ri:content-title
+                            if (!linkedFields.has(fieldNameCell) && !titleLinkedFields.has(fieldNameCell)) {
+                                const titleMatch = descCell.match(/ri:content-title="([^"]+)"/i);
+                                if (titleMatch) {
+                                    const title = titleMatch[1];
+                                    const linkTextMatch = descCell.match(/<ac:link-body>([^<]*)<\/ac:link-body>/i);
+                                    const linkText = linkTextMatch ? linkTextMatch[1].trim() : title;
+                                    titleLinkedFields.set(fieldNameCell, { title, linkText });
+                                    console.log(`[AI Protocol] Found linked field (table cell title): ${fieldNameCell} -> title="${title}"`);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+        } catch (error) {
+            console.error('[AI Protocol] Error extracting linked fields:', error);
+        }
+
+        return { linkedFields, titleLinkedFields };
+    }
+
+
+    /**
+     * 从 HTML 内容中解析表格，提取字段定义
+     * 返回格式化的字段列表，便于AI理解
+     */
+    private parseTableFieldsFromHtml(htmlContent: string): Array<{
+        name: string;
+        required: boolean;
+        type: string;
+        description: string;
+    }> {
+        const fields: Array<{ name: string; required: boolean; type: string; description: string }> = [];
+
+        try {
+            // 查找所有表格
+            const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/gi;
+            let tableMatch;
+
+            while ((tableMatch = tableRegex.exec(htmlContent)) !== null) {
+                const tableContent = tableMatch[1];
+
+                // 查找表格行
+                const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+                let rowMatch;
+                let isHeader = true;
+
+                while ((rowMatch = rowRegex.exec(tableContent)) !== null) {
+                    const rowContent = rowMatch[1];
+
+                    // 跳过表头行（包含 th 或者第一行）
+                    if (rowContent.includes('<th') || isHeader) {
+                        isHeader = false;
+                        // 检查是否真的是表头
+                        const headerText = rowContent.replace(/<[^>]+>/g, '').toLowerCase();
+                        if (headerText.includes('名称') || headerText.includes('name') ||
+                            headerText.includes('字段') || headerText.includes('field')) {
+                            continue;
+                        }
+                    }
+
+                    // 提取单元格
+                    const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+                    const cells: string[] = [];
+                    let cellMatch;
+
+                    while ((cellMatch = cellRegex.exec(rowContent)) !== null) {
+                        // 移除 HTML 标签，保留文本
+                        const cellText = cellMatch[1]
+                            .replace(/<br\s*\/?>/gi, ' ')
+                            .replace(/<[^>]+>/g, '')
+                            .replace(/&nbsp;/g, ' ')
+                            .replace(/&lt;/g, '<')
+                            .replace(/&gt;/g, '>')
+                            .replace(/&amp;/g, '&')
+                            .replace(/\s+/g, ' ')
+                            .trim();
+                        cells.push(cellText);
+                    }
+
+                    // 解析字段信息（假设格式为：名称 | 必填 | 类型 | 描述）
+                    if (cells.length >= 3) {
+                        const name = cells[0];
+                        // 检查是否是有效的字段名
+                        if (!name || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+                            continue;
+                        }
+
+                        let required = false;
+                        let type = '';
+                        let description = '';
+
+                        if (cells.length === 3) {
+                            // 格式可能是：名称 | 类型 | 描述
+                            type = cells[1].toLowerCase();
+                            description = cells[2];
+                        } else if (cells.length >= 4) {
+                            // 格式：名称 | 必填 | 类型 | 描述
+                            const requiredCell = cells[1].toLowerCase();
+                            required = requiredCell === 'y' || requiredCell === 'yes' ||
+                                requiredCell === '是' || requiredCell === '必填';
+                            type = cells[2].toLowerCase();
+                            description = cells[3];
+                        }
+
+                        fields.push({ name, required, type, description });
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('[AI Protocol] Error parsing table fields:', error);
+        }
+
+        return fields;
+    }
+
+    /**
+     * 批量获取链接文档的内容，并解析为结构化字段定义
+     * @param linkedFields 字段名到页面ID的映射
+     * @returns 字段名到解析后的字段定义列表的映射
+     */
+    private async fetchLinkedDocuments(
+        linkedFields: Map<string, { pageId: string; linkText: string }>
+    ): Promise<Map<string, { rawText: string; parsedFields: Array<{ name: string; required: boolean; type: string; description: string }> }>> {
+        const documentContents = new Map<string, { rawText: string; parsedFields: Array<{ name: string; required: boolean; type: string; description: string }> }>();
+
+        for (const [fieldName, { pageId, linkText }] of linkedFields) {
+            if (this.abortController?.signal.aborted) break;
+
+            try {
+                console.log(`[AI Protocol] Fetching linked document for field "${fieldName}" (pageId=${pageId})...`);
+
+                let htmlContent = '';
+
+                // 优先使用 docIndexService（带 Cookie 认证）
+                if (this.docIndexService) {
+                    htmlContent = await this.docIndexService.fetchDocumentHtml(pageId);
+                    if (htmlContent) {
+                        console.log(`[AI Protocol] 通过 docIndexService 获取子文档 "${fieldName}" 成功，长度=${htmlContent.length}`);
+                    }
+                }
+
+                // 回退到直接请求
+                if (!htmlContent) {
+                    const baseUrl = this.confluenceConfig.baseUrl.replace(/\/$/, '');
+                    const contentUrl = `${baseUrl}/rest/api/content/${pageId}?expand=body.storage`;
+
+                    const response = await this.confluenceFetch(contentUrl);
+
+                    if (response.ok && response.data) {
+                        htmlContent = response.data.body?.storage?.value || '';
+                    }
+                }
+
+                if (htmlContent) {
+                    // 从 HTML 解析字段定义
+                    const parsedFields = this.parseTableFieldsFromHtml(htmlContent);
+                    const rawText = this.htmlToMarkdown(htmlContent); // 使用 Markdown 保留结构
+
+                    if (parsedFields.length > 0 || rawText) {
+                        documentContents.set(fieldName, { rawText, parsedFields });
+                        console.log(`[AI Protocol] ✓ 子文档 "${fieldName}" 解析成功: ${parsedFields.length} 个字段`);
+                    }
+                } else {
+                    console.warn(`[AI Protocol] ✗ 子文档 "${fieldName}" 获取失败: 内容为空`);
+                }
+
+                // 避免请求过快
+                await this.delay(200);
+            } catch (error) {
+                console.error(`[AI Protocol] Failed to fetch linked document for ${fieldName}:`, error);
+            }
+        }
+
+        return documentContents;
+    }
+
+
+    /**
+     * 从原始HTML中提取链接字段信息（保留HTML以便解析）
+     */
+    private async fetchDocumentHtml(docUrl: string): Promise<string> {
+        try {
+            let pageId = '';
+            try {
+                const urlObj = new URL(docUrl);
+                if (urlObj.searchParams.has('pageId')) {
+                    pageId = urlObj.searchParams.get('pageId') || '';
+                } else {
+                    const match = docUrl.match(/\/(\d+)(\/|$|\?)/);
+                    if (match) pageId = match[1];
+                }
+            } catch { }
+
+            if (!pageId) {
+                console.warn('[AI Protocol] fetchDocumentHtml: 无法从 URL 解析 pageId:', docUrl);
+                return '';
+            }
+
+            console.log(`[AI Protocol] fetchDocumentHtml: pageId=${pageId}`);
+
+            // 优先使用 docIndexService（带 Cookie 认证）
+            if (this.docIndexService) {
+                const htmlContent = await this.docIndexService.fetchDocumentHtml(pageId);
+                if (htmlContent) {
+                    console.log(`[AI Protocol] fetchDocumentHtml: 通过 docIndexService 获取成功，长度=${htmlContent.length}`);
+                    return htmlContent;
+                }
+            }
+
+            // 回退到直接请求
+            const baseUrl = this.confluenceConfig.baseUrl.replace(/\/$/, '');
+            const contentUrl = `${baseUrl}/rest/api/content/${pageId}?expand=body.storage`;
+
+            console.log(`[AI Protocol] fetchDocumentHtml: 尝试直接请求 ${contentUrl}`);
+            const response = await this.confluenceFetch(contentUrl);
+
+            if (response.ok && response.data) {
+                const htmlContent = response.data.body?.storage?.value || '';
+                console.log(`[AI Protocol] fetchDocumentHtml: 直接请求成功，长度=${htmlContent.length}`);
+                return htmlContent;
+            } else {
+                console.warn(`[AI Protocol] fetchDocumentHtml: 请求失败，status=${response.status}`);
+            }
+        } catch (error) {
+            console.error('[AI Protocol] Failed to fetch document HTML:', error);
+        }
+
+        return '';
+    }
+
+    /**
      * 使用 AI 分析文档内容
+     * (Restored stable version)
+     */
+    /**
+     * 使用 AI 分析文档内容
+     * 改进策略：
+     * 1. 识别链接字段
+     * 2. 独立分析链接的子文档，获取其 Schema
+     * 3. 分析主文档获取骨架
+     * 4. 将子文档 Schema 拼接到主文档中
      */
     private async analyzeDocument(
         namespace: string,
@@ -535,60 +954,134 @@ ${candidates.map((c, i) => `${i + 1}. 标题: "${c.title}"
             };
         }
 
-        // 截取内容，避免超出 token 限制
-        const truncatedContent = content.slice(0, 8000);
+        // 1. 获取原始HTML以提取链接字段
+        const subSchemas = new Map<string, any>();
+        const linkedFields = new Map<string, { pageId: string; linkText: string }>();
 
+        try {
+            console.log(`[AI Protocol] ========== STEP 1: 获取主文档 HTML ==========`);
+            const htmlContent = await this.fetchDocumentHtml(docInfo.url);
+            console.log(`[AI Protocol] 主文档 HTML 长度: ${htmlContent.length} 字符`);
+
+            // 提取链接字段
+            console.log(`[AI Protocol] ========== STEP 2: 提取链接字段 ==========`);
+            const extractResult = this.extractLinkedFieldsFromHtml(htmlContent);
+            extractResult.linkedFields.forEach((v, k) => linkedFields.set(k, v));
+
+            console.log(`[AI Protocol] 直接找到的链接字段数: ${extractResult.linkedFields.size}`);
+            console.log(`[AI Protocol] 需要通过标题查询的字段数: ${extractResult.titleLinkedFields.size}`);
+
+            // 对于通过标题链接的字段，尝试查询 pageId
+            if (extractResult.titleLinkedFields.size > 0 && this.docIndexService) {
+                console.log(`[AI Protocol] ========== STEP 2.5: 解析标题链接 ==========`);
+                const index = await this.docIndexService.getIndex();
+                console.log(`[AI Protocol] 文档索引包含 ${index.items.size} 个页面`);
+
+                for (const [fieldName, { title, linkText }] of extractResult.titleLinkedFields) {
+                    console.log(`[AI Protocol] 尝试解析: ${fieldName} -> title="${title}"`);
+                    // 在索引中查找匹配的页面
+                    let found = false;
+                    for (const item of index.items.values()) {
+                        if (item.title.toLowerCase() === title.toLowerCase() ||
+                            item.title.toLowerCase().includes(title.toLowerCase())) {
+                            linkedFields.set(fieldName, { pageId: item.pageId, linkText });
+                            console.log(`[AI Protocol] ✓ 解析成功: "${title}" -> pageId=${item.pageId} (${item.title})`);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        console.warn(`[AI Protocol] ✗ 解析失败: 找不到标题匹配 "${title}"`);
+                    }
+                }
+            }
+
+            console.log(`[AI Protocol] ========== STEP 3: 获取子文档内容 ==========`);
+            console.log(`[AI Protocol] 总共需要获取 ${linkedFields.size} 个子文档:`, Array.from(linkedFields.keys()));
+
+            if (linkedFields.size > 0) {
+                // 批量获取链接文档内容
+                const linkedDocs = await this.fetchLinkedDocuments(linkedFields);
+                console.log(`[AI Protocol] 成功获取 ${linkedDocs.size} 个子文档`);
+
+                // 对每个子文档进行独立 AI 分析
+                console.log(`[AI Protocol] ========== STEP 4: AI 分析子文档 ==========`);
+                for (const [fieldName, docData] of linkedDocs) {
+                    if (this.abortController?.signal.aborted) break;
+
+                    console.log(`[AI Protocol] 分析子文档 "${fieldName}": rawText长度=${docData.rawText.length}, parsedFields数量=${docData.parsedFields.length}`);
+
+                    if (docData.rawText) {
+                        try {
+                            const subSchema = await this.analyzeDataStructure(fieldName, docData.rawText);
+                            if (subSchema) {
+                                subSchemas.set(fieldName, subSchema);
+                                console.log(`[AI Protocol] ✓ 子文档 "${fieldName}" 分析成功:`, JSON.stringify(subSchema).slice(0, 200) + '...');
+                            } else {
+                                console.warn(`[AI Protocol] ✗ 子文档 "${fieldName}" 分析返回空结果`);
+                            }
+                        } catch (err) {
+                            console.warn(`[AI Protocol] ✗ 子文档 "${fieldName}" 分析失败:`, err);
+                        }
+                    }
+                }
+                console.log(`[AI Protocol] 成功分析 ${subSchemas.size} 个子文档Schema`);
+            }
+        } catch (error) {
+            console.warn('[AI Protocol] 处理链接文档失败:', error);
+        }
+
+        console.log(`[AI Protocol] ========== SUMMARY: 子Schema ==========`);
+        console.log(`[AI Protocol] subSchemas.size = ${subSchemas.size}`);
+        for (const [key, schema] of subSchemas) {
+            console.log(`[AI Protocol] - ${key}: ${JSON.stringify(schema).slice(0, 100)}...`);
+        }
+
+        // 2. 分析主文档
+        // 改进策略：让 AI 完整分析主文档的所有字段，不再简化处理
+        // 子文档 Schema 用于"增强"已有字段的定义
         const prompt = `你是一个 IoT 协议分析专家。请分析以下协议文档，提取协议的请求和响应结构。
 
 协议名称: ${namespace}
 文档标题: ${docInfo.title}
 
 文档内容:
-${truncatedContent}
+${content.slice(0, 15000)}
 
 请遵循以下步骤进行分析：
 1. **识别交互方式**：查看文档中的交互方式表，确定支持的方法（GET, SET, PUSH）。
-2. **提取 Request Payload (JSON 示例)**：
+2. **提取 Request Payload(JSON 示例)**：
    - 生成纯粹的 JSON 数据示例，用于发送请求。
-   - **不要使用 Schema 格式**。
-   - **必须生成具体的示例值**：不要使用 "string", "integer" 等类型描述。
-   - 对于敏感字段（如 key, password, token），使用 "***" 或 "REPLACE_ME"。
-3. **提取 Response Payload (JSON Schema)**：
-   - **必须生成标准的 JSON Schema 格式**，用于验证响应。
-   - 包含 "type", "properties" 等关键字。
-   - **利用表格中的“必填”列**：将标记为“必填（Y）”的字段添加到 "required" 数组中。
-   - 字段的示例值可以放在 "default" 或 "examples" 字段中。
+3. **类型映射规则（非常重要）**：
+   - 如果文档中字段类型描述为 "int", "integer", "long"，必须将 JSON Schema 的 type 设置为 "integer"。
+   - 如果文档中字段类型描述为 "float", "double", "number"，必须将 JSON Schema 的 type 设置为 "number"。
+   - 严禁将 "int" 类型映射为 "string"。
 
 请以 JSON 格式输出分析结果，格式如下:
 {
-  "description": "协议功能描述",
-  "methods": {
-    "GET": {
-      "enabled": true/false,
-      "payload": { ... },  // Request Payload: JSON 数据示例
-      "response": { ... },   // Response Payload: JSON Schema (包含 required)
-      "description": "GET 方法描述"
+    "description": "协议功能描述",
+    "methods": {
+        "GET": {
+            "enabled": true/false,
+            "payload": { ... },  // Request Payload: JSON 数据示例
+            "response": {        // Response Payload: JSON Schema
+                "type": "object",
+                "properties": { ... }
+            },
+            "description": "GET 方法描述"
+        },
+        "SET": { ... },
+        "PUSH": { ... }
     },
-    "SET": {
-      "enabled": true/false,
-      "payload": { ... },  // Request Payload: JSON 数据示例
-      "response": { ... },   // Response Payload: JSON Schema (包含 required)
-      "description": "SET 方法描述"
-    },
-    "PUSH": { ... }
-  },
-  "confidence": 0.0-1.0
+    "confidence": 0.0-1.0
 }
 
-注意:
-1. 只输出 JSON，不要其他内容。
-2. 确保 JSON 格式合法。
-3. **Request Payload 必须是 JSON 示例，Response Payload 必须是 JSON Schema。**`;
+注意: 只输出 JSON，不要其他内容。确保 JSON 格式合法。`;
 
         try {
             const response = await this.callAI([
                 { role: 'user', content: prompt }
-            ]);
+            ], 120);
 
             // 解析 AI 响应
             const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -597,6 +1090,30 @@ ${truncatedContent}
             }
 
             const parsed = JSON.parse(jsonMatch[0]);
+
+            console.log(`[AI Protocol] ========== STEP 5: 拼接子Schema ==========`);
+            console.log(`[AI Protocol] AI 返回的主 Schema 包含方法:`, Object.keys(parsed.methods || {}));
+
+            // 3. 拼接子文档 Schema（只在正确的嵌套位置替换）
+            if (subSchemas.size > 0 && parsed.methods) {
+                console.log(`[AI Protocol] 需要拼接 ${subSchemas.size} 个子Schema...`);
+
+                for (const methodKey of Object.keys(parsed.methods)) {
+                    const method = parsed.methods[methodKey];
+                    console.log(`[AI Protocol] 处理方法 ${methodKey}...`);
+
+                    // 递归拼接 Response Schema（只在正确位置替换，不添加顶层字段）
+                    if (method.response) {
+                        console.log(`[AI Protocol] ${methodKey}.response 存在, properties:`, Object.keys(method.response.properties || {}));
+                        this.stitchSubSchemas(method.response, subSchemas);
+                    } else {
+                        console.warn(`[AI Protocol] ${methodKey}.response 不存在!`);
+                    }
+
+                    // 注意：不再给 payload 添加顶层字段，保持原有的 payload 结构
+                    // 空 payload 应该保持为空
+                }
+            }
 
             // 构建协议结果
             const methods: AIGeneratedProtocol['methods'] = {};
@@ -624,7 +1141,7 @@ ${truncatedContent}
                 documentTitle: docInfo.title,
                 methods,
                 confidence: parsed.confidence ?? 0.5,
-                warnings: [],
+                warnings: linkedFields.size > 0 ? [`已自动解析并拼接 ${linkedFields.size} 个嵌套子文档`] : [],
             };
         } catch (error: any) {
             console.error('AI analyze error:', error);
@@ -637,22 +1154,251 @@ ${truncatedContent}
     }
 
     /**
-     * 创建默认协议配置
+     * 递归拼接子文档 Schema
+     * 改进策略：子文档 Schema 用于"增强"已有字段的定义
+     * - 如果主文档字段是空的 object/array，则用子文档 Schema 替换
+     * - 如果主文档字段已有 properties，则合并两者（子文档优先）
+     */
+    private stitchSubSchemas(schema: any, subSchemas: Map<string, any>) {
+        if (!schema || typeof schema !== 'object') return;
+
+        // 处理 properties (Object)
+        if (schema.properties) {
+            for (const key in schema.properties) {
+                const propSchema = schema.properties[key];
+
+                // 查找匹配的 key (忽略大小写)
+                let matchKey = subSchemas.has(key) ? key : null;
+                if (!matchKey) {
+                    for (const subKey of subSchemas.keys()) {
+                        if (subKey.toLowerCase() === key.toLowerCase()) {
+                            matchKey = subKey;
+                            break;
+                        }
+                    }
+                }
+
+                if (matchKey) {
+                    const subSchema = subSchemas.get(matchKey);
+
+                    // Case 1: Main is Array -> 增强 items
+                    if (propSchema.type === 'array') {
+                        if (subSchema.type === 'object') {
+                            // 子文档是 object，设置为数组的 items
+                            if (!propSchema.items || !propSchema.items.properties || Object.keys(propSchema.items.properties || {}).length === 0) {
+                                console.log(`[AI Protocol] Enhancing array items for field "${key}" with sub-schema (matched "${matchKey}")`);
+                                propSchema.items = subSchema;
+                            } else {
+                                // 已有 items 定义，合并属性
+                                console.log(`[AI Protocol] Merging array items properties for field "${key}" (matched "${matchKey}")`);
+                                propSchema.items.properties = {
+                                    ...propSchema.items.properties,
+                                    ...subSchema.properties
+                                };
+                                if (subSchema.required) {
+                                    propSchema.items.required = [...new Set([
+                                        ...(propSchema.items.required || []),
+                                        ...subSchema.required
+                                    ])];
+                                }
+                            }
+                        } else if (subSchema.type === 'array' && subSchema.items) {
+                            // 子文档也是 array，取其 items
+                            if (!propSchema.items || !propSchema.items.properties || Object.keys(propSchema.items.properties || {}).length === 0) {
+                                console.log(`[AI Protocol] Enhancing array items for field "${key}" from sub-array (matched "${matchKey}")`);
+                                propSchema.items = subSchema.items;
+                            }
+                        }
+                    }
+                    // Case 2: Main is Object -> 增强 properties
+                    else if (propSchema.type === 'object' || !propSchema.type) {
+                        const mainHasProperties = propSchema.properties && Object.keys(propSchema.properties).length > 0;
+                        const subHasProperties = subSchema.properties && Object.keys(subSchema.properties).length > 0;
+
+                        if (!mainHasProperties && subHasProperties) {
+                            // 主文档是空对象，用子文档替换
+                            console.log(`[AI Protocol] Replacing empty object field "${key}" with sub-schema (matched "${matchKey}")`);
+                            schema.properties[key] = {
+                                ...propSchema, // keep description etc
+                                ...subSchema,  // overwrite type, properties, required
+                                description: propSchema.description || subSchema.description
+                            };
+                        } else if (mainHasProperties && subHasProperties) {
+                            // 两者都有属性，合并（子文档优先）
+                            console.log(`[AI Protocol] Merging properties for object field "${key}" (matched "${matchKey}")`);
+                            propSchema.properties = {
+                                ...propSchema.properties,
+                                ...subSchema.properties
+                            };
+                            if (subSchema.required) {
+                                propSchema.required = [...new Set([
+                                    ...(propSchema.required || []),
+                                    ...subSchema.required
+                                ])];
+                            }
+                        }
+                        // 如果主文档有属性但子文档没有，保留主文档的定义
+                    }
+                } else {
+                    // 递归检查子属性
+                    this.stitchSubSchemas(propSchema, subSchemas);
+                }
+            }
+        }
+
+        // 处理 items (Array)
+        if (schema.items) {
+            this.stitchSubSchemas(schema.items, subSchemas);
+        }
+    }
+
+    /**
+     * 递归更新 Payload 示例数据
+     */
+    private stitchPayloadExample(payload: any, subSchemas: Map<string, any>) {
+        if (!payload || typeof payload !== 'object') return;
+
+        for (const key in payload) {
+            // 查找匹配的 key (忽略大小写)
+            let matchKey = subSchemas.has(key) ? key : null;
+            if (!matchKey) {
+                for (const subKey of subSchemas.keys()) {
+                    if (subKey.toLowerCase() === key.toLowerCase()) {
+                        matchKey = subKey;
+                        break;
+                    }
+                }
+            }
+
+            if (matchKey) {
+                const subSchema = subSchemas.get(matchKey);
+                // Generate new example from schema
+                const newExample = this.generateExampleFromSchema(subSchema);
+
+                if (newExample !== null) {
+                    console.log(`[AI Protocol] Updating payload example for nested field "${key}" (matched "${matchKey}")`);
+                    if (Array.isArray(payload[key])) {
+                        payload[key] = [newExample];
+                    } else {
+                        payload[key] = newExample;
+                    }
+                }
+            } else {
+                // 递归
+                this.stitchPayloadExample(payload[key], subSchemas);
+            }
+        }
+    }
+
+    /**
+     * 独立分析数据结构文档，提取 JSON Schema
+     */
+    private async analyzeDataStructure(name: string, content: string): Promise<any> {
+        const prompt = `你是一个数据结构分析专家。请分析以下文档内容，它描述了一个名为 "${name}" 的数据结构。
+请提取该数据结构的 JSON Schema 定义。
+
+文档内容:
+${content.slice(0, 8000)}
+
+要求：
+1. 输出标准的 JSON Schema 对象。
+2. **重要：直接输出 ${name} 内部的属性定义，不要再套一层 "${name}" 作为外层容器！**
+   例如，如果文档描述了 hardware 对象包含 type、subType、version 字段，
+   正确输出: { "type": "object", "properties": { "type": {...}, "subType": {...}, "version": {...} } }
+   错误输出: { "type": "object", "properties": { "hardware": { "properties": { "type": {...} } } } }
+3. 详细定义 "properties" 中的每个字段。
+4. 根据表格中的"必填"列设置 "required" 字段。
+5. 字段描述放入 "description"。
+6. **类型映射规则（非常重要）**：
+   - 如果文档中字段类型描述为 "int", "integer", "long"，必须将 JSON Schema 的 type 设置为 "integer"。
+   - 如果文档中字段类型描述为 "float", "double", "number"，必须将 JSON Schema 的 type 设置为 "number"。
+   - 严禁将 "int" 类型映射为 "string"。
+7. **只输出 JSON Schema，不要包含任何解释文字。**`;
+
+        try {
+            const response = await this.callAI([
+                { role: 'user', content: prompt }
+            ], 60);
+
+            const jsonMatch = response.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                let schema = JSON.parse(jsonMatch[0]);
+
+                // 后处理：如果 AI 返回了带 wrapper 的结构，解开它
+                // 例如: { properties: { hardware: { properties: {...} } } } -> 取出内层
+                if (schema.properties) {
+                    const propKeys = Object.keys(schema.properties);
+                    // 如果只有一个属性且名称与 name 匹配，说明是 wrapper
+                    if (propKeys.length === 1) {
+                        const wrapperKey = propKeys[0];
+                        if (wrapperKey.toLowerCase() === name.toLowerCase()) {
+                            const innerSchema = schema.properties[wrapperKey];
+                            if (innerSchema && innerSchema.properties) {
+                                console.log(`[AI Protocol] 解开子Schema的wrapper层: ${name}`);
+                                // 保留外层的 description，合并到内层
+                                if (schema.description && !innerSchema.description) {
+                                    innerSchema.description = schema.description;
+                                }
+                                schema = innerSchema;
+                            }
+                        }
+                    }
+                }
+
+                console.log(`[AI Protocol] - ${name} schema:`, JSON.stringify(schema).slice(0, 150) + '...');
+                return schema;
+            }
+        } catch (e) {
+            console.error(`Failed to analyze data structure for ${name}`, e);
+        }
+        return null;
+    }
+
+    /**
+     * 根据 Schema 生成示例数据
+     */
+    private generateExampleFromSchema(schema: any): any {
+        if (!schema) return null;
+
+        if (schema.default !== undefined) return schema.default;
+        if (schema.examples && schema.examples.length > 0) return schema.examples[0];
+
+        if (schema.type === 'object' && schema.properties) {
+            const obj: any = {};
+            for (const key in schema.properties) {
+                obj[key] = this.generateExampleFromSchema(schema.properties[key]);
+            }
+            return obj;
+        }
+
+        if (schema.type === 'array') {
+            if (schema.items) {
+                return [this.generateExampleFromSchema(schema.items)];
+            }
+            return [];
+        }
+
+        if (schema.type === 'string') return "example_string";
+        if (schema.type === 'number' || schema.type === 'integer') return 0;
+        if (schema.type === 'boolean') return false;
+
+        return null;
+    }
+
+    /**
+     * 创建默认协议对象
      */
     private createDefaultProtocol(namespace: string, warnings: string[] = []): AIGeneratedProtocol {
         return {
             namespace,
-            description: `${namespace} 协议`,
-            methods: {
-                GET: { enabled: true, payload: '{}', schema: '{"type":"object"}' },
-            },
-            confidence: 0.1,
-            warnings: warnings.length > 0 ? warnings : ['未找到文档，使用默认配置'],
+            description: '生成失败或未找到文档',
+            methods: {},
+            confidence: 0,
+            warnings
         };
     }
-
     /**
-     * 调用 AI API (带重试)
+ * 调用 AI API (带重试)
      */
     private async callAI(messages: Array<{ role: string; content: string }>, timeoutSeconds: number = 60): Promise<string> {
         const { provider, apiEndpoint, apiKey, model, azureDeploymentName, azureApiVersion } = this.config;
@@ -791,7 +1537,7 @@ ${truncatedContent}
                     throw error; // 立即抛出取消错误，停止重试
                 }
 
-                console.warn(`[AI] Attempt ${attempt + 1} failed: ${error.message}`);
+                console.warn(`[AI] Attempt ${attempt + 1} failed: ${error.message} `);
                 lastError = error;
 
                 // 只有超时或网络错误才重试
@@ -888,7 +1634,7 @@ ${truncatedContent}
                 if (window.electronAPI?.confluenceGetCookies) {
                     const result = await window.electronAPI.confluenceGetCookies(this.confluenceConfig.baseUrl);
                     if (result && result.success && Array.isArray(result.cookies) && result.cookies.length > 0) {
-                        const cookieString = result.cookies.map((c: any) => `${c.name}=${c.value}`).join('; ');
+                        const cookieString = result.cookies.map((c: any) => `${c.name}=${c.value} `).join('; ');
                         headers['Cookie'] = cookieString;
                     }
                 }
@@ -942,6 +1688,104 @@ ${truncatedContent}
     }
 
     /**
+     * HTML 转 Markdown，保留表格结构
+     * 这样 AI 可以更好地理解文档的层级关系
+     */
+    private htmlToMarkdown(html: string): string {
+        let markdown = html;
+
+        // 移除脚本和样式
+        markdown = markdown
+            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+
+        // 处理标题
+        markdown = markdown
+            .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n')
+            .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n')
+            .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n')
+            .replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, '\n#### $1\n');
+
+        // 处理表格 - 提取并格式化为 Markdown 表格
+        const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/gi;
+        markdown = markdown.replace(tableRegex, (_, tableContent) => {
+            const rows: string[][] = [];
+            const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+            let rowMatch;
+
+            while ((rowMatch = rowRegex.exec(tableContent)) !== null) {
+                const cells: string[] = [];
+                const cellRegex = /<t[hd][^>]*>([\s\S]*?)<\/t[hd]>/gi;
+                let cellMatch;
+
+                while ((cellMatch = cellRegex.exec(rowMatch[1])) !== null) {
+                    // 提取单元格内容，保留链接信息
+                    let cellContent = cellMatch[1]
+                        .replace(/<br\s*\/?>/gi, ' ')
+                        .replace(/<a[^>]+href="([^"]*)"[^>]*>([^<]*)<\/a>/gi, '[$2]($1)')
+                        .replace(/<ac:link[^>]*>[\s\S]*?<ri:page[^>]+ri:content-title="([^"]+)"[^>]*\/>[\s\S]*?<ac:link-body>([^<]*)<\/ac:link-body>[\s\S]*?<\/ac:link>/gi, '[$2](wiki:$1)')
+                        .replace(/<[^>]+>/g, '')
+                        .replace(/&nbsp;/g, ' ')
+                        .replace(/&lt;/g, '<')
+                        .replace(/&gt;/g, '>')
+                        .replace(/&amp;/g, '&')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                    cells.push(cellContent);
+                }
+
+                if (cells.length > 0) {
+                    rows.push(cells);
+                }
+            }
+
+            // 构建 Markdown 表格
+            if (rows.length === 0) return '';
+
+            let mdTable = '\n';
+            const maxCols = Math.max(...rows.map(r => r.length));
+
+            // 表头
+            if (rows.length > 0) {
+                mdTable += '| ' + rows[0].map(c => c || ' ').join(' | ') + ' |\n';
+                mdTable += '| ' + Array(maxCols).fill('---').join(' | ') + ' |\n';
+
+                // 数据行
+                for (let i = 1; i < rows.length; i++) {
+                    const row = rows[i];
+                    while (row.length < maxCols) row.push('');
+                    mdTable += '| ' + row.join(' | ') + ' |\n';
+                }
+            }
+
+            return mdTable + '\n';
+        });
+
+        // 处理段落和换行
+        markdown = markdown
+            .replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '\n$1\n')
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n');
+
+        // 移除剩余 HTML 标签
+        markdown = markdown
+            .replace(/<[^>]+>/g, '')
+            .replace(/&nbsp;/g, ' ')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&amp;/g, '&')
+            .replace(/&quot;/g, '"')
+            .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code)));
+
+        // 清理多余空行
+        markdown = markdown
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+
+        return markdown;
+    }
+
+    /**
      * 延迟函数 (可被 abort 信号中断)
      */
     private delay(ms: number): Promise<void> {
@@ -964,6 +1808,8 @@ ${truncatedContent}
         });
     }
 }
+
+
 
 /**
  * 估算 Token 消耗

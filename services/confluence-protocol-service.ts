@@ -531,7 +531,8 @@ export class ConfluenceProtocolService {
                         results.push({
                             id: page.id,
                             title: page.title,
-                            url: `${page._links.base}${page._links.webui}`
+                            // 拼接完整 URL，确保包含 context path (如 /doc)
+                            url: this.config.baseUrl.replace(/\/+$/, '') + page._links.webui
                         });
                     });
 
@@ -588,7 +589,7 @@ export class ConfluenceProtocolService {
                         const pageContent = await this.getPageContent(pageId);
                         if (pageContent) {
                             htmlContent = pageContent.body.view?.value || pageContent.body.storage.value;
-                            pageUrl = `${pageContent._links.base}${pageContent._links.webui}`;
+                            pageUrl = this.config.baseUrl.replace(/\/+$/, '') + pageContent._links.webui;
                         }
                     }
                 }
@@ -652,6 +653,8 @@ export class ConfluenceProtocolService {
 
         return results;
     }
+
+
 
     /**
      * 测试 Confluence 连接

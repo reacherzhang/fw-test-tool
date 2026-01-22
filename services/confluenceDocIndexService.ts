@@ -109,8 +109,18 @@ export class ConfluenceDocIndexService {
         this.abortController = new AbortController();
         const items = new Map<string, DocIndexItem>();
 
-        for (const rootPageId of this.config.rootPageIds) {
-            await this.fetchPageTree(rootPageId, items, 0);
+        try {
+            for (const rootPageId of this.config.rootPageIds) {
+                await this.fetchPageTree(rootPageId, items, 0);
+            }
+        } catch (error: any) {
+            // 如果是认证错误，向上抛出让调用方处理
+            if (error.code === 'CONFLUENCE_AUTH_ERROR') {
+                console.error('[DocIndex] Authentication error:', error.message);
+                throw error;
+            }
+            // 其他错误只记录日志
+            console.error('[DocIndex] Error building index:', error);
         }
 
         this.index = {
@@ -150,6 +160,15 @@ export class ConfluenceDocIndexService {
 
             const response = await this.confluenceFetch(apiUrl);
 
+            // 检测认证失败
+            if (response.status === 401) {
+                const errorMessage = response.data?.message || 'Confluence 认证失败，请先在浏览器中登录';
+                const error = new Error(errorMessage);
+                (error as any).code = 'CONFLUENCE_AUTH_ERROR';
+                (error as any).details = response.data;
+                throw error;
+            }
+
             if (!response.ok || !response.data) {
                 console.warn(`[DocIndex] Failed to fetch page ${pageId}`);
                 return;
@@ -182,7 +201,11 @@ export class ConfluenceDocIndexService {
                 await this.delay(100);
             }
 
-        } catch (error) {
+        } catch (error: any) {
+            // 如果是认证错误，直接向上抛出
+            if (error.code === 'CONFLUENCE_AUTH_ERROR') {
+                throw error;
+            }
             console.error(`[DocIndex] Error fetching page ${pageId}:`, error);
         }
     }
@@ -280,30 +303,23 @@ export class ConfluenceDocIndexService {
      * 精确匹配
      */
     private findExactMatch(namespace: string, index: DocIndex): { pageId: string; title: string; url: string } | null {
-        const normalizedNamespace = namespace.toLowerCase();
+        // 转义正则特殊字符
+        const escapedNamespace = namespace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // 使用单词边界 \b 确保精确匹配，避免 Wifi 匹配到 WifiX
+        // 忽略大小写
+        const regex = new RegExp(`\\b${escapedNamespace}\\b`, 'i');
 
         for (const item of index.items.values()) {
-            const normalizedTitle = item.title.toLowerCase();
+            const title = item.title;
+            const normalizedTitle = title.toLowerCase();
 
             // 过滤掉包含 "废弃" 的文档
             if (normalizedTitle.includes('废弃') || normalizedTitle.includes('deprecated')) {
                 continue;
             }
 
-            // 完全匹配
-            if (normalizedTitle === normalizedNamespace) {
-                return { pageId: item.pageId, title: item.title, url: item.url };
-            }
-
-            // 标题包含完整 namespace
-            if (normalizedTitle.includes(normalizedNamespace)) {
-                return { pageId: item.pageId, title: item.title, url: item.url };
-            }
-
-            // Namespace 格式匹配（如 "Appliance.Config.Key" 匹配 "Appliance.Config.Key 协议"）
-            const cleanTitle = normalizedTitle.replace(/[\s\-_协议说明文档接口]/g, '');
-            const cleanNamespace = normalizedNamespace.replace(/[\s\-_\.]/g, '');
-            if (cleanTitle.includes(cleanNamespace) || cleanNamespace.includes(cleanTitle)) {
+            // 正则精确匹配
+            if (regex.test(title)) {
                 return { pageId: item.pageId, title: item.title, url: item.url };
             }
         }
@@ -325,6 +341,19 @@ export class ConfluenceDocIndexService {
         const keywords = parts.map(p => p.toLowerCase());
         const lastPart = parts[parts.length - 1]?.toLowerCase() || '';
 
+        // 预编译正则 (带边界)
+        const escaped = namespace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const fullMatchRegex = new RegExp(`\\b${escaped}\\b`, 'i');
+
+        // 预编译关键词正则
+        const keywordRegexes = keywords.map(k => {
+            const kEscaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            return new RegExp(`\\b${kEscaped}\\b`, 'i');
+        });
+
+        const lastPartEscaped = lastPart.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const lastPartRegex = new RegExp(`\\b${lastPartEscaped}\\b`, 'i');
+
         for (const item of index.items.values()) {
             const title = item.title.toLowerCase();
 
@@ -335,21 +364,28 @@ export class ConfluenceDocIndexService {
 
             let score = 0;
 
-            // 1. 关键词匹配
-            for (const keyword of keywords) {
-                if (title.includes(keyword)) {
+            // 1. 关键词匹配 (带边界)
+            for (const regex of keywordRegexes) {
+                if (regex.test(title)) {
                     score += 0.2;
                 }
             }
 
-            // 2. 最后一个部分（通常是最具体的）权重更高
-            if (title.includes(lastPart)) {
+            // 2. 最后一个部分权重更高 (带边界)
+            if (lastPartRegex.test(title)) {
                 score += 0.3;
             }
 
-            // 3. 完整 namespace 匹配
-            if (title.includes(namespace.toLowerCase())) {
+            // 3. 完整 namespace 匹配 (带边界检查)
+            if (fullMatchRegex.test(item.title)) {
                 score += 0.5;
+            }
+
+            // 6. 惩罚机制：如果标题包含 "Namespace + 后缀"（如搜 Wifi 遇到 WifiX），大幅扣分
+            // 这通常意味着匹配到了相似但不同的协议
+            const superstringRegex = new RegExp(`\\b${escaped}[a-zA-Z0-9_]+\\b`, 'i');
+            if (superstringRegex.test(item.title)) {
+                score -= 0.5; // 强力惩罚
             }
 
             // 4. 标题长度惩罚（太长的标题可能不是具体协议文档）
@@ -388,15 +424,18 @@ export class ConfluenceDocIndexService {
             return null;
         }
 
-        const prompt = `你是一个协议文档匹配专家。给定一个协议名称和多个候选文档，请选择最相关的文档。
+        const prompt = `你是一个协议文档匹配专家。请从候选文档中找出与目标协议 "${namespace}" **精确对应** 的文档。
 
-协议名称: ${namespace}
+规则：
+1. **严格匹配**：文档标题必须代表 "${namespace}" 本身。
+2. **拒绝变体**：如果文档是目标协议的变体（例如目标是 "Wifi"，候选是 "WifiX"、"WifiList"），**绝对不要选择**。
+3. **拒绝父级**：如果文档是目标协议的父级目录（例如目标是 "Config.Wifi"，候选是 "Config"），不要选择。
 
 候选文档:
 ${candidates.map((c, i) => `${i + 1}. "${c.title}"`).join('\n')}
 
-请只回复最相关文档的编号（1-${candidates.length}），不要其他内容。
-如果没有相关文档，回复 "0"。`;
+请只回复最相关文档的编号（1-${candidates.length}）。
+如果没有**完全符合**的文档，必须回复 "0"。`;
 
         try {
             const response = await this.callAI(prompt);
@@ -437,6 +476,27 @@ ${candidates.map((c, i) => `${i + 1}. "${c.title}"`).join('\n')}
             return this.htmlToText(htmlContent);
         } catch (error) {
             console.error(`[DocIndex] Failed to fetch content for ${pageId}:`, error);
+            return '';
+        }
+    }
+
+    /**
+     * 获取文档原始 HTML 内容
+     */
+    async fetchDocumentHtml(pageId: string): Promise<string> {
+        try {
+            const baseUrl = this.config.confluenceBaseUrl.replace(/\/$/, '');
+            const apiUrl = `${baseUrl}/rest/api/content/${pageId}?expand=body.storage`;
+
+            const response = await this.confluenceFetch(apiUrl);
+
+            if (!response.ok || !response.data) {
+                throw new Error('获取页面内容失败');
+            }
+
+            return response.data.body?.storage?.value || '';
+        } catch (error) {
+            console.error(`[DocIndex] Failed to fetch HTML for ${pageId}:`, error);
             return '';
         }
     }
@@ -558,10 +618,34 @@ ${candidates.map((c, i) => `${i + 1}. "${c.title}"`).join('\n')}
                 // 使用 Promise.race 实现可中断等待
                 const result = await Promise.race([requestPromise, abortPromise]);
 
-                // 检查是否被重定向到登录页面
+                // 检查是否被重定向到 LDAP 登录页面
+                const finalUrl = result.finalUrl || result.url || url;
+                const isLdapRedirect = finalUrl.includes('ldap.meross.cn') ||
+                    (typeof result.text === 'string' && result.text.includes('ldap.meross.cn'));
+
+                if (isLdapRedirect) {
+                    console.warn('[DocIndex] Detected LDAP redirect - authentication required');
+                    return {
+                        ok: false,
+                        status: 401,
+                        data: {
+                            error: 'LDAP_AUTH_REQUIRED',
+                            message: 'Confluence 访问失败：被重定向到 LDAP 登录页面，请先在浏览器中登录 Confluence'
+                        }
+                    };
+                }
+
+                // 检查是否被重定向到其他登录页面
                 if (typeof result.text === 'string' && result.text.includes('<!DOCTYPE')) {
                     console.warn('[DocIndex] Received HTML response (likely auth redirect)');
-                    return { ok: false, status: 401, data: null };
+                    return {
+                        ok: false,
+                        status: 401,
+                        data: {
+                            error: 'AUTH_REQUIRED',
+                            message: 'Confluence 访问失败：认证已过期，请先在浏览器中重新登录 Confluence'
+                        }
+                    };
                 }
 
                 console.log(`[DocIndex] Response status: ${result.status}`);
