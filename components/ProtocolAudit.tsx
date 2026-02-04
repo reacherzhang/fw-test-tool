@@ -45,6 +45,7 @@ interface ProtocolDefinition {
 interface AuditProject {
     id: string;
     name: string;
+    description?: string;
     deviceId?: string;
     targetDeviceName?: string;
     protocols: ProtocolDefinition[];
@@ -305,90 +306,283 @@ const ProjectDashboard: React.FC<{
     onSelect: (project: AuditProject) => void;
     onCreate: () => void;
     onDelete: (id: string) => void;
-}> = ({ projects, onSelect, onCreate, onDelete }) => {
+    onRename: (id: string, newName: string) => void;
+    onDuplicate: (sourceProject: AuditProject, newName: string, newDescription: string) => void;
+}> = ({ projects, onSelect, onCreate, onDelete, onRename, onDuplicate }) => {
+    const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+    const [editingId, setEditingId] = useState<string | null>(null);
+    const [editName, setEditName] = useState('');
+    const [searchTerm, setSearchTerm] = useState('');
+
+    // Duplicate Modal State
+    const [duplicateSource, setDuplicateSource] = useState<AuditProject | null>(null);
+    const [duplicateData, setDuplicateData] = useState({ name: '', description: '' });
+
+    const startEditing = (project: AuditProject, e: React.MouseEvent) => {
+        e.stopPropagation();
+        setEditingId(project.id);
+        setEditName(project.name);
+    };
+
+    const saveEditing = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (editingId && editName.trim()) {
+            onRename(editingId, editName.trim());
+            setEditingId(null);
+        }
+    };
+
+    const cancelEditing = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setEditingId(null);
+    };
+
+    const handleDuplicateClick = (project: AuditProject, e: React.MouseEvent) => {
+        e.stopPropagation();
+        setDuplicateSource(project);
+        setDuplicateData({ name: `${project.name} (Copy)`, description: project.description || '' });
+    };
+
+    const confirmDuplicate = () => {
+        if (duplicateSource && duplicateData.name.trim()) {
+            onDuplicate(duplicateSource, duplicateData.name, duplicateData.description);
+            setDuplicateSource(null);
+        }
+    };
+
+    const filteredProjects = projects
+        .filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()))
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+
     return (
-        <div className="p-6 space-y-6 h-full overflow-y-auto custom-scrollbar">
-            <div className="flex justify-between items-center">
+        <div className="p-6 space-y-6 h-full flex flex-col">
+            <div className="flex justify-between items-center shrink-0">
                 <div>
                     <h2 className="text-2xl font-bold text-white">Project Dashboard</h2>
                     <p className="text-slate-400">Manage your protocol audit projects</p>
                 </div>
-                <button
-                    onClick={onCreate}
-                    className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-lg shadow-blue-900/20"
-                >
-                    <Plus size={18} /> New Project
-                </button>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {projects.map(project => (
-                    <div
-                        key={project.id}
-                        onClick={() => onSelect(project)}
-                        className="bg-slate-900 border border-slate-800 rounded-xl p-6 cursor-pointer hover:border-blue-500/50 hover:bg-slate-800/50 transition-all group relative overflow-hidden"
+                <div className="flex items-center gap-4">
+                    <div className="relative">
+                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                        <input
+                            type="text"
+                            placeholder="Search projects..."
+                            value={searchTerm}
+                            onChange={e => setSearchTerm(e.target.value)}
+                            className="bg-slate-900 border border-slate-700 rounded-lg pl-9 pr-4 py-2 text-sm text-white outline-none focus:border-blue-500 w-64 transition-colors"
+                        />
+                    </div>
+                    <button
+                        onClick={onCreate}
+                        className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-lg shadow-blue-900/20"
                     >
-                        <div className="absolute top-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button
-                                onClick={(e) => { e.stopPropagation(); onDelete(project.id); }}
-                                className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
-                            >
-                                <Trash2 size={16} />
-                            </button>
-                        </div>
-
-                        <div className="flex justify-between items-start mb-4">
-                            <div className="p-3 bg-blue-500/10 rounded-lg text-blue-400 group-hover:bg-blue-500 group-hover:text-white transition-colors">
-                                <Package size={24} />
-                            </div>
-                        </div>
-
-                        <h3 className="text-lg font-bold text-white mb-1">{project.name}</h3>
-                        <p className="text-sm text-slate-400 mb-4 flex items-center gap-2">
-                            {project.targetDeviceName ? (
-                                <><Zap size={12} className="text-amber-400" /> {project.targetDeviceName}</>
-                            ) : (
-                                'No device bound'
-                            )}
-                        </p>
-
-                        <div className="space-y-2">
-                            <div className="flex justify-between text-xs text-slate-400">
-                                <span>Progress</span>
-                                <span className={project.progress === 100 ? 'text-emerald-400' : 'text-blue-400'}>{project.progress}%</span>
-                            </div>
-                            <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
-                                <div
-                                    className={`h-full transition-all duration-500 ${project.progress === 100 ? 'bg-emerald-500' : 'bg-blue-500'}`}
-                                    style={{ width: `${project.progress}%` }}
-                                />
-                            </div>
-                        </div>
-
-                        <div className="mt-4 pt-4 border-t border-slate-800 flex justify-between items-center text-xs text-slate-500">
-                            <div className="flex items-center gap-1">
-                                <Clock size={12} />
-                                <span>{new Date(project.updatedAt).toLocaleDateString()}</span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                                <ShieldCheck size={12} />
-                                <span>{project.protocols.length} Protocols</span>
-                            </div>
-                        </div>
-                    </div>
-                ))}
-
-                {/* Create New Placeholder */}
-                <div
-                    onClick={onCreate}
-                    className="bg-slate-900/30 border-2 border-dashed border-slate-800 rounded-xl p-6 flex flex-col items-center justify-center gap-4 cursor-pointer hover:border-blue-500/50 hover:bg-slate-800/50 transition-all text-slate-500 hover:text-blue-400 min-h-[200px]"
-                >
-                    <div className="p-4 bg-slate-800 rounded-full">
-                        <Plus size={24} />
-                    </div>
-                    <span className="font-medium">Create New Project</span>
+                        <Plus size={18} /> New Project
+                    </button>
                 </div>
             </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar bg-slate-900 rounded-xl border border-slate-800">
+                {/* Header Row - Adjusted widths */}
+                <div className="flex items-center px-6 py-4 border-b border-slate-800 text-xs font-bold text-slate-500 uppercase bg-slate-900/50 sticky top-0 z-10 backdrop-blur-sm">
+                    <div className="w-[5%] min-w-[50px] text-center">ID</div>
+                    <div className="w-[20%] min-w-[180px]">Project Name</div>
+                    <div className="w-[25%] min-w-[200px] px-4">Description</div>
+                    <div className="w-[10%] text-center">Protocols</div>
+                    <div className="w-[20%] px-4">Verification</div>
+                    <div className="w-[10%] text-right">Last Updated</div>
+                    <div className="w-[10%] min-w-[120px] text-right"></div>
+                </div>
+
+                {/* List Items */}
+                <div className="divide-y divide-slate-800/50">
+                    {filteredProjects.map((project, index) => {
+                        const verifiedCount = project.protocols.filter(p => p.reviewStatus === 'VERIFIED').length;
+                        const totalCount = project.protocols.length;
+                        const progress = totalCount > 0 ? Math.round((verifiedCount / totalCount) * 100) : 0;
+
+                        return (
+                            <div
+                                key={project.id}
+                                onClick={() => onSelect(project)}
+                                className="group flex items-center px-6 py-5 hover:bg-slate-800/50 transition-colors cursor-pointer"
+                            >
+                                {/* ID Column - Simple Number */}
+                                <div className="w-[5%] min-w-[50px] text-center text-sm text-slate-500 font-mono">
+                                    {index + 1}
+                                </div>
+
+                                {/* Name Column */}
+                                <div className="w-[20%] min-w-[180px] flex items-center gap-4 pr-4">
+                                    <div className="p-2.5 bg-blue-500/10 rounded-lg text-blue-400 group-hover:bg-blue-500 group-hover:text-white transition-colors shrink-0">
+                                        <Package size={20} />
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                        {editingId === project.id ? (
+                                            <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+                                                <input
+                                                    value={editName}
+                                                    onChange={e => setEditName(e.target.value)}
+                                                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white text-sm outline-none focus:border-blue-500 w-full"
+                                                    autoFocus
+                                                    onKeyDown={e => {
+                                                        if (e.key === 'Enter') saveEditing(e as any);
+                                                        if (e.key === 'Escape') cancelEditing(e as any);
+                                                    }}
+                                                />
+                                                <button onClick={saveEditing} className="p-1 text-emerald-400 hover:bg-emerald-500/20 rounded"><Check size={14} /></button>
+                                                <button onClick={cancelEditing} className="p-1 text-red-400 hover:bg-red-500/20 rounded"><X size={14} /></button>
+                                            </div>
+                                        ) : (
+                                            <div>
+                                                <h3 className="text-sm font-bold text-white truncate">{project.name}</h3>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Description Column */}
+                                <div className="w-[25%] min-w-[200px] px-4 text-sm text-slate-400 truncate">
+                                    {project.description || '-'}
+                                </div>
+
+                                {/* Protocols Count */}
+                                <div className="w-[10%] text-center text-sm text-slate-400">
+                                    <span className="font-mono text-white font-medium">{totalCount}</span> Protocols
+                                </div>
+
+                                {/* Verification Progress - Shorter Bar */}
+                                <div className="w-[20%] px-4">
+                                    <div className="flex justify-between text-xs font-medium text-slate-400 mb-1.5 max-w-[150px]">
+                                        <span>Verified</span>
+                                        <span className={progress === 100 ? 'text-emerald-400' : 'text-blue-400'}>{progress}%</span>
+                                    </div>
+                                    <div className="h-2 bg-slate-800 rounded-full overflow-hidden max-w-[150px]">
+                                        <div
+                                            className={`h-full transition-all duration-500 ${progress === 100 ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                                            style={{ width: `${progress}%` }}
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Last Updated */}
+                                <div className="w-[10%] text-right text-sm text-slate-400 font-mono">
+                                    {new Date(project.updatedAt).toLocaleDateString()}
+                                </div>
+
+                                {/* Actions */}
+                                <div className="w-[10%] min-w-[120px] flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity pl-4">
+                                    <button
+                                        onClick={(e) => startEditing(project, e)}
+                                        className="p-2 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
+                                        title="Rename"
+                                    >
+                                        <Edit3 size={16} />
+                                    </button>
+                                    <button
+                                        onClick={(e) => handleDuplicateClick(project, e)}
+                                        className="p-2 text-slate-400 hover:text-blue-400 hover:bg-blue-500/10 rounded-lg transition-colors"
+                                        title="Duplicate"
+                                    >
+                                        <Copy size={16} />
+                                    </button>
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(project.id); }}
+                                        className="p-2 text-slate-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
+                                        title="Delete"
+                                    >
+                                        <Trash2 size={16} />
+                                    </button>
+                                </div>
+                            </div>
+                        );
+                    })}
+                    {projects.length === 0 && (
+                        <div className="p-12 text-center text-slate-500">
+                            <div className="inline-block p-4 bg-slate-800/50 rounded-full mb-4">
+                                <Package size={32} className="opacity-50" />
+                            </div>
+                            <p>No projects found. Create one to get started.</p>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Duplicate Modal */}
+            {duplicateSource && (
+                <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setDuplicateSource(null)}>
+                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[450px] shadow-2xl" onClick={e => e.stopPropagation()}>
+                        <h3 className="text-lg font-bold text-white mb-4">Duplicate Project</h3>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="text-sm text-slate-400 block mb-2">New Project Name *</label>
+                                <input
+                                    type="text"
+                                    value={duplicateData.name}
+                                    onChange={(e) => setDuplicateData(prev => ({ ...prev, name: e.target.value }))}
+                                    className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-blue-500 outline-none"
+                                    autoFocus
+                                />
+                            </div>
+                            <div>
+                                <label className="text-sm text-slate-400 block mb-2">Description</label>
+                                <textarea
+                                    value={duplicateData.description}
+                                    onChange={(e) => setDuplicateData(prev => ({ ...prev, description: e.target.value }))}
+                                    className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-blue-500 outline-none h-24 resize-none"
+                                />
+                            </div>
+                            <p className="text-xs text-slate-500 italic">
+                                * All {duplicateSource.protocols.length} protocols will be copied to the new project.
+                            </p>
+                        </div>
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button
+                                onClick={() => setDuplicateSource(null)}
+                                className="px-4 py-2 text-slate-400 hover:text-white font-bold transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={confirmDuplicate}
+                                className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold transition-colors"
+                            >
+                                Duplicate
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Delete Confirmation Modal */}
+            {deleteConfirmId && (
+                <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setDeleteConfirmId(null)}>
+                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[400px] shadow-2xl" onClick={e => e.stopPropagation()}>
+                        <h3 className="text-lg font-bold text-white mb-2">Delete Project?</h3>
+                        <p className="text-slate-400 text-sm mb-6">
+                            Are you sure you want to delete <span className="text-white font-bold">{projects.find(p => p.id === deleteConfirmId)?.name}</span>? This action cannot be undone.
+                        </p>
+                        <div className="flex justify-end gap-3">
+                            <button
+                                onClick={() => setDeleteConfirmId(null)}
+                                className="px-4 py-2 text-slate-400 hover:text-white font-bold transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={() => {
+                                    if (deleteConfirmId) {
+                                        onDelete(deleteConfirmId);
+                                        setDeleteConfirmId(null);
+                                    }
+                                }}
+                                className="px-6 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg font-bold transition-colors"
+                            >
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
@@ -1227,44 +1421,26 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     const [isAddingSuite, setIsAddingSuite] = useState(false); // Reused for "Adding Project" modal
     const [editingSuiteId, setEditingSuiteId] = useState<string | null>(null);
 
-    // Load initial projects from localStorage
-    useEffect(() => {
-        // 执行旧数据迁移
-        AuditStorage.migrateOldStorage();
 
-        // 加载存储的项目
-        const savedProjects = AuditStorage.loadProjects();
-        if (savedProjects.length > 0) {
-            setProjects(savedProjects);
 
-            // 恢复上次活动的项目
-            const activeId = AuditStorage.loadActiveProjectId();
-            if (activeId) {
-                const activeProj = savedProjects.find(p => p.id === activeId);
-                if (activeProj) {
-                    setActiveProject(activeProj);
-                    setViewMode('WORKSPACE');
-                }
-            }
-        }
-
-        // 加载目标设备ID
-        const savedDeviceId = AuditStorage.loadTargetDeviceId();
-        if (savedDeviceId) {
-            setTargetDeviceId(savedDeviceId);
-        }
-
-        // 加载测试历史
-        const savedHistory = AuditStorage.loadTestHistory();
-        if (savedHistory.length > 0) {
-            setTestHistory(savedHistory as TestRun[]);
-        }
-    }, []);
+    const [showNewProjectModal, setShowNewProjectModal] = useState(false);
+    const [newProjectData, setNewProjectData] = useState({ name: '', description: '' });
 
     const handleCreateProject = () => {
+        setNewProjectData({ name: '', description: '' });
+        setShowNewProjectModal(true);
+    };
+
+    const confirmCreateProject = () => {
+        if (!newProjectData.name.trim()) {
+            showToast('warning', 'Project name is required');
+            return;
+        }
+
         const newProject: AuditProject = {
             id: `proj_${Date.now()}`,
-            name: `New Project ${projects.length + 1}`,
+            name: newProjectData.name,
+            description: newProjectData.description,
             protocols: [],
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -1272,14 +1448,28 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             progress: 0
         };
         setProjects([...projects, newProject]);
-        setActiveProject(newProject);
-        setViewMode('WORKSPACE');
+
+        // Explicitly save to DB immediately
+        AuditDB.saveProjectToDB(newProject).then(success => {
+            if (success) console.log('[ProtocolAudit] New project saved to DB:', newProject.id);
+            else console.error('[ProtocolAudit] Failed to save new project to DB');
+        });
+
+        setShowNewProjectModal(false);
+        showToast('success', 'Project created successfully');
     };
 
     const handleDeleteProject = (id: string) => {
-        setProjects(projects.filter(p => p.id !== id));
+        setProjects(prevProjects => prevProjects.filter(p => p.id !== id));
         // 同时清理该项目的测试历史
         setTestHistory(prev => prev.filter(h => h.suiteId !== id));
+
+        // Explicitly delete from DB
+        AuditDB.deleteProjectFromDB(id).then(success => {
+            if (success) console.log('[ProtocolAudit] Project deleted from DB:', id);
+            else console.error('[ProtocolAudit] Failed to delete project from DB');
+        });
+
         if (activeProject?.id === id) {
             setActiveProject(null);
             setViewMode('DASHBOARD');
@@ -1291,26 +1481,34 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         setViewMode('WORKSPACE');
     };
 
-    // Sync activeProject to legacy suites state for Phase 1 compatibility
-    useEffect(() => {
-        if (activeProject) {
-            const legacySuite: ProtocolTestSuite = {
-                id: activeProject.id,
-                name: activeProject.name,
-                description: '',
-                protocols: activeProject.protocols,
-                createdAt: activeProject.createdAt,
-                updatedAt: activeProject.updatedAt,
-                executionConfig: DEFAULT_EXECUTION_CONFIG
-            };
-            setSuites([legacySuite]);
-            setSelectedSuiteId(legacySuite.id);
+    const handleRenameProject = (id: string, newName: string) => {
+        setProjects(prev => prev.map(p => p.id === id ? { ...p, name: newName, updatedAt: Date.now() } : p));
+        if (activeProject?.id === id) {
+            setActiveProject(prev => prev ? { ...prev, name: newName, updatedAt: Date.now() } : null);
         }
-    }, [activeProject]);
+    };
 
-    // --- Render ---
-
-
+    const handleDuplicateProject = (sourceProject: AuditProject, newName: string, newDescription: string) => {
+        const newProject: AuditProject = {
+            ...sourceProject,
+            id: `proj_${Date.now()}`,
+            name: newName,
+            description: newDescription,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            // Reset protocols status if needed, or keep as is. Here we keep them but maybe reset verification?
+            // Let's keep them as is for a true duplicate, or reset to UNVERIFIED if desired.
+            // User requirement: "default copy all protocols".
+            protocols: sourceProject.protocols.map(p => ({
+                ...p,
+                id: Math.random().toString(36).substr(2, 9), // New IDs for protocols
+                reviewStatus: 'UNVERIFIED' as const, // Reset status for safety
+                lastRun: undefined
+            }))
+        };
+        setProjects(prev => [...prev, newProject]);
+        showToast('success', 'Project duplicated successfully');
+    };
 
     const [suites, setSuites] = useState<ProtocolTestSuite[]>([DEFAULT_SUITE]);
     const [selectedSuiteId, setSelectedSuiteId] = useState<string | null>(DEFAULT_SUITE.id);
@@ -1403,6 +1601,68 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     // Search
     const [searchTerm, setSearchTerm] = useState('');
 
+    // Sync activeProject to legacy suites state for Phase 1 compatibility
+    // Sync activeProject to suites (Initial load & External updates)
+    useEffect(() => {
+        if (activeProject) {
+            setSuites(prev => {
+                const existing = prev.find(s => s.id === activeProject.id);
+                // If suite exists and protocols match, don't update (avoids loop)
+                if (existing && JSON.stringify(existing.protocols) === JSON.stringify(activeProject.protocols)) {
+                    return prev;
+                }
+
+                // If suite exists but protocols differ (external update), update it
+                if (existing) {
+                    return prev.map(s => s.id === activeProject.id ? {
+                        ...s,
+                        name: activeProject.name,
+                        protocols: activeProject.protocols,
+                        updatedAt: activeProject.updatedAt
+                    } : s);
+                }
+
+                // New project loaded
+                const legacySuite: ProtocolTestSuite = {
+                    id: activeProject.id,
+                    name: activeProject.name,
+                    description: '',
+                    protocols: activeProject.protocols,
+                    createdAt: activeProject.createdAt,
+                    updatedAt: activeProject.updatedAt,
+                    executionConfig: DEFAULT_EXECUTION_CONFIG
+                };
+                return [legacySuite];
+            });
+
+            // Only set selected suite if it's a new project switch
+            setSelectedSuiteId(prev => prev === activeProject.id ? prev : activeProject.id);
+        }
+    }, [activeProject]);
+
+    // Sync suites changes back to activeProject and projects (Auto-save)
+    useEffect(() => {
+        if (!activeProject || suites.length === 0) return;
+        const currentSuite = suites.find(s => s.id === activeProject.id);
+        if (!currentSuite) return;
+
+        // Check if protocols changed compared to activeProject
+        if (JSON.stringify(currentSuite.protocols) !== JSON.stringify(activeProject.protocols)) {
+            console.log('[ProtocolAudit] Syncing suite changes to project DB...');
+            const updatedProject = {
+                ...activeProject,
+                protocols: currentSuite.protocols,
+                updatedAt: Date.now()
+            };
+
+            // Update projects (triggers DB save via its own useEffect)
+            setProjects(prev => prev.map(p => p.id === updatedProject.id ? updatedProject : p));
+
+            // Update activeProject (to keep sync, will trigger above useEffect but it will exit early)
+            setActiveProject(updatedProject);
+        }
+    }, [suites]);
+
 
     // Phase 1 Optimization: Template Category Filter - REMOVED
     // const [templateCategory, setTemplateCategory] = useState<'all' | 'control' | 'system' | 'config' | 'ota' | 'sensor'>('all');
@@ -1432,6 +1692,70 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     const [originalProtocol, setOriginalProtocol] = useState<ProtocolDefinition | null>(null);
     const [showUnsavedChangesModal, setShowUnsavedChangesModal] = useState(false);
     const [pendingNavigation, setPendingNavigation] = useState<(() => void) | null>(null);
+
+    // --- Effects for Data Loading & Saving ---
+
+    // Load initial projects from storage (Local + DB)
+    useEffect(() => {
+        const init = async () => {
+            // Check DB Connection first
+            const dbStatus = await AuditDB.checkDatabaseConnection();
+            if (!dbStatus.connected && dbStatus.enabled) {
+                showToast('error', `Database Connection Failed: ${dbStatus.error || 'Unknown error'}`);
+            } else if (dbStatus.connected) {
+                console.log('[ProtocolAudit] Database connected successfully');
+            }
+
+            // 执行旧数据迁移
+            AuditStorage.migrateOldStorage();
+
+            // 加载存储的项目 (Sync with DB)
+            const savedProjects = await AuditDB.syncLoadProjects();
+            if (savedProjects.length > 0) {
+                setProjects(savedProjects);
+
+                // 恢复上次活动的项目
+                const activeId = AuditStorage.loadActiveProjectId();
+                if (activeId) {
+                    const activeProj = savedProjects.find(p => p.id === activeId);
+                    if (activeProj) {
+                        setActiveProject(activeProj);
+                        setViewMode('WORKSPACE');
+                    }
+                }
+            }
+
+            // 加载测试历史
+            const savedHistory = await AuditDB.syncLoadTestHistory();
+            if (savedHistory.length > 0) {
+                console.log('[ProtocolAudit] Loaded test history:', savedHistory.length);
+                setTestHistory(savedHistory as TestRun[]);
+            } else {
+                console.log('[ProtocolAudit] No test history found in DB');
+            }
+        };
+        init();
+
+        // 加载目标设备ID
+        const savedDeviceId = AuditStorage.loadTargetDeviceId();
+        if (savedDeviceId) {
+            setTargetDeviceId(savedDeviceId);
+        }
+    }, []);
+
+    // Save projects whenever they change
+    useEffect(() => {
+        if (projects.length > 0) {
+            AuditDB.syncSaveProjects(projects);
+        }
+    }, [projects]);
+
+    // Save test history whenever it changes
+    useEffect(() => {
+        if (testHistory.length > 0) {
+            AuditDB.syncSaveTestHistory(testHistory);
+        }
+    }, [testHistory]);
 
     // Check if protocol has unsaved changes
     // Check if protocol has unsaved changes
@@ -1815,7 +2139,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         });
     };
 
-    const updateProtocolMethod = (protocolId: string, method: RequestMethod, updates: Partial<MethodTest>) => {
+    const updateProtocolMethod = (protocolId: string, method: RequestMethod, updates: Partial<MethodTest>, preserveReviewStatus: boolean = false) => {
         if (!selectedSuiteId) return;
         setSuites(suites.map(s => {
             if (s.id !== selectedSuiteId) return s;
@@ -1825,7 +2149,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                     if (p.id !== protocolId) return p;
                     return {
                         ...p,
-                        reviewStatus: 'UNVERIFIED', // Reset status on method update
+                        // 只有当 preserveReviewStatus 为 false 时才重置审核状态
+                        ...(preserveReviewStatus ? {} : { reviewStatus: 'UNVERIFIED' as const }),
                         methods: {
                             ...p.methods,
                             [method]: { ...p.methods[method], ...updates }
@@ -2454,7 +2779,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         batchResult.summary.timeout++;
                     }
 
-                    updateProtocolMethod(protocol.id, methodName, { lastResult: result });
+                    updateProtocolMethod(protocol.id, methodName, { lastResult: result }, true);
 
                     setCurrentRun({ ...run });
                     setBatchTestResult({ ...batchResult });
@@ -2492,7 +2817,14 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         }));
 
         // 添加到测试历史（用于持久化存储）
-        setTestHistory(prev => [run, ...prev].slice(0, 100));
+        setTestHistory(prev => {
+            const newHistory = [run, ...prev].slice(0, 100);
+            // Explicitly trigger DB save
+            AuditDB.syncSaveTestHistory(newHistory).then(() => {
+                console.log('[ProtocolAudit] Test history synced to DB');
+            });
+            return newHistory;
+        });
 
         setRunningTest(null);
         setIsRunning(false);
@@ -2687,12 +3019,60 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
     if (viewMode === 'DASHBOARD') {
         return (
-            <ProjectDashboard
-                projects={projects}
-                onSelect={handleSelectProject}
-                onCreate={handleCreateProject}
-                onDelete={handleDeleteProject}
-            />
+            <>
+                <ProjectDashboard
+                    projects={projects}
+                    onSelect={handleSelectProject}
+                    onCreate={handleCreateProject}
+                    onDelete={handleDeleteProject}
+                    onRename={handleRenameProject}
+                    onDuplicate={handleDuplicateProject}
+                />
+                {/* New Project Modal */}
+                {showNewProjectModal && (
+                    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[200]" onClick={() => setShowNewProjectModal(false)}>
+                        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[450px] shadow-2xl" onClick={e => e.stopPropagation()}>
+                            <h3 className="text-lg font-bold text-white mb-4">Create New Project</h3>
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="text-sm text-slate-400 block mb-2">Project Name *</label>
+                                    <input
+                                        type="text"
+                                        value={newProjectData.name}
+                                        onChange={(e) => setNewProjectData(prev => ({ ...prev, name: e.target.value }))}
+                                        className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-blue-500 outline-none"
+                                        placeholder="e.g. Smart Home V2"
+                                        autoFocus
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-sm text-slate-400 block mb-2">Description</label>
+                                    <textarea
+                                        value={newProjectData.description}
+                                        onChange={(e) => setNewProjectData(prev => ({ ...prev, description: e.target.value }))}
+                                        className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-blue-500 outline-none h-24 resize-none"
+                                        placeholder="Optional project description..."
+                                    />
+                                </div>
+                            </div>
+                            <div className="flex justify-end gap-3 mt-6">
+                                <button
+                                    onClick={() => setShowNewProjectModal(false)}
+                                    className="px-4 py-2 text-slate-400 hover:text-white font-bold transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={confirmCreateProject}
+                                    className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold transition-colors"
+                                >
+                                    Create Project
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </>
         );
     }
 
@@ -2886,14 +3266,14 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                             </tr>
                                                         </thead>
                                                         <tbody className="divide-y divide-slate-800">
-                                                            {(selectedSuite.testRuns || []).length === 0 ? (
+                                                            {testHistory.filter(h => h.suiteId === selectedSuite.id || h.projectId === selectedSuite.id).length === 0 ? (
                                                                 <tr>
                                                                     <td colSpan={7} className="p-8 text-center text-slate-500 text-sm">
                                                                         暂无测试记录
                                                                     </td>
                                                                 </tr>
                                                             ) : (
-                                                                (selectedSuite.testRuns || []).map((run, index) => (
+                                                                testHistory.filter(h => h.suiteId === selectedSuite.id || h.projectId === selectedSuite.id).map((run, index) => (
                                                                     <tr key={run.id} className="hover:bg-slate-800/30 transition-colors select-text group">
                                                                         <td className="p-4 text-sm text-slate-400">{index + 1}</td>
                                                                         <td className="p-4 text-sm font-medium text-white">{run.suiteName}</td>
@@ -4447,6 +4827,50 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                         className="px-6 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg font-bold shadow-lg shadow-red-900/20 transition-all"
                                     >
                                         忽略更改并继续
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    {/* New Project Modal */}
+                    {showNewProjectModal && (
+                        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[200]" onClick={() => setShowNewProjectModal(false)}>
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[450px] shadow-2xl" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-lg font-bold text-white mb-4">Create New Project</h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="text-sm text-slate-400 block mb-2">Project Name *</label>
+                                        <input
+                                            type="text"
+                                            value={newProjectData.name}
+                                            onChange={(e) => setNewProjectData(prev => ({ ...prev, name: e.target.value }))}
+                                            className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-blue-500 outline-none"
+                                            placeholder="e.g. Smart Home V2"
+                                            autoFocus
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="text-sm text-slate-400 block mb-2">Description</label>
+                                        <textarea
+                                            value={newProjectData.description}
+                                            onChange={(e) => setNewProjectData(prev => ({ ...prev, description: e.target.value }))}
+                                            className="w-full bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-700 focus:border-blue-500 outline-none h-24 resize-none"
+                                            placeholder="Optional project description..."
+                                        />
+                                    </div>
+                                </div>
+                                <div className="flex justify-end gap-3 mt-6">
+                                    <button
+                                        onClick={() => setShowNewProjectModal(false)}
+                                        className="px-4 py-2 text-slate-400 hover:text-white font-bold transition-colors"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={confirmCreateProject}
+                                        className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold transition-colors"
+                                    >
+                                        Create Project
                                     </button>
                                 </div>
                             </div>

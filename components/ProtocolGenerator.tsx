@@ -226,6 +226,14 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
     const [selectedProtocols, setSelectedProtocols] = useState<Set<string>>(new Set());
     const [expandedProtocols, setExpandedProtocols] = useState<Set<string>>(new Set());
 
+    // Device Name Confirmation
+    const [showDeviceNameConfirm, setShowDeviceNameConfirm] = useState(false);
+    const [searchDeviceName, setSearchDeviceName] = useState(deviceName);
+
+    useEffect(() => {
+        setSearchDeviceName(deviceName);
+    }, [deviceName]);
+
     // AI 模式相关状态
     const [docMatchMode, setDocMatchMode] = useState<DocMatchMode | null>(null);
     const [aiConfig, setAIConfig] = useState<AIServiceConfig>(() => {
@@ -421,7 +429,8 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
     };
 
     // 开始生成流程
-    const startGeneration = async () => {
+    // 开始生成流程
+    const executeGeneration = async () => {
         // 检查配置 (只需要 URL 和 Token)
         if (!config.baseUrl || !config.accessToken) {
             setShowConfig(true);
@@ -457,7 +466,7 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
 
             // 2. 比对文档 (新增逻辑)
             try {
-                console.log('[ProtocolGenerator] Starting comparison for device:', deviceName);
+                console.log('[ProtocolGenerator] Starting comparison for device:', searchDeviceName);
                 const service = new ConfluenceProtocolService(config);
                 // 尝试加载 SSO cookies
                 if (window.electronAPI?.confluenceGetCookies) {
@@ -479,8 +488,8 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
 
                 // 模糊匹配设备名
                 const targetPage = childPages.find(p =>
-                    deviceName.toLowerCase().includes(p.title.toLowerCase()) ||
-                    p.title.toLowerCase().includes(deviceName.toLowerCase())
+                    searchDeviceName.toLowerCase().includes(p.title.toLowerCase()) ||
+                    p.title.toLowerCase().includes(searchDeviceName.toLowerCase())
                 );
 
                 if (targetPage) {
@@ -563,8 +572,8 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                         }
                     }
                 } else {
-                    console.warn('[ProtocolGenerator] No matching page found for device:', deviceName);
-                    setState(prev => ({ ...prev, comparisonResult: { success: false, message: `未找到与 "${deviceName}" 匹配的文档` } }));
+                    console.warn('[ProtocolGenerator] No matching page found for device:', searchDeviceName);
+                    setState(prev => ({ ...prev, comparisonResult: { success: false, message: `未找到与 "${searchDeviceName}" 匹配的文档` } }));
                 }
             } catch (e: any) {
                 console.warn('[ProtocolGenerator] Protocol comparison failed, skipping:', e);
@@ -585,6 +594,10 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                 error: error.message || '生成失败',
             }));
         }
+    };
+
+    const handleStartClick = () => {
+        setShowDeviceNameConfirm(true);
     };
 
     // 测试 AI 连接
@@ -843,7 +856,7 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
 
     return (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[100]">
-            <div className="bg-slate-900 border border-slate-700 rounded-2xl w-[900px] max-h-[85vh] flex flex-col">
+            <div className="bg-slate-900 border border-slate-700 rounded-2xl w-[1100px] max-h-[85vh] flex flex-col">
                 {/* Header */}
                 <div className="flex items-center justify-between p-6 border-b border-slate-800">
                     <div className="flex items-center gap-3">
@@ -1022,7 +1035,7 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                             </div>
 
                             <button
-                                onClick={startGeneration}
+                                onClick={handleStartClick}
                                 className="px-6 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-xl font-bold text-sm flex items-center gap-2 mx-auto"
                             >
                                 <Play size={18} />
@@ -1186,7 +1199,7 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                     <div className="bg-slate-800/50 rounded-xl border border-slate-700 flex flex-col overflow-hidden">
                                         <div className="p-3 bg-slate-800 border-b border-slate-700 flex items-center justify-between">
                                             <span className="text-sm font-bold text-white flex items-center gap-2">
-                                                <Zap size={14} className="text-yellow-400" /> 仅在设备 Ability 中
+                                                <Zap size={14} className="text-yellow-400 shrink-0" /> 仅在设备中
                                             </span>
                                             <div className="flex items-center gap-2">
                                                 {state.matchedExistingProtocols && state.matchedExistingProtocols.length > 0 && (
@@ -1204,12 +1217,12 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                             {state.matchedExistingProtocols && state.matchedExistingProtocols.length > 0 && (
                                                 <div className="mb-2 pb-2 border-b border-slate-700/50">
                                                     {state.matchedExistingProtocols.map(p => (
-                                                        <div key={p.id} className="flex items-center justify-between p-2 hover:bg-slate-900 rounded group border border-purple-500/20 bg-purple-500/5 mb-1">
-                                                            <div className="flex items-center gap-2 overflow-hidden">
+                                                        <div key={p.id} className="flex items-center justify-between h-8 px-2 hover:bg-slate-900 rounded group border border-purple-500/20 bg-purple-500/5 mb-1">
+                                                            <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0">
                                                                 <Sparkles size={12} className="text-purple-400 shrink-0" />
                                                                 <span className="text-xs font-mono text-purple-300 truncate" title={p.namespace}>{p.namespace}</span>
                                                             </div>
-                                                            <div className="text-[10px] text-purple-400 whitespace-nowrap">
+                                                            <div className="text-[10px] text-purple-400 whitespace-nowrap ml-2">
                                                                 已存在
                                                             </div>
                                                         </div>
@@ -1218,8 +1231,8 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                             )}
 
                                             {state.comparisonData?.onlyInDevice.map(p => (
-                                                <div key={p} className="text-xs text-slate-300 bg-slate-900/50 px-2 py-1.5 rounded border border-slate-700/50">
-                                                    {p}
+                                                <div key={p} className="flex items-center h-8 text-xs text-slate-300 bg-slate-900/50 px-2 rounded border border-slate-700/50">
+                                                    <span className="truncate" title={p}>{p}</span>
                                                 </div>
                                             ))}
                                             {state.comparisonData?.onlyInDevice.length === 0 && (
@@ -1240,8 +1253,8 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                         </div>
                                         <div className="flex-1 overflow-y-auto p-2 space-y-1 select-text">
                                             {state.comparisonData?.matched.map(p => (
-                                                <div key={p} className="text-xs text-slate-300 bg-slate-900/50 px-2 py-1.5 rounded border border-slate-700/50">
-                                                    {p}
+                                                <div key={p} className="flex items-center h-8 text-xs text-slate-300 bg-slate-900/50 px-2 rounded border border-slate-700/50">
+                                                    <span className="truncate" title={p}>{p}</span>
                                                 </div>
                                             ))}
                                             {state.comparisonData?.matched.length === 0 && (
@@ -1262,8 +1275,8 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                         </div>
                                         <div className="flex-1 overflow-y-auto p-2 space-y-1 select-text">
                                             {state.comparisonData?.onlyInDoc.map(p => (
-                                                <div key={p} className="text-xs text-slate-300 bg-slate-900/50 px-2 py-1.5 rounded border border-slate-700/50">
-                                                    {p}
+                                                <div key={p} className="flex items-center h-8 text-xs text-slate-300 bg-slate-900/50 px-2 rounded border border-slate-700/50">
+                                                    <span className="truncate" title={p}>{p}</span>
                                                 </div>
                                             ))}
                                             {state.comparisonData?.onlyInDoc.length === 0 && (
@@ -1721,7 +1734,7 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
 
                                 <div className="flex justify-between pt-4 border-t border-slate-800">
                                     <button
-                                        onClick={() => setState(prev => ({ ...prev, status: 'idle' }))}
+                                        onClick={() => setState(prev => ({ ...prev, status: 'selecting-mode' }))}
                                         className="px-4 py-2 text-slate-400 hover:text-white"
                                     >
                                         返回
@@ -2055,8 +2068,49 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                         )
                     }
                 </div>
-            </div >
-        </div >
+
+                {/* Device Name Confirmation Modal */}
+                {showDeviceNameConfirm && (
+                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[110]">
+                        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-[500px] shadow-2xl">
+                            <h3 className="text-lg font-bold text-white mb-4">确认匹配设备名称</h3>
+                            <p className="text-sm text-slate-400 mb-4">
+                                系统将使用以下名称在 Confluence 中搜索匹配的文档。
+                                <br />
+                                如果文档标题与设备名称不一致（例如使用型号 "MOP320" 而非完整名称），请在此处修改以确保匹配成功。
+                            </p>
+                            <div className="mb-6">
+                                <label className="text-xs text-slate-500 mb-1 block">搜索名称</label>
+                                <input
+                                    type="text"
+                                    value={searchDeviceName}
+                                    onChange={e => setSearchDeviceName(e.target.value)}
+                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white outline-none focus:border-indigo-500"
+                                    autoFocus
+                                />
+                            </div>
+                            <div className="flex justify-end gap-3">
+                                <button
+                                    onClick={() => setShowDeviceNameConfirm(false)}
+                                    className="px-4 py-2 text-slate-400 hover:text-white"
+                                >
+                                    取消
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setShowDeviceNameConfirm(false);
+                                        executeGeneration();
+                                    }}
+                                    className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold"
+                                >
+                                    确认并继续
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
     );
 };
 

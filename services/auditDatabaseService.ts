@@ -6,6 +6,8 @@
  * 2. 支持本地优先和后端优先两种同步策略
  * 3. 自动重试机制
  * 4. 与本地缓存配合使用
+ * 
+ * 修改：适配 Electron IPC 直接调用 MySQL
  */
 
 import { databaseConfig, DatabaseConfig } from './auditDatabaseConfig';
@@ -18,85 +20,54 @@ import {
     loadTestHistory as loadTestHistoryLocal,
 } from './auditStorageService';
 
-// ==================== HTTP Client ====================
+// ==================== IPC Bridge Helper ====================
 
-/**
- * 构建请求头
- */
-function buildHeaders(config: DatabaseConfig): HeadersInit {
-    const headers: HeadersInit = {
-        'Content-Type': 'application/json',
-    };
-
-    switch (config.auth.type) {
-        case 'apiKey':
-            if (config.auth.apiKey) {
-                headers[config.auth.apiKeyHeader || 'X-API-Key'] = config.auth.apiKey;
-            }
-            break;
-        case 'bearer':
-            if (config.auth.token) {
-                headers['Authorization'] = `Bearer ${config.auth.token}`;
-            }
-            break;
-        case 'basic':
-            if (config.auth.username && config.auth.password) {
-                const credentials = btoa(`${config.auth.username}:${config.auth.password}`);
-                headers['Authorization'] = `Basic ${credentials}`;
-            }
-            break;
+// 声明 window.electron 类型 (假设 preload.js 已经暴露了 ipcRenderer)
+declare global {
+    interface Window {
+        electron?: {
+            ipcRenderer: {
+                invoke(channel: string, ...args: any[]): Promise<any>;
+            };
+        };
     }
-
-    return headers;
 }
 
 /**
- * 发送 HTTP 请求（带超时和重试）
+ * 调用 Electron 主进程的数据库方法
  */
-async function fetchWithRetry(
-    url: string,
-    options: RequestInit,
-    retries: number = databaseConfig.syncStrategy.maxRetries
-): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), databaseConfig.timeout);
+async function invokeDB(channel: string, ...args: any[]): Promise<any> {
+    if (typeof window === 'undefined' || !window.electron) {
+        console.warn('[AuditDB] Electron IPC not available (web mode or not ready?)');
+        return null;
+    }
+    try {
+        return await window.electron.ipcRenderer.invoke(channel, ...args);
+    } catch (e) {
+        console.error(`[AuditDB] Failed to invoke ${channel}:`, e);
+        return null;
+    }
+}
+
+/**
+ * 初始化数据库连接
+ */
+export async function connectToDatabase(): Promise<boolean> {
+    if (!databaseConfig.enabled) return false;
 
     try {
-        const response = await fetch(url, {
-            ...options,
-            signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-
-        if (!response.ok && retries > 0 && databaseConfig.syncStrategy.retryOnFail) {
-            console.warn(`[AuditDB] Request failed (${response.status}), retrying... (${retries} left)`);
-            await new Promise(r => setTimeout(r, databaseConfig.syncStrategy.retryDelay));
-            return fetchWithRetry(url, options, retries - 1);
+        const result = await invokeDB('db:connect', databaseConfig.connection);
+        if (result && result.success) {
+            console.log('[AuditDB] Connected to MySQL');
+            return true;
+        } else {
+            console.error('[AuditDB] Connection failed:', result?.error);
+            return false;
         }
-
-        return response;
     } catch (error) {
-        clearTimeout(timeoutId);
-
-        if (retries > 0 && databaseConfig.syncStrategy.retryOnFail) {
-            console.warn(`[AuditDB] Request error, retrying... (${retries} left)`, error);
-            await new Promise(r => setTimeout(r, databaseConfig.syncStrategy.retryDelay));
-            return fetchWithRetry(url, options, retries - 1);
-        }
-
-        throw error;
+        console.error('[AuditDB] Connection error:', error);
+        return false;
     }
-}
-
-/**
- * 替换 URL 中的占位符
- */
-function buildUrl(endpoint: string, params: Record<string, string> = {}): string {
-    let url = `${databaseConfig.baseUrl}${endpoint}`;
-    Object.entries(params).forEach(([key, value]) => {
-        url = url.replace(`:${key}`, encodeURIComponent(value));
-    });
-    return url;
 }
 
 // ==================== Projects API ====================
@@ -105,24 +76,14 @@ function buildUrl(endpoint: string, params: Record<string, string> = {}): string
  * 从后端获取所有项目
  */
 export async function fetchProjectsFromDB(): Promise<StoredAuditProject[]> {
-    if (!databaseConfig.enabled) {
-        return [];
-    }
+    if (!databaseConfig.enabled) return [];
 
     try {
-        const url = buildUrl(databaseConfig.endpoints.projects.list);
-        const response = await fetchWithRetry(url, {
-            method: 'GET',
-            headers: buildHeaders(databaseConfig),
-        });
+        // 确保连接
+        await connectToDatabase();
 
-        if (response.ok) {
-            const data = await response.json();
-            return Array.isArray(data) ? data : (data.projects || data.data || []);
-        }
-
-        console.error('[AuditDB] Failed to fetch projects:', response.status);
-        return [];
+        const projects = await invokeDB('db:getProjects');
+        return Array.isArray(projects) ? projects : [];
     } catch (error) {
         console.error('[AuditDB] Error fetching projects:', error);
         return [];
@@ -130,37 +91,28 @@ export async function fetchProjectsFromDB(): Promise<StoredAuditProject[]> {
 }
 
 /**
+ * 获取单个项目详情（包含协议）
+ * 注意：这是新加的方法，用于按需加载协议
+ */
+export async function fetchProjectDetailsFromDB(projectId: string): Promise<StoredAuditProject | null> {
+    if (!databaseConfig.enabled) return null;
+
+    try {
+        return await invokeDB('db:getProjectWithProtocols', projectId);
+    } catch (error) {
+        console.error('[AuditDB] Error fetching project details:', error);
+        return null;
+    }
+}
+
+/**
  * 保存项目到后端
  */
 export async function saveProjectToDB(project: StoredAuditProject): Promise<boolean> {
-    if (!databaseConfig.enabled) {
-        return false;
-    }
+    if (!databaseConfig.enabled) return false;
 
     try {
-        // 先检查项目是否存在
-        const existingProjects = await fetchProjectsFromDB();
-        const exists = existingProjects.some(p => p.id === project.id);
-
-        const endpoint = exists
-            ? databaseConfig.endpoints.projects.update
-            : databaseConfig.endpoints.projects.create;
-        const method = exists ? 'PUT' : 'POST';
-        const url = buildUrl(endpoint, { id: project.id });
-
-        const response = await fetchWithRetry(url, {
-            method,
-            headers: buildHeaders(databaseConfig),
-            body: JSON.stringify(project),
-        });
-
-        if (response.ok) {
-            console.log(`[AuditDB] Project ${exists ? 'updated' : 'created'}:`, project.id);
-            return true;
-        }
-
-        console.error('[AuditDB] Failed to save project:', response.status);
-        return false;
+        return await invokeDB('db:saveProject', project);
     } catch (error) {
         console.error('[AuditDB] Error saving project:', error);
         return false;
@@ -171,12 +123,12 @@ export async function saveProjectToDB(project: StoredAuditProject): Promise<bool
  * 批量保存项目到后端
  */
 export async function saveAllProjectsToDB(projects: StoredAuditProject[]): Promise<boolean> {
-    if (!databaseConfig.enabled) {
-        return false;
-    }
+    if (!databaseConfig.enabled) return false;
 
     try {
-        // 逐个保存（可以根据后端支持批量接口优化）
+        // 确保连接
+        await connectToDatabase();
+
         const results = await Promise.all(projects.map(p => saveProjectToDB(p)));
         return results.every(r => r);
     } catch (error) {
@@ -189,24 +141,10 @@ export async function saveAllProjectsToDB(projects: StoredAuditProject[]): Promi
  * 从后端删除项目
  */
 export async function deleteProjectFromDB(projectId: string): Promise<boolean> {
-    if (!databaseConfig.enabled) {
-        return false;
-    }
+    if (!databaseConfig.enabled) return false;
 
     try {
-        const url = buildUrl(databaseConfig.endpoints.projects.delete, { id: projectId });
-        const response = await fetchWithRetry(url, {
-            method: 'DELETE',
-            headers: buildHeaders(databaseConfig),
-        });
-
-        if (response.ok) {
-            console.log('[AuditDB] Project deleted:', projectId);
-            return true;
-        }
-
-        console.error('[AuditDB] Failed to delete project:', response.status);
-        return false;
+        return await invokeDB('db:deleteProject', projectId);
     } catch (error) {
         console.error('[AuditDB] Error deleting project:', error);
         return false;
@@ -219,24 +157,12 @@ export async function deleteProjectFromDB(projectId: string): Promise<boolean> {
  * 从后端获取测试历史
  */
 export async function fetchTestHistoryFromDB(): Promise<StoredTestRun[]> {
-    if (!databaseConfig.enabled) {
-        return [];
-    }
+    if (!databaseConfig.enabled) return [];
 
     try {
-        const url = buildUrl(databaseConfig.endpoints.testHistory.list);
-        const response = await fetchWithRetry(url, {
-            method: 'GET',
-            headers: buildHeaders(databaseConfig),
-        });
-
-        if (response.ok) {
-            const data = await response.json();
-            return Array.isArray(data) ? data : (data.history || data.data || []);
-        }
-
-        console.error('[AuditDB] Failed to fetch test history:', response.status);
-        return [];
+        await connectToDatabase();
+        const history = await invokeDB('db:getTestHistory');
+        return Array.isArray(history) ? history : [];
     } catch (error) {
         console.error('[AuditDB] Error fetching test history:', error);
         return [];
@@ -247,25 +173,10 @@ export async function fetchTestHistoryFromDB(): Promise<StoredTestRun[]> {
  * 保存测试记录到后端
  */
 export async function saveTestRunToDB(testRun: StoredTestRun): Promise<boolean> {
-    if (!databaseConfig.enabled) {
-        return false;
-    }
+    if (!databaseConfig.enabled) return false;
 
     try {
-        const url = buildUrl(databaseConfig.endpoints.testHistory.create);
-        const response = await fetchWithRetry(url, {
-            method: 'POST',
-            headers: buildHeaders(databaseConfig),
-            body: JSON.stringify(testRun),
-        });
-
-        if (response.ok) {
-            console.log('[AuditDB] Test run saved:', testRun.id);
-            return true;
-        }
-
-        console.error('[AuditDB] Failed to save test run:', response.status);
-        return false;
+        return await invokeDB('db:saveTestRun', testRun);
     } catch (error) {
         console.error('[AuditDB] Error saving test run:', error);
         return false;
@@ -274,84 +185,38 @@ export async function saveTestRunToDB(testRun: StoredTestRun): Promise<boolean> 
 
 /**
  * 从后端删除测试记录
+ * (目前 MySQL Service 尚未实现此具体方法，暂留空或实现通用删除)
  */
 export async function deleteTestRunFromDB(testRunId: string): Promise<boolean> {
-    if (!databaseConfig.enabled) {
-        return false;
-    }
-
-    try {
-        const url = buildUrl(databaseConfig.endpoints.testHistory.delete, { id: testRunId });
-        const response = await fetchWithRetry(url, {
-            method: 'DELETE',
-            headers: buildHeaders(databaseConfig),
-        });
-
-        if (response.ok) {
-            console.log('[AuditDB] Test run deleted:', testRunId);
-            return true;
-        }
-
-        console.error('[AuditDB] Failed to delete test run:', response.status);
-        return false;
-    } catch (error) {
-        console.error('[AuditDB] Error deleting test run:', error);
-        return false;
-    }
+    // TODO: Implement db:deleteTestRun in mysqlService.js
+    console.warn('[AuditDB] deleteTestRunFromDB not implemented for MySQL yet');
+    return false;
 }
 
 /**
  * 清空后端所有测试历史
  */
 export async function clearTestHistoryFromDB(): Promise<boolean> {
-    if (!databaseConfig.enabled) {
-        return false;
-    }
-
-    try {
-        const url = buildUrl(databaseConfig.endpoints.testHistory.clear);
-        const response = await fetchWithRetry(url, {
-            method: 'DELETE',
-            headers: buildHeaders(databaseConfig),
-        });
-
-        if (response.ok) {
-            console.log('[AuditDB] All test history cleared');
-            return true;
-        }
-
-        console.error('[AuditDB] Failed to clear test history:', response.status);
-        return false;
-    } catch (error) {
-        console.error('[AuditDB] Error clearing test history:', error);
-        return false;
-    }
+    // TODO: Implement db:clearTestHistory in mysqlService.js
+    console.warn('[AuditDB] clearTestHistoryFromDB not implemented for MySQL yet');
+    return false;
 }
 
 // ==================== Sync Functions (Local + Remote) ====================
 
 /**
  * 保存项目（本地 + 后端同步）
- * 根据 syncStrategy.mode 决定同步顺序
  */
 export async function syncSaveProjects(projects: StoredAuditProject[]): Promise<void> {
-    if (databaseConfig.syncStrategy.mode === 'local-first') {
-        // 本地优先：先保存本地，异步同步后端
-        saveProjectsLocal(projects);
-        if (databaseConfig.enabled) {
-            saveAllProjectsToDB(projects).catch(err => {
-                console.error('[AuditDB] Background sync failed:', err);
-            });
-        }
-    } else {
-        // 后端优先：先保存后端，成功后保存本地
-        if (databaseConfig.enabled) {
-            const success = await saveAllProjectsToDB(projects);
-            if (!success) {
-                console.warn('[AuditDB] Remote save failed, saving locally only');
-            }
-        }
-        saveProjectsLocal(projects);
+    // 始终保存本地
+    saveProjectsLocal(projects);
+
+    if (databaseConfig.enabled) {
+        // 异步保存到 MySQL
+        saveAllProjectsToDB(projects).then(success => {
+            if (success) console.log('[AuditDB] Synced projects to MySQL');
+            else console.warn('[AuditDB] Failed to sync projects to MySQL');
+        });
     }
 }
 
@@ -359,26 +224,40 @@ export async function syncSaveProjects(projects: StoredAuditProject[]): Promise<
  * 加载项目（优先本地，后端作为备份/同步源）
  */
 export async function syncLoadProjects(): Promise<StoredAuditProject[]> {
-    // 先加载本地
+    // 1. 加载本地
     let localProjects = loadProjectsLocal();
 
-    // 如果启用了数据库同步，尝试从后端获取
+    // 2. 尝试从 MySQL 加载并合并
     if (databaseConfig.enabled) {
         try {
             const remoteProjects = await fetchProjectsFromDB();
-
             if (remoteProjects.length > 0) {
-                // 合并策略：以更新时间更新的为准
-                const merged = mergeProjects(localProjects, remoteProjects);
+                // 简单合并策略：如果远程有，就用远程的（假设远程是中心源）
+                // 或者保留本地较新的。这里为了简单，我们假设远程是 Truth。
+                // 但注意：remoteProjects 可能不包含 protocols 详情（为了性能）。
+                // 所以我们只更新元数据，protocols 只有在打开项目时才加载。
 
-                // 如果有变化，同步保存
-                if (JSON.stringify(merged) !== JSON.stringify(localProjects)) {
-                    saveProjectsLocal(merged);
-                    localProjects = merged;
-                }
+                // 这里我们做一个简单的 ID 映射合并
+                const merged = [...localProjects];
+                remoteProjects.forEach(rp => {
+                    const index = merged.findIndex(lp => lp.id === rp.id);
+                    if (index >= 0) {
+                        // 更新元数据，保留本地的 protocols (防止被空数组覆盖)
+                        merged[index] = {
+                            ...rp,
+                            protocols: merged[index].protocols // 保留本地协议详情
+                        };
+                    } else {
+                        // 新项目
+                        merged.push(rp);
+                    }
+                });
+
+                localProjects = merged;
+                saveProjectsLocal(localProjects); // 更新本地缓存
             }
         } catch (error) {
-            console.error('[AuditDB] Failed to sync from remote:', error);
+            console.error('[AuditDB] Sync load failed:', error);
         }
     }
 
@@ -386,150 +265,59 @@ export async function syncLoadProjects(): Promise<StoredAuditProject[]> {
 }
 
 /**
- * 保存测试历史（本地 + 后端同步）
+ * 保存测试历史
  */
 export async function syncSaveTestHistory(history: StoredTestRun[]): Promise<void> {
-    if (databaseConfig.syncStrategy.mode === 'local-first') {
-        saveTestHistoryLocal(history);
-        if (databaseConfig.enabled && history.length > 0) {
-            // 只同步最新的一条
-            saveTestRunToDB(history[0]).catch(err => {
-                console.error('[AuditDB] Background sync failed:', err);
-            });
-        }
-    } else {
-        if (databaseConfig.enabled && history.length > 0) {
-            await saveTestRunToDB(history[0]);
-        }
-        saveTestHistoryLocal(history);
+    saveTestHistoryLocal(history);
+    if (databaseConfig.enabled && history.length > 0) {
+        console.log('[AuditDB] Syncing latest test run to MySQL:', history[0].id);
+        // 只同步最新的一条
+        saveTestRunToDB(history[0]).then(success => {
+            if (success) console.log('[AuditDB] Test run saved to MySQL');
+            else console.warn('[AuditDB] Failed to save test run to MySQL');
+        });
     }
 }
 
 /**
- * 加载测试历史（本地 + 后端同步）
+ * 加载测试历史
  */
 export async function syncLoadTestHistory(): Promise<StoredTestRun[]> {
     let localHistory = loadTestHistoryLocal();
-
     if (databaseConfig.enabled) {
-        try {
-            const remoteHistory = await fetchTestHistoryFromDB();
-
-            if (remoteHistory.length > 0) {
-                const merged = mergeTestHistory(localHistory, remoteHistory);
-
-                if (JSON.stringify(merged) !== JSON.stringify(localHistory)) {
-                    saveTestHistoryLocal(merged);
-                    localHistory = merged;
-                }
-            }
-        } catch (error) {
-            console.error('[AuditDB] Failed to sync test history from remote:', error);
+        const remoteHistory = await fetchTestHistoryFromDB();
+        if (remoteHistory.length > 0) {
+            // Use remote history as the source of truth to ensure consistency
+            // This fixes the issue where local storage has stale/ghost records not in DB
+            localHistory = remoteHistory;
+            localHistory.sort((a, b) => b.startTime - a.startTime);
+            saveTestHistoryLocal(localHistory);
         }
     }
-
     return localHistory;
-}
-
-// ==================== Merge Utilities ====================
-
-/**
- * 合并本地和远程项目（以 updatedAt 更新的为准）
- */
-function mergeProjects(
-    local: StoredAuditProject[],
-    remote: StoredAuditProject[]
-): StoredAuditProject[] {
-    const merged = new Map<string, StoredAuditProject>();
-
-    // 先添加本地
-    local.forEach(p => merged.set(p.id, p));
-
-    // 用远程覆盖（如果更新）
-    remote.forEach(remoteProject => {
-        const localProject = merged.get(remoteProject.id);
-        if (!localProject || remoteProject.updatedAt > localProject.updatedAt) {
-            merged.set(remoteProject.id, remoteProject);
-        }
-    });
-
-    return Array.from(merged.values()).sort((a, b) => b.updatedAt - a.updatedAt);
-}
-
-/**
- * 合并本地和远程测试历史（去重并按时间排序）
- */
-function mergeTestHistory(
-    local: StoredTestRun[],
-    remote: StoredTestRun[]
-): StoredTestRun[] {
-    const merged = new Map<string, StoredTestRun>();
-
-    // 添加本地
-    local.forEach(h => merged.set(h.id, h));
-
-    // 添加远程（不覆盖本地）
-    remote.forEach(h => {
-        if (!merged.has(h.id)) {
-            merged.set(h.id, h);
-        }
-    });
-
-    // 按开始时间降序排列，限制100条
-    return Array.from(merged.values())
-        .sort((a, b) => b.startTime - a.startTime)
-        .slice(0, 100);
 }
 
 // ==================== Status & Debug ====================
 
-/**
- * 检查数据库连接状态
- */
 export async function checkDatabaseConnection(): Promise<{
     enabled: boolean;
     connected: boolean;
     error?: string;
 }> {
-    if (!databaseConfig.enabled) {
-        return { enabled: false, connected: false };
-    }
-
-    try {
-        const url = buildUrl(databaseConfig.endpoints.projects.list);
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: buildHeaders(databaseConfig),
-            signal: AbortSignal.timeout(5000),
-        });
-
-        return {
-            enabled: true,
-            connected: response.ok,
-            error: response.ok ? undefined : `HTTP ${response.status}`,
-        };
-    } catch (error) {
-        return {
-            enabled: true,
-            connected: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
-        };
-    }
+    if (!databaseConfig.enabled) return { enabled: false, connected: false };
+    const success = await connectToDatabase();
+    return {
+        enabled: true,
+        connected: success,
+        error: success ? undefined : 'Connection failed'
+    };
 }
 
-/**
- * 获取同步状态信息
- */
-export function getSyncStatus(): {
-    enabled: boolean;
-    mode: 'local-first' | 'remote-first';
-    baseUrl: string;
-    authType: string;
-} {
+export function getSyncStatus() {
     return {
         enabled: databaseConfig.enabled,
         mode: databaseConfig.syncStrategy.mode,
-        baseUrl: databaseConfig.baseUrl,
-        authType: databaseConfig.auth.type,
+        host: databaseConfig.connection.host
     };
 }
+

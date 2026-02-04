@@ -183,3 +183,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.removeAllListeners('serial:disconnected');
   },
 });
+
+// Expose generic IPC renderer for Audit Database Service
+contextBridge.exposeInMainWorld('electron', {
+  ipcRenderer: {
+    invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
+    on: (channel, func) => {
+      const subscription = (event, ...args) => func(event, ...args);
+      ipcRenderer.on(channel, subscription);
+      return () => ipcRenderer.removeListener(channel, subscription);
+    },
+    once: (channel, func) => ipcRenderer.once(channel, (event, ...args) => func(event, ...args)),
+    removeListener: (channel, func) => ipcRenderer.removeListener(channel, func),
+    removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel)
+  }
+});

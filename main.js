@@ -28,6 +28,20 @@ let serialParser = null;
 // MQTT 客户端实例（主进程持有）
 let mqttClient = null;
 
+// MySQL 服务
+// 使用动态导入加载 ESM 模块
+console.log('[Main] Attempting to load MySQL service...');
+import('./services/mysqlService.js').then(({ registerDatabaseHandlers }) => {
+  console.log('[Main] MySQL service loaded, registering handlers...');
+  registerDatabaseHandlers();
+}).catch(err => {
+  console.error('[Main] Failed to load MySQL service:', err);
+});
+
+// 尝试自动连接数据库 (如果配置存在)
+// 注意：这里需要一种方式获取配置，通常存在 config 文件或 store 中
+// 暂时留空，由前端触发连接
+
 // Matter Controller 状态
 let matterInitialized = false;
 
