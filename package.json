@@ -58,6 +58,10 @@
       "preload.js",
       "package.json"
     ],
+    "mac": {
+      "target": "dmg",
+      "identity": null
+    },
     "win": {
       "target": [
         {
