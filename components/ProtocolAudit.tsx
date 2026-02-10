@@ -180,6 +180,8 @@ interface TestRun {
         error?: string;
         testCaseId?: string;
         testCaseName?: string;
+        request?: any;
+        expectedSchema?: any;
     }[];
     summary: {
         total: number;
@@ -2528,7 +2530,14 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         error: e.message,
                         namespace: protocol.namespace,
                         method: methodName,
-                        protocolId: protocol.id
+                        protocolId: protocol.id,
+                        request: {
+                            method: methodName,
+                            topic,
+                            payload: finalPayload,
+                            timestamp: startTime
+                        },
+                        expectedSchema: methodConfig.schema ? JSON.parse(methodConfig.schema) : undefined
                     };
                 }
 
@@ -2559,6 +2568,134 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             protocolId: protocol.id
         };
     };
+
+
+    const waitForPush = async (protocol: ProtocolDefinition): Promise<DetailedTestResult> => {
+        const methodName = 'PUSH';
+        const methodConfig = protocol.methods['PUSH'];
+        if (!methodConfig) return { status: 'FAIL', duration: 0, error: 'No PUSH config' };
+
+        const startTime = Date.now();
+        const timeoutMs = 10000; // Wait 10s for PUSH
+
+        // Initial result container
+        let result: DetailedTestResult = {
+            status: 'PENDING',
+            duration: 0,
+            namespace: protocol.namespace,
+            method: 'PUSH',
+            protocolId: protocol.id,
+            expectedSchema: methodConfig.schema ? JSON.parse(methodConfig.schema) : undefined
+        };
+
+        try {
+            addTestLog('INFO', `Waiting for PUSH from ${protocol.namespace}...`);
+
+            // Capture current last message to identify new ones
+            const startMessage = lastMessageRef.current;
+
+            const response = await new Promise<any>((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error('TIMEOUT_PUSH')), timeoutMs);
+                const checkInterval = setInterval(() => {
+                    const current = lastMessageRef.current;
+                    if (current && current !== startMessage) {
+                        try {
+                            // Support both raw string message and pre-parsed object
+                            let json: any;
+                            if ((current as any).header && (current as any).payload) {
+                                json = current;
+                            } else {
+                                json = JSON.parse(current.message);
+                            }
+
+                            // Check for PUSH method (case insensitive) and namespace
+                            const method = json.header?.method?.toUpperCase();
+                            if ((method === 'PUSH' || method === 'REPORT') &&
+                                json.header.namespace === protocol.namespace) {
+                                clearInterval(checkInterval);
+                                clearTimeout(timer);
+                                resolve(json);
+                            }
+                        } catch (e) { }
+                    }
+                }, 100);
+            });
+
+            const duration = Date.now() - startTime;
+
+            // Validate Schema
+            let schemaErrors: any[] = [];
+            let status: 'PASS' | 'FAIL' = 'PASS';
+            let errorMsg = undefined;
+
+            if (methodConfig.schema) {
+                try {
+                    const schemaObj = JSON.parse(methodConfig.schema);
+                    const validate = new Ajv({ allErrors: true }).compile(schemaObj);
+
+                    // Validate payload or root object
+                    let targetData = response;
+                    // Usually we validate payload for convenience unless schema defines header
+                    if (response && typeof response === 'object' && 'payload' in response && !schemaObj.properties?.header) {
+                        targetData = response.payload;
+                    }
+
+                    if (!validate(targetData)) {
+                        status = 'FAIL';
+                        schemaErrors = validate.errors || [];
+                        errorMsg = 'Schema validation failed';
+                    }
+                } catch (e: any) {
+                    status = 'FAIL';
+                    errorMsg = `Invalid schema: ${e.message}`;
+                }
+            }
+
+            result = {
+                ...result,
+                status,
+                duration,
+                response,
+                error: errorMsg,
+                schemaErrors,
+                request: undefined // PUSH has no request from our side
+            };
+
+            addTestLog(status === 'PASS' ? 'RX' : 'ERROR', status === 'PASS' ? `Received PUSH for ${protocol.namespace}` : `PUSH Validation failed`, {
+                protocol: protocol.namespace,
+                method: 'PUSH',
+                status,
+                duration,
+                responsePayload: response,
+                error: errorMsg,
+                schemaErrors: schemaErrors.length > 0 ? analyzeSchemaErrors(schemaErrors, response) : undefined
+            });
+
+            return result;
+
+        } catch (e: any) {
+            const duration = Date.now() - startTime;
+            const isTimeout = e.message === 'TIMEOUT_PUSH';
+
+            result = {
+                ...result,
+                status: isTimeout ? 'TIMEOUT' : 'FAIL',
+                duration,
+                error: isTimeout ? 'Wait for PUSH timeout' : e.message
+            };
+
+            addTestLog('ERROR', `PUSH Wait Failed: ${e.message}`, {
+                protocol: protocol.namespace,
+                method: 'PUSH',
+                status: result.status,
+                duration,
+                error: e.message
+            });
+
+            return result;
+        }
+    };
+
     const stopTests = () => {
         stopTestRef.current = true;
         setIsRunning(false);
@@ -2685,7 +2822,9 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                             response: result.response,
                             error: result.error,
                             testCaseId: testCase.id,
-                            testCaseName: testCase.name
+                            testCaseName: testCase.name,
+                            request: result.request,
+                            expectedSchema: result.expectedSchema
                         });
 
                         // result 本身就是 DetailedTestResult，直接 push
@@ -2694,6 +2833,50 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         if (result.status === 'PASS') {
                             run.summary.passed++;
                             batchResult.summary.passed++;
+
+                            // [OPTIMIZATION] If SET passed, verify PUSH
+                            if (methodName === 'SET' && protocol.methods['PUSH']?.enabled) {
+                                addTestLog('INFO', `SET passed, waiting for PUSH verification...`);
+
+                                // Visual feedback
+                                setRunningTest(`${protocol.id}:PUSH`);
+                                setTestProgress(prev => prev ? { ...prev, currentProtocol: `${protocol.namespace} PUSH (Wait)` } : null);
+
+                                const pushResult = await waitForPush(protocol);
+
+                                run.summary.total++;
+                                batchResult.summary.total++;
+                                // Add PUSH result
+                                run.results.push({
+                                    protocolId: protocol.id,
+                                    namespace: protocol.namespace,
+                                    method: 'PUSH',
+                                    status: pushResult.status,
+                                    duration: pushResult.duration,
+                                    response: pushResult.response,
+                                    error: pushResult.error,
+                                    testCaseId: testCase.id, // Associate with test case
+                                    testCaseName: `PUSH Verification (after ${testCase.name})`,
+                                    request: pushResult.request,
+                                    expectedSchema: pushResult.expectedSchema
+                                });
+                                batchResult.results.push(pushResult);
+
+                                if (pushResult.status === 'PASS') {
+                                    run.summary.passed++;
+                                    batchResult.summary.passed++;
+                                } else if (pushResult.status === 'TIMEOUT') {
+                                    run.summary.timeout++;
+                                    batchResult.summary.timeout++;
+                                } else {
+                                    run.summary.failed++;
+                                    batchResult.summary.failed++;
+                                }
+
+                                // We don't necessarily update protocol-level lastResult for test cases, 
+                                // as it might overwrite others. But strictly speaking PUSH is protocol level.
+                                updateProtocolMethod(protocol.id, 'PUSH', { lastResult: pushResult }, true);
+                            }
                         } else if (result.status === 'FAIL') {
                             run.summary.failed++;
                             batchResult.summary.failed++;
@@ -2762,7 +2945,9 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         status: result.status,
                         duration: result.duration,
                         response: result.response,
-                        error: result.error
+                        error: result.error,
+                        request: result.request,
+                        expectedSchema: result.expectedSchema
                     });
 
                     // result 本身就是 DetailedTestResult，直接 push
@@ -2771,6 +2956,48 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                     if (result.status === 'PASS') {
                         run.summary.passed++;
                         batchResult.summary.passed++;
+
+                        // [OPTIMIZATION] If SET passed, verify PUSH
+                        if (methodName === 'SET' && protocol.methods['PUSH']?.enabled) {
+                            addTestLog('INFO', `SET passed, waiting for PUSH verification...`);
+
+                            // Visual feedback
+                            setRunningTest(`${protocol.id}:PUSH`);
+                            setTestProgress(prev => prev ? { ...prev, currentProtocol: `${protocol.namespace} PUSH (Wait)` } : null);
+
+                            const pushResult = await waitForPush(protocol);
+
+                            run.summary.total++;
+                            batchResult.summary.total++;
+                            // Add PUSH result
+                            run.results.push({
+                                protocolId: protocol.id,
+                                namespace: protocol.namespace,
+                                method: 'PUSH',
+                                status: pushResult.status,
+                                duration: pushResult.duration,
+                                response: pushResult.response,
+                                response: pushResult.response,
+                                error: pushResult.error,
+                                request: pushResult.request,
+                                expectedSchema: pushResult.expectedSchema
+                            });
+                            batchResult.results.push(pushResult);
+
+                            if (pushResult.status === 'PASS') {
+                                run.summary.passed++;
+                                batchResult.summary.passed++;
+                            } else if (pushResult.status === 'TIMEOUT') {
+                                run.summary.timeout++;
+                                batchResult.summary.timeout++;
+                            } else {
+                                run.summary.failed++;
+                                batchResult.summary.failed++;
+                            }
+
+                            updateProtocolMethod(protocol.id, 'PUSH', { lastResult: pushResult }, true);
+                        }
+
                     } else if (result.status === 'FAIL') {
                         run.summary.failed++;
                         batchResult.summary.failed++;

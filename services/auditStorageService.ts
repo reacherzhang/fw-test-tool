@@ -91,6 +91,8 @@ export interface StoredTestResult {
     error?: string;
     testCaseId?: string;
     testCaseName?: string;
+    request?: any;
+    expectedSchema?: any;
 }
 
 export interface StoredTestRun {
