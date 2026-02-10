@@ -31,9 +31,32 @@ let mqttClient = null;
 // MySQL 服务
 // 使用动态导入加载 ESM 模块
 console.log('[Main] Attempting to load MySQL service...');
-import('./services/mysqlService.js').then(({ registerDatabaseHandlers }) => {
+import('./services/mysqlService.js').then(async ({ registerDatabaseHandlers, initDatabase }) => {
   console.log('[Main] MySQL service loaded, registering handlers...');
   registerDatabaseHandlers();
+
+  // 自动尝试连接数据库 (硬编码配置以确保生产环境可用)
+  console.log('[Main] Auto-connecting to Audit Database...');
+  const dbConfig = {
+    host: '47.108.183.147',
+    port: 3306,
+    user: 'root',
+    password: 's9yBmj3CraDpKLaGAN',
+    database: 'iot_nexus_audit',
+    connectTimeout: 10000
+  };
+
+  try {
+    const result = await initDatabase(dbConfig);
+    if (result.success) {
+      console.log('[Main] ✅ Database auto-connection successful');
+    } else {
+      console.error('[Main] ❌ Database auto-connection failed:', result.error);
+      // 可以在这里发送 IPC 通知给前端显示错误
+    }
+  } catch (e) {
+    console.error('[Main] Database init exception:', e);
+  }
 }).catch(err => {
   console.error('[Main] Failed to load MySQL service:', err);
 });
