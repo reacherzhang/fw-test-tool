@@ -1342,6 +1342,56 @@ ipcMain.handle('provision:setWifi', async (event, { ip, wifiConfig, session }) =
 
 // ========== END PROVISIONING ==========
 
+// ========== PROTOCOL HANDLING (Deep Linking) ==========
+
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient('meross-qa', process.execPath, [path.resolve(process.argv[1])]);
+  }
+} else {
+  app.setAsDefaultProtocolClient('meross-qa');
+}
+
+// 单实例锁已在外部获取（假设），此处仅处理事件监听
+// （注意：实际代码中应保证单实例锁逻辑正确，这里假定原本代码已有锁，或我们在此补充）
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine) => {
+    // 当运行第二个实例时，聚焦到这个窗口
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+
+      const url = commandLine.find(arg => arg.startsWith('meross-qa://'));
+      if (url) handleDeepLink(url);
+    }
+  });
+
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    if (win) handleDeepLink(url);
+  });
+}
+
+function handleDeepLink(rawUrl) {
+  try {
+    const urlObj = new URL(rawUrl);
+    const token = urlObj.searchParams.get('token');
+    const user = urlObj.searchParams.get('user');
+    const server = urlObj.searchParams.get('server');
+
+    if (token && win) {
+      console.log('[Protocol] Sending login data to renderer...');
+      win.webContents.send('protocol:login', { token, user, server });
+    }
+  } catch (e) {
+    console.error('[Protocol] Error parsing URL:', e);
+  }
+}
+
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', async () => {
