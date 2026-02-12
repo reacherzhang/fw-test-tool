@@ -1392,7 +1392,21 @@ function handleDeepLink(rawUrl) {
   }
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+
+  // Handle deep link on cold start (Windows)
+  if (process.platform === 'win32' && process.argv.length > 1) {
+    const deepLinkUrl = process.argv.find((arg) => arg.startsWith('meross-qa://'));
+    if (deepLinkUrl) {
+      // Wait for window to be ready to receive IPC
+      win.webContents.once('did-finish-load', () => {
+        console.log('[Main] Processing startup deep link:', deepLinkUrl);
+        handleDeepLink(deepLinkUrl);
+      });
+    }
+  }
+});
 
 app.on('window-all-closed', async () => {
   // 关闭 Matter Controller
