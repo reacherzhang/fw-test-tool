@@ -11,8 +11,8 @@
     "electron:dev": "vite build && electron .",
     "start": "electron .",
     "package": "npm run build && electron-builder",
-    "build:win": "npm run build && electron-builder --win --x64 -c.publish.provider=github -p always",
-    "build:mac": "npm run build && electron-builder --mac --x64 -c.publish.provider=github -p always",
+    "build:win": "npm run build && electron-builder --win --x64 -c.publish.provider=github -c.publish.releaseType=release -p always",
+    "build:mac": "npm run build && electron-builder --mac --x64 -c.publish.provider=github -c.publish.releaseType=release -p always",
     "release": "node scripts/release.js"
   },
   "author": "Nexus Team",
