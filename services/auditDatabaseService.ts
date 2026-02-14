@@ -188,9 +188,14 @@ export async function saveTestRunToDB(testRun: StoredTestRun): Promise<boolean> 
  * (目前 MySQL Service 尚未实现此具体方法，暂留空或实现通用删除)
  */
 export async function deleteTestRunFromDB(testRunId: string): Promise<boolean> {
-    // TODO: Implement db:deleteTestRun in mysqlService.js
-    console.warn('[AuditDB] deleteTestRunFromDB not implemented for MySQL yet');
-    return false;
+    if (!databaseConfig.enabled) return false;
+
+    try {
+        return await invokeDB('db:deleteTestRun', testRunId);
+    } catch (error) {
+        console.error('[AuditDB] Error deleting test run:', error);
+        return false;
+    }
 }
 
 /**

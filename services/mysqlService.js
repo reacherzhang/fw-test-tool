@@ -282,4 +282,16 @@ export function registerDatabaseHandlers() {
             return [];
         }
     });
+
+    // 删除测试记录
+    ipcMain.handle('db:deleteTestRun', async (event, testRunId) => {
+        if (!pool) return false;
+        try {
+            await pool.execute('DELETE FROM test_runs WHERE id = ?', [testRunId]);
+            return true;
+        } catch (error) {
+            console.error('[MySQL] deleteTestRun error:', error);
+            return false;
+        }
+    });
 }

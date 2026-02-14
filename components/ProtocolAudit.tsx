@@ -1427,6 +1427,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
     const [showNewProjectModal, setShowNewProjectModal] = useState(false);
     const [newProjectData, setNewProjectData] = useState({ name: '', description: '' });
+    const [confirmDialog, setConfirmDialog] = useState<{ show: boolean; title: string; message: string; onConfirm: () => void }>({ show: false, title: '', message: '', onConfirm: () => { } });
 
     const handleCreateProject = () => {
         setNewProjectData({ name: '', description: '' });
@@ -1476,6 +1477,26 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             setActiveProject(null);
             setViewMode('DASHBOARD');
         }
+    };
+
+    const handleDeleteTestRun = (testRun: TestRun) => {
+        setConfirmDialog({
+            show: true,
+            title: 'Confirm Delete',
+            message: `Are you sure you want to delete test run from ${new Date(testRun.startTime).toLocaleString()}?`,
+            onConfirm: () => {
+                // Update local state
+                setTestHistory(prev => prev.filter(h => h.id !== testRun.id));
+
+                // Delete from DB
+                AuditDB.deleteTestRunFromDB(testRun.id).then(success => {
+                    if (success) showToast('success', 'Test run deleted');
+                    else showToast('error', 'Failed to delete test run from database');
+                });
+
+                setConfirmDialog({ show: false, title: '', message: '', onConfirm: () => { } });
+            }
+        });
     };
 
     const handleSelectProject = (project: AuditProject) => {
@@ -3554,6 +3575,12 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                                                 >
                                                                                     导出
                                                                                 </button>
+                                                                                <button
+                                                                                    onClick={() => handleDeleteTestRun(run)}
+                                                                                    className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded transition-colors"
+                                                                                >
+                                                                                    删除
+                                                                                </button>
                                                                             </div>
                                                                         </td>
                                                                     </tr>
@@ -5100,6 +5127,29 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                         className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold transition-colors"
                                     >
                                         Create Project
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    {/* Generic Confirmation Modal */}
+                    {confirmDialog.show && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[200] backdrop-blur-sm" onClick={() => setConfirmDialog(prev => ({ ...prev, show: false }))}>
+                            <div className="bg-slate-900 rounded-2xl p-6 max-w-sm w-full mx-4 border border-slate-700 shadow-2xl" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-lg font-bold text-white mb-2">{confirmDialog.title}</h3>
+                                <p className="text-sm text-slate-400 mb-6">{confirmDialog.message}</p>
+                                <div className="flex justify-end gap-3">
+                                    <button
+                                        onClick={() => setConfirmDialog(prev => ({ ...prev, show: false }))}
+                                        className="px-4 py-2 text-slate-400 hover:text-white text-sm"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={confirmDialog.onConfirm}
+                                        className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-bold shadow-lg shadow-red-900/20"
+                                    >
+                                        Confirm
                                     </button>
                                 </div>
                             </div>
