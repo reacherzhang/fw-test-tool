@@ -108,25 +108,6 @@ function createWindow() {
     win.loadURL('http://localhost:5173').catch(() => {
       win.loadFile('index.html');
     });
-
-    // 开发模式：添加快捷键支持
-    win.webContents.on('before-input-event', (event, input) => {
-      // F5 刷新页面
-      if (input.key === 'F5') {
-        win.webContents.reload();
-        event.preventDefault();
-      }
-      // F12 开发者工具
-      if (input.key === 'F12') {
-        win.webContents.toggleDevTools();
-        event.preventDefault();
-      }
-      // Ctrl+R 刷新
-      if (input.control && input.key.toLowerCase() === 'r') {
-        win.webContents.reload();
-        event.preventDefault();
-      }
-    });
   } else {
     // 生产环境下加载构建好的文件
     const indexPath = path.join(__dirname, 'dist', 'index.html');
@@ -139,6 +120,25 @@ function createWindow() {
       win.loadFile(path.join(__dirname, 'index.html'));
     }
   }
+
+  // 启用全局快捷键（F12, F5, Ctrl+R），方便生产环境调试
+  win.webContents.on('before-input-event', (event, input) => {
+    // F5 刷新页面
+    if (input.key === 'F5') {
+      win.webContents.reload();
+      event.preventDefault();
+    }
+    // F12 开发者工具
+    if (input.key === 'F12') {
+      win.webContents.toggleDevTools();
+      event.preventDefault();
+    }
+    // Ctrl+R 刷新
+    if (input.control && input.key.toLowerCase() === 'r') {
+      win.webContents.reload();
+      event.preventDefault();
+    }
+  });
 }
 
 // 通用的原生请求处理器，绕过所有浏览器层面的限制
