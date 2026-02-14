@@ -17,8 +17,13 @@ import { MatterDashboard } from './components/MatterDashboard';
 import { ProtocolAudit } from './components/ProtocolAudit';
 import DeviceDiscoveryModal from './components/DeviceDiscoveryModal';
 import ErrorBoundary from './components/ErrorBoundary';
+import pkg from './package.json';
 
 const App: React.FC = () => {
+  useEffect(() => {
+    document.title = `IoT Nexus v${pkg.version}`;
+  }, []);
+
   const [session, setSession] = useState<CloudSession | null>(null);
   const [currentView, setCurrentView] = useState<'DASHBOARD' | 'LAB' | 'CLOUD_LAB' | 'MATTER' | 'SETTINGS' | 'DEVICE_DETAIL' | 'AUDIT'>('DASHBOARD');
   const [lastMqttMessage, setLastMqttMessage] = useState<any>(null);
@@ -911,7 +916,7 @@ const App: React.FC = () => {
             <div className="flex items-center gap-5">
               <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-2xl shadow-indigo-600/20"><Database className="text-white" size={28} /></div>
               <div>
-                <h1 className="text-2xl font-black text-white uppercase tracking-tighter italic">IoT Nexus</h1>
+                <h1 className="text-2xl font-black text-white uppercase tracking-tighter italic">IoT Nexus <span className="text-sm not-italic text-slate-500 ml-2">v{pkg.version}</span></h1>
                 <p className="text-[10px] text-slate-600 font-black uppercase tracking-[0.3em] mt-0.5">Enterprise Core Console</p>
               </div>
             </div>
