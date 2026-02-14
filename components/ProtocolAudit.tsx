@@ -1703,7 +1703,9 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             // Check DB Connection first
             const dbStatus = await AuditDB.checkDatabaseConnection();
             if (!dbStatus.connected && dbStatus.enabled) {
-                showToast('error', `Database Connection Failed: ${dbStatus.error || 'Unknown error'}`);
+                const errMsg = `Database Connection Failed: ${dbStatus.error || 'Unknown error'}`;
+                console.error('[ProtocolAudit]', errMsg);
+                showToast('error', errMsg);
             } else if (dbStatus.connected) {
                 console.log('[ProtocolAudit] Database connected successfully');
             }

@@ -49,13 +49,18 @@ import('./services/mysqlService.js').then(async ({ registerDatabaseHandlers, ini
   try {
     const result = await initDatabase(dbConfig);
     if (result.success) {
-      console.log('[Main] ✅ Database auto-connection successful');
+      console.log(`[Main] [${new Date().toISOString()}] ✅ Database auto-connection successful`);
     } else {
-      console.error('[Main] ❌ Database auto-connection failed:', result.error);
-      // 可以在这里发送 IPC 通知给前端显示错误
+      console.error(`[Main] [${new Date().toISOString()}] ❌ Database auto-connection failed:`, result.error);
+      // Send error to frontend once window is ready
+      if (win) {
+        win.webContents.on('did-finish-load', () => {
+          win.webContents.send('db:connection-error', result.error);
+        });
+      }
     }
   } catch (e) {
-    console.error('[Main] Database init exception:', e);
+    console.error(`[Main] [${new Date().toISOString()}] Database init exception:`, e);
   }
 }).catch(err => {
   console.error('[Main] Failed to load MySQL service:', err);

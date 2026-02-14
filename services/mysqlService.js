@@ -37,7 +37,7 @@ export async function initDatabase(config) {
     }
 
     try {
-        console.log(`[MySQL] Initializing connection pool to ${config.host}:${config.port} (${config.user})`);
+        console.log(`[MySQL] [${new Date().toISOString()}] Initializing connection pool to ${config.host}:${config.port} (${config.user})`);
 
         pool = mysql.createPool({
             host: config.host,
@@ -53,12 +53,22 @@ export async function initDatabase(config) {
 
         // 测试连接
         const connection = await pool.getConnection();
-        console.log('[MySQL] Connected successfully to database:', config.database);
+        console.log(`[MySQL] [${new Date().toISOString()}] Connected successfully to database:`, config.database);
         connection.release();
         return { success: true };
     } catch (error) {
-        console.error('[MySQL] Connection failed:', error.code, error.message);
-        return { success: false, error: `[${error.code}] ${error.message}` };
+        console.error(`[MySQL] [${new Date().toISOString()}] Connection failed:`, {
+            code: error.code,
+            errno: error.errno,
+            syscall: error.syscall,
+            address: error.address,
+            port: error.port,
+            message: error.message
+        });
+        return {
+            success: false,
+            error: `Connection failed: [${error.code}] ${error.message} (Host: ${config.host})`
+        };
     }
 }
 
