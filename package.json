@@ -64,7 +64,8 @@
       "dist/**/*",
       "main.js",
       "preload.js",
-      "package.json"
+      "package.json",
+      "services/**/*"
     ],
     "mac": {
       "target": "dmg",
