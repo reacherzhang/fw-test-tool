@@ -85,12 +85,112 @@ export async function initDatabase(config) {
 }
 
 /**
+ * 确保 client_status 表存在 (在 audit_db 中)
+ */
+async function ensureClientStatusTable() {
+    if (!pool) return;
+    try {
+        await pool.execute(`
+            CREATE TABLE IF NOT EXISTS client_status (
+                trigger_by VARCHAR(100) PRIMARY KEY,
+                client_version VARCHAR(50) DEFAULT '',
+                meross_email VARCHAR(200) DEFAULT '',
+                meross_user_id VARCHAR(100) DEFAULT '',
+                meross_region VARCHAR(100) DEFAULT '',
+                http_domain VARCHAR(200) DEFAULT '',
+                mqtt_domain VARCHAR(200) DEFAULT '',
+                device_name VARCHAR(200) DEFAULT '',
+                device_uuid VARCHAR(200) DEFAULT '',
+                device_type VARCHAR(100) DEFAULT '',
+                device_firmware VARCHAR(100) DEFAULT '',
+                device_hardware VARCHAR(100) DEFAULT '',
+                device_mac VARCHAR(100) DEFAULT '',
+                device_ip VARCHAR(50) DEFAULT '',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        `);
+        console.log('[MySQL] client_status table ensured');
+    } catch (e) {
+        console.warn('[MySQL] Failed to create client_status table:', e.message);
+    }
+}
+
+/**
+ * 写入客户端状态到数据库
+ */
+async function reportClientStatus(triggerBy, type, data) {
+    if (!pool || !triggerBy) return { success: false, error: 'Not ready' };
+    try {
+        // 确保表存在
+        await ensureClientStatusTable();
+
+        if (type === 'launch') {
+            await pool.execute(`
+                INSERT INTO client_status (trigger_by, client_version, updated_at)
+                VALUES (?, ?, NOW())
+                ON DUPLICATE KEY UPDATE client_version = VALUES(client_version), updated_at = NOW()
+            `, [triggerBy, data.client_version || clientVersion]);
+        } else if (type === 'login') {
+            await pool.execute(`
+                INSERT INTO client_status (trigger_by, meross_email, meross_user_id, meross_region, http_domain, mqtt_domain, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, NOW())
+                ON DUPLICATE KEY UPDATE
+                    meross_email = VALUES(meross_email),
+                    meross_user_id = VALUES(meross_user_id),
+                    meross_region = VALUES(meross_region),
+                    http_domain = VALUES(http_domain),
+                    mqtt_domain = VALUES(mqtt_domain),
+                    updated_at = NOW()
+            `, [
+                triggerBy,
+                data.email || '', data.userId || '', data.region || '',
+                data.httpDomain || '', data.mqttDomain || ''
+            ]);
+        } else if (type === 'device') {
+            await pool.execute(`
+                INSERT INTO client_status (trigger_by, device_name, device_uuid, device_type, device_firmware, device_hardware, device_mac, device_ip, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                ON DUPLICATE KEY UPDATE
+                    device_name = VALUES(device_name),
+                    device_uuid = VALUES(device_uuid),
+                    device_type = VALUES(device_type),
+                    device_firmware = VALUES(device_firmware),
+                    device_hardware = VALUES(device_hardware),
+                    device_mac = VALUES(device_mac),
+                    device_ip = VALUES(device_ip),
+                    updated_at = NOW()
+            `, [
+                triggerBy,
+                data.name || '', data.uuid || '', data.type || '',
+                data.firmware || '', data.hardware || '',
+                data.mac || '', data.ip || ''
+            ]);
+        }
+        console.log(`[MySQL] Client status '${type}' reported for ${triggerBy}`);
+        return { success: true };
+    } catch (e) {
+        console.error('[MySQL] reportClientStatus error:', e.message);
+        return { success: false, error: e.message };
+    }
+}
+
+/**
  * 注册 IPC 处理程序
  */
 export function registerDatabaseHandlers() {
     // 初始化连接
     ipcMain.handle('db:connect', async (event, config) => {
-        return await initDatabase(config);
+        const result = await initDatabase(config);
+        if (result.success) {
+            // 数据库连接成功后，自动建表并写入版本号
+            await ensureClientStatusTable();
+        }
+        return result;
+    });
+
+    // 客户端状态上报 (直接写数据库)
+    ipcMain.handle('db:reportStatus', async (event, { triggerBy, type, data }) => {
+        return await reportClientStatus(triggerBy, type, data);
     });
 
     // 通用查询接口 (仅供内部服务使用，慎用)

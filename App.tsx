@@ -79,33 +79,24 @@ const App: React.FC = () => {
     setGlobalLogs(prev => [...prev.slice(-199), newEntry]);
   }, []);
 
-  // ========== QA Center 状态上报 ==========
+  // ========== QA Center 状态上报 (直接写入数据库) ==========
   const reportToQACenter = useCallback(async (
-    serverUrl: string, token: string, user: string,
+    user: string,
     reportType: 'launch' | 'login' | 'device',
     reportData: Record<string, any>
   ) => {
-    if (!serverUrl || !window.electronAPI?.nativeRequest) return;
+    if (!window.electron?.ipcRenderer) return;
     try {
-      const apiUrl = `${serverUrl.replace(/\/$/, '')}/api/iotnexus/audit/test-runs/report-status/`;
-      await window.electronAPI.nativeRequest({
-        url: apiUrl,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Token ${token}`
-        },
-        body: JSON.stringify({
-          type: reportType,
-          trigger_by: user,
-          data: reportData
-        })
+      await window.electron.ipcRenderer.invoke('db:reportStatus', {
+        triggerBy: user || qaUser || 'anonymous',
+        type: reportType,
+        data: reportData
       });
-      console.log(`[QA Report] ${reportType} reported successfully`);
+      console.log(`[QA Report] ${reportType} saved to sync database.`);
     } catch (e: any) {
       console.warn(`[QA Report] Failed to report ${reportType}:`, e.message);
     }
-  }, []);
+  }, [qaUser]);
 
   // 监听深链唤起，获取 QA 后端信息
   useEffect(() => {
@@ -114,20 +105,29 @@ const App: React.FC = () => {
       if (data.server) setQaServerUrl(data.server);
       if (data.user) setQaUser(data.user);
       if (data.token) setQaToken(data.token);
-      // 立即上报客户端版本
-      if (data.server && data.token) {
-        reportToQACenter(data.server, data.token, data.user || '', 'launch', {
-          client_version: pkg.version
-        });
-      }
+
+      // 获得用户信息后，上报 launch 事件
+      reportToQACenter(data.user || '', 'launch', {
+        client_version: pkg.version
+      });
     });
-    return () => { if (typeof cleanup === 'function') cleanup(); };
-  }, [reportToQACenter]);
+
+    // 如果应用直接启动（没有传入信息），也尝试上报一个基本的启动记录
+    // 延迟 2 秒稍微等应用完全启动并建立数据库连接
+    const timer = setTimeout(() => {
+      reportToQACenter(qaUser || 'anonymous', 'launch', { client_version: pkg.version });
+    }, 2000);
+
+    return () => {
+      if (typeof cleanup === 'function') cleanup();
+      clearTimeout(timer);
+    };
+  }, [reportToQACenter, qaUser]);
 
   // 登录 Meross 成功后上报账号信息
   useEffect(() => {
-    if (session && session.guid !== 'PENDING' && qaServerUrl && qaToken) {
-      reportToQACenter(qaServerUrl, qaToken, qaUser, 'login', {
+    if (session && session.guid !== 'PENDING') {
+      reportToQACenter(qaUser || 'anonymous', 'login', {
         email: session.email,
         userId: session.uid,
         region: '',
@@ -135,7 +135,7 @@ const App: React.FC = () => {
         mqttDomain: session.mqttDomain
       });
     }
-  }, [session?.guid, qaServerUrl, qaToken]);
+  }, [session?.guid, qaUser, reportToQACenter]);
 
   const handleMqttPublish = useCallback(async (topic: string, message: string) => {
     if (!window.electronAPI?.mqttPublish) {
@@ -857,17 +857,15 @@ const App: React.FC = () => {
             console.log(`[AutoUpdate] Received System.All GETACK. UUID: ${deviceId}`);
 
             // 上报设备信息到 QA Center
-            if (qaServerUrl && qaToken) {
-              reportToQACenter(qaServerUrl, qaToken, qaUser, 'device', {
-                name: hardware?.type || '',
-                uuid: deviceId,
-                type: hardware?.type || '',
-                firmware: firmware?.version || '',
-                hardware: hardware?.version || '',
-                mac: hardware?.macAddress || firmware?.wifiMac || '',
-                ip: innerIp || ''
-              });
-            }
+            reportToQACenter(qaUser || 'anonymous', 'device', {
+              name: hardware?.type || '',
+              uuid: deviceId,
+              type: hardware?.type || '',
+              firmware: firmware?.version || '',
+              hardware: hardware?.version || '',
+              mac: hardware?.macAddress || firmware?.wifiMac || '',
+              ip: innerIp || ''
+            });
 
             setDevices(prev => {
               let hasChange = false;
