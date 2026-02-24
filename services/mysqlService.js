@@ -1,5 +1,17 @@
-import { ipcMain } from 'electron';
+import { ipcMain, app } from 'electron';
 import mysql from 'mysql2/promise';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+// 获取客户端版本号
+let clientVersion = 'Unknown';
+try {
+    const pkgPath = join(app.getAppPath(), 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+    clientVersion = pkg.version || 'Unknown';
+} catch (e) {
+    console.warn('[MySQL] Failed to read client version:', e.message);
+}
 
 let pool = null;
 
@@ -254,6 +266,7 @@ export function registerDatabaseHandlers() {
             // 将 results 详情合并到 summary 中保存，前端需要从 summary.results 获取每个协议的详细数据
             const summaryWithResults = {
                 ...testRun.summary,
+                clientVersion: clientVersion,
                 results: (testRun.results || []).map(r => ({
                     protocolId: r.protocolId,
                     namespace: r.namespace,
