@@ -34,6 +34,11 @@ const App: React.FC = () => {
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
+  // QA Center 上报相关
+  const [qaServerUrl, setQaServerUrl] = useState<string>('');
+  const [qaUser, setQaUser] = useState<string>('');
+  const [qaToken, setQaToken] = useState<string>('');
+
   const [isLogEnabled, setIsLogEnabled] = useState(false);
   const [isLogVisible, setIsLogVisible] = useState(false);
 
@@ -73,6 +78,64 @@ const App: React.FC = () => {
     };
     setGlobalLogs(prev => [...prev.slice(-199), newEntry]);
   }, []);
+
+  // ========== QA Center 状态上报 ==========
+  const reportToQACenter = useCallback(async (
+    serverUrl: string, token: string, user: string,
+    reportType: 'launch' | 'login' | 'device',
+    reportData: Record<string, any>
+  ) => {
+    if (!serverUrl || !window.electronAPI?.nativeRequest) return;
+    try {
+      const apiUrl = `${serverUrl.replace(/\/$/, '')}/api/iotnexus/audit/test-runs/report-status/`;
+      await window.electronAPI.nativeRequest({
+        url: apiUrl,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Token ${token}`
+        },
+        body: JSON.stringify({
+          type: reportType,
+          trigger_by: user,
+          data: reportData
+        })
+      });
+      console.log(`[QA Report] ${reportType} reported successfully`);
+    } catch (e: any) {
+      console.warn(`[QA Report] Failed to report ${reportType}:`, e.message);
+    }
+  }, []);
+
+  // 监听深链唤起，获取 QA 后端信息
+  useEffect(() => {
+    if (!window.electron?.ipcRenderer) return;
+    const cleanup = window.electron.ipcRenderer.on('protocol:login', (_event: any, data: any) => {
+      if (data.server) setQaServerUrl(data.server);
+      if (data.user) setQaUser(data.user);
+      if (data.token) setQaToken(data.token);
+      // 立即上报客户端版本
+      if (data.server && data.token) {
+        reportToQACenter(data.server, data.token, data.user || '', 'launch', {
+          client_version: pkg.version
+        });
+      }
+    });
+    return () => { if (typeof cleanup === 'function') cleanup(); };
+  }, [reportToQACenter]);
+
+  // 登录 Meross 成功后上报账号信息
+  useEffect(() => {
+    if (session && session.guid !== 'PENDING' && qaServerUrl && qaToken) {
+      reportToQACenter(qaServerUrl, qaToken, qaUser, 'login', {
+        email: session.email,
+        userId: session.uid,
+        region: '',
+        httpDomain: session.httpDomain,
+        mqttDomain: session.mqttDomain
+      });
+    }
+  }, [session?.guid, qaServerUrl, qaToken]);
 
   const handleMqttPublish = useCallback(async (topic: string, message: string) => {
     if (!window.electronAPI?.mqttPublish) {
@@ -792,41 +855,55 @@ const App: React.FC = () => {
 
           if (deviceId) {
             console.log(`[AutoUpdate] Received System.All GETACK. UUID: ${deviceId}`);
+
+            // 上报设备信息到 QA Center
+            if (qaServerUrl && qaToken) {
+              reportToQACenter(qaServerUrl, qaToken, qaUser, 'device', {
+                name: hardware?.type || '',
+                uuid: deviceId,
+                type: hardware?.type || '',
+                firmware: firmware?.version || '',
+                hardware: hardware?.version || '',
+                mac: hardware?.macAddress || firmware?.wifiMac || '',
+                ip: innerIp || ''
+              });
+            }
+
             setDevices(prev => {
               let hasChange = false;
               const newDevices = prev.map(d => {
                 if (d.id.toLowerCase() === deviceId.toLowerCase()) {
                   const updates: Partial<Device> = {};
 
-                  if (innerIp && d.ip !== innerIp) {
-                    console.log(`[AutoUpdate] Updating IP: ${d.ip} -> ${innerIp}`);
+                  if (innerIp && innerIp !== '0.0.0.0' && d.ip !== innerIp) {
                     updates.ip = innerIp;
                   }
-
                   if (firmware?.version && d.firmwareVersion !== firmware.version) {
                     updates.firmwareVersion = firmware.version;
                   }
-
                   if (hardware?.version && d.hardwareVersion !== hardware.version) {
                     updates.hardwareVersion = hardware.version;
                   }
-
-                  // 保存完整的 devInfo 到 config 中以便显示
-                  const devInfo = {
-                    ...firmware,
-                    ...hardware,
-                    mac: firmware?.wifiMac || hardware?.macAddress
-                  };
-
-                  // 检查 devInfo 是否有变化 (简单比较)
-                  const currentDevInfo = d.config?.devInfo;
-                  if (JSON.stringify(currentDevInfo) !== JSON.stringify(devInfo)) {
-                    updates.config = { ...d.config, devInfo };
+                  if (hardware?.subType && d.subType !== hardware.subType) {
+                    updates.subType = hardware.subType;
                   }
 
                   if (Object.keys(updates).length > 0) {
                     hasChange = true;
-                    return { ...d, ...updates };
+                    return {
+                      ...d,
+                      ...updates,
+                      status: DeviceStatus.ONLINE,
+                      onlineStatusCode: 1,
+                      config: {
+                        ...d.config,
+                        systemInfo: {
+                          hardware: hardware || {},
+                          firmware: firmware || {},
+                          online: system?.online || {}
+                        }
+                      }
+                    };
                   }
                 }
                 return d;

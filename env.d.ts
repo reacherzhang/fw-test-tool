@@ -206,6 +206,15 @@ interface Window {
     onSerialDisconnected: (callback: () => void) => void;
     removeSerialListeners: () => void;
   };
+  electron?: {
+    ipcRenderer: {
+      invoke(channel: string, ...args: any[]): Promise<any>;
+      on(channel: string, func: (event: any, ...args: any[]) => void): (() => void) | void;
+      once(channel: string, func: (event: any, ...args: any[]) => void): void;
+      removeListener(channel: string, func: (...args: any[]) => void): void;
+      removeAllListeners(channel: string): void;
+    };
+  };
 }
 
 // mDNS 发现的设备类型
