@@ -251,12 +251,31 @@ export function registerDatabaseHandlers() {
         INSERT INTO test_runs (id, project_id, start_time, end_time, summary, trigger_by)
         VALUES (?, ?, ?, ?, ?, ?)
       `;
+            // 将 results 详情合并到 summary 中保存，前端需要从 summary.results 获取每个协议的详细数据
+            const summaryWithResults = {
+                ...testRun.summary,
+                results: (testRun.results || []).map(r => ({
+                    protocolId: r.protocolId,
+                    namespace: r.namespace,
+                    method: r.method,
+                    status: r.status,
+                    duration: r.duration,
+                    error: r.error,
+                    request: r.request,
+                    response: r.response,
+                    expectedSchema: r.expectedSchema,
+                    schemaErrors: r.schemaErrors,
+                    testCaseId: r.testCaseId,
+                    testCaseName: r.testCaseName,
+                    startTime: r.startTime
+                }))
+            };
             await pool.execute(sql, [
                 testRun.id,
                 testRun.projectId || testRun.suiteId, // 兼容 suiteId
                 toMysqlDateTime(testRun.startTime),
                 toMysqlDateTime(testRun.endTime),
-                JSON.stringify(testRun.summary),
+                JSON.stringify(summaryWithResults),
                 testRun.triggerBy || 'User'
             ]);
             return true;
