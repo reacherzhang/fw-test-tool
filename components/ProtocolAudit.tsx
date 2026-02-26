@@ -1814,6 +1814,11 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         }
     }, [activeProject]);
 
+    // Phase P0 Bugfix: Clear selected protocols when switching suites
+    useEffect(() => {
+        setSelectedProtocols(new Set());
+    }, [selectedSuiteId]);
+
     // Sync suites changes back to activeProject and projects (Auto-save)
     useEffect(() => {
         if (!activeProject || suites.length === 0) return;
@@ -3371,6 +3376,29 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
         outerLoop: for (const protocol of protocolsToRun) {
             if (stopTestRef.current) break;
+
+            // 每开始一个新的协议前，固定等待3秒缓冲时间，确保设备TCP并发能力
+            setRunningTest(`${protocol.id}:wait`);
+            for (let i = 3; i > 0; i--) {
+                setTestProgress(prev => prev ? {
+                    ...prev,
+                    currentProtocol: `准备阶段: ${protocol.namespace}`,
+                    stepCurrent: 1,
+                    stepTotal: 1,
+                    stepDescription: `为防止设备处理阻塞，进行物理缓冲等待`,
+                    countdown: i
+                } : null);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                await checkPause();
+                if (stopTestRef.current) break outerLoop;
+            }
+            setTestProgress(prev => prev ? {
+                ...prev,
+                countdown: undefined,
+                stepDescription: undefined,
+                stepCurrent: undefined,
+                stepTotal: undefined
+            } : null);
 
             // ===== 自定义执行计划分流 =====
             if (protocol.executionPlan?.enabled && protocol.executionPlan.steps.length > 0) {
