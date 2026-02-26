@@ -401,14 +401,18 @@ export function registerDatabaseHandlers() {
         if (!pool) return [];
         try {
             const [rows] = await pool.execute('SELECT * FROM test_runs ORDER BY start_time DESC LIMIT 100');
-            return rows.map(row => ({
-                id: row.id,
-                projectId: row.project_id,
-                startTime: new Date(row.start_time).getTime(),
-                endTime: new Date(row.end_time).getTime(),
-                summary: JSON.parse(row.summary || '{}'),
-                triggerBy: row.trigger_by
-            }));
+            return rows.map(row => {
+                const summaryData = JSON.parse(row.summary || '{}');
+                return {
+                    id: row.id,
+                    projectId: row.project_id,
+                    startTime: new Date(row.start_time).getTime(),
+                    endTime: new Date(row.end_time).getTime(),
+                    summary: summaryData,
+                    results: summaryData.results || [],
+                    triggerBy: row.trigger_by
+                };
+            });
         } catch (error) {
             console.error('[MySQL] getTestHistory error:', error);
             return [];

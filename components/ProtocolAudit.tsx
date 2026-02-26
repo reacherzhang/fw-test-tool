@@ -3,8 +3,8 @@ import {
     ShieldCheck, Play, Plus, Trash2, ChevronRight, ChevronDown, ChevronLeft,
     CheckCircle, XCircle, AlertTriangle, Edit3, FolderOpen,
     RefreshCw, Copy, Zap, ArrowRight, Download, Upload, FileJson,
-    Package, Clock, History, Send, Check, X, Wand2, BarChart3, FileText, MoreVertical, Settings, Search,
-    CheckCircle2, HelpCircle, AlertCircle, Circle, Info, Activity, ArrowDownCircle, Save, Bell, AlignLeft, ArrowUp, ArrowDown
+    Package, Clock, History, Send, Check, X, Wand2, BarChart3, FileText, MoreVertical, Settings, Search, Pause, Square, Minimize2, Maximize2,
+    CheckCircle2, HelpCircle, AlertCircle, Circle, Info, Activity, ArrowDownCircle, Save, Bell, AlignLeft, ArrowUp, ArrowDown, ListOrdered, GripVertical
 } from 'lucide-react';
 import Ajv from 'ajv';
 import { CloudSession, Device } from '../types';
@@ -13,6 +13,7 @@ import { ProtocolGenerator } from './ProtocolGenerator';
 import { TestResultViewer, DetailedTestResult, TestRequest, TestResponse, SchemaValidationError, BatchTestResult } from './TestResultViewer';
 import { TestStatisticsDashboard, TestRunHistory } from './TestStatisticsDashboard';
 import { TestCaseEditor, TestCase } from './TestCaseEditor';
+import { ExecutionPlanEditor, ManualInputDialog, TestExecutionPlan, TestStep, StepType, StepConfig, ManualField } from './ExecutionPlanEditor';
 import * as AuditStorage from '../services/auditStorageService';
 import * as AuditDB from '../services/auditDatabaseService';
 import { databaseConfig } from '../services/auditDatabaseConfig';
@@ -40,6 +41,7 @@ interface ProtocolDefinition {
     reviewStatus?: 'UNVERIFIED' | 'VERIFIED';
     verificationMode?: 'direct' | 'manual';
     tags?: string[]; // New: Tags for categorization
+    executionPlan?: TestExecutionPlan; // 自定义测试执行计划
 }
 
 interface AuditProject {
@@ -57,6 +59,7 @@ interface AuditProject {
 
 type RequestMethod = 'GET' | 'SET' | 'PUSH' | 'SYNC' | 'DELETE';
 type AckMethod = 'GETACK' | 'SETACK' | 'PUSHACK' | 'SYNCACK' | 'DELETEACK';
+type EditingTarget = RequestMethod | 'executionPlan'; // 扩展编辑目标类型
 const ALL_METHODS: RequestMethod[] = ['GET', 'SET', 'PUSH', 'SYNC', 'DELETE'];
 const REQUEST_METHODS: RequestMethod[] = ['GET', 'SET', 'SYNC', 'DELETE']; // Active request methods (not PUSH)
 const METHOD_TO_ACK: Record<RequestMethod, AckMethod> = {
@@ -589,6 +592,76 @@ const ProjectDashboard: React.FC<{
     );
 };
 
+const SortProtocolsModal: React.FC<{
+    protocols: ProtocolDefinition[];
+    onClose: () => void;
+    onSave: (newOrderIds: string[]) => void;
+}> = ({ protocols, onClose, onSave }) => {
+    const [order, setOrder] = useState<ProtocolDefinition[]>(protocols);
+    const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
+
+    const handleDragStart = (e: React.DragEvent, idx: number) => {
+        setDraggedIdx(idx);
+        e.dataTransfer.effectAllowed = 'move';
+        // Need to set data to make drag work in some browsers
+        e.dataTransfer.setData('text/html', e.currentTarget.parentNode as unknown as string);
+    };
+
+    const handleDragOver = (e: React.DragEvent, idx: number) => {
+        e.preventDefault();
+        if (draggedIdx === null || draggedIdx === idx) return;
+
+        const newOrder = [...order];
+        const draggedItem = newOrder[draggedIdx];
+        newOrder.splice(draggedIdx, 1);
+        newOrder.splice(idx, 0, draggedItem);
+
+        setDraggedIdx(idx);
+        setOrder(newOrder);
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black/60 z-[150] flex items-center justify-center p-4 backdrop-blur-sm">
+            <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[400px] flex flex-col max-h-[80vh]">
+                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-800/50 rounded-t-xl">
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                        <ListOrdered size={16} className="text-indigo-400" />
+                        拖拽调整执行顺序
+                    </h3>
+                    <button onClick={onClose} className="text-slate-400 hover:text-white transition-colors">
+                        <X size={18} />
+                    </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar">
+                    {order.map((p, idx) => (
+                        <div
+                            key={p.id}
+                            draggable
+                            onDragStart={(e) => handleDragStart(e, idx)}
+                            onDragOver={(e) => handleDragOver(e, idx)}
+                            onDragEnd={() => setDraggedIdx(null)}
+                            className={`flex items-center gap-3 p-3 rounded-lg border ${draggedIdx === idx ? 'bg-indigo-900 border-indigo-500 opacity-50' : 'bg-slate-800 border-slate-700'} hover:border-slate-500 cursor-grab active:cursor-grabbing transition-colors`}
+                        >
+                            <GripVertical size={16} className="text-slate-500 shrink-0" />
+                            <span className="text-sm text-slate-300 font-mono truncate">{p.namespace}</span>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="p-4 border-t border-slate-800 flex justify-end gap-3 bg-slate-900 rounded-b-xl">
+                    <button onClick={onClose} className="px-4 py-2 hover:bg-slate-800 text-slate-300 rounded-lg text-sm font-medium transition-colors">
+                        取消
+                    </button>
+                    <button onClick={() => onSave(order.map(o => o.id))} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-900/20">
+                        确定并应用
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const TestPlanPanel: React.FC<{
     suites: ProtocolTestSuite[];
     selectedSuiteId: string | null;
@@ -602,7 +675,7 @@ const TestPlanPanel: React.FC<{
     selectedProtocols: Set<string>;
     onToggleProtocolSelection: (id: string, selected: boolean) => void;
     onToggleSuiteSelection: (suite: ProtocolTestSuite, selected: boolean) => void;
-    onSelectAllProtocols: (selected: boolean) => void;
+    onToggleFilteredProtocols: (ids: string[], selected: boolean) => void;
     verificationErrorSuiteId: string | null;
     getProtocolStatus: (p: ProtocolDefinition) => any;
     STATUS_CONFIG: any;
@@ -622,14 +695,17 @@ const TestPlanPanel: React.FC<{
     onDeleteSuite: (id: string) => void;
     onDeleteProtocol: (id: string) => void;
     onMoveProtocol: (id: string, direction: 'up' | 'down') => void;
+    onReorderProtocols: (newOrderIds: string[]) => void;
 }> = ({
     suites, selectedSuiteId, selectedProtocolId, onSelectSuite, onSelectProtocol,
     searchTerm, onSearchChange, expandedSuites, toggleSuiteExpand,
     selectedProtocols, onToggleProtocolSelection, onToggleSuiteSelection,
-    verificationErrorSuiteId, getProtocolStatus, STATUS_CONFIG, onQuickRun, runningTest,
+    onToggleFilteredProtocols, verificationErrorSuiteId, getProtocolStatus, STATUS_CONFIG, onQuickRun, runningTest,
     onAddSuite, onImportSuite, onAutoGen, mqttConnected, targetDevice, devices, targetDeviceId, setTargetDeviceId,
-    onShowStats, onEditSuite, onExportSuite, onDeleteSuite, onDeleteProtocol, onMoveProtocol
+    onShowStats, onEditSuite, onExportSuite, onDeleteSuite, onDeleteProtocol, onMoveProtocol, onReorderProtocols
 }) => {
+        const [showSortModal, setShowSortModal] = useState(false);
+
         return (
             <div className="w-80 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0 overflow-hidden h-full">
                 {/* Toolbar */}
@@ -654,7 +730,7 @@ const TestPlanPanel: React.FC<{
                 </div>
 
                 {/* Flat Protocol List */}
-                <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
+                <div className="flex-1 flex flex-col min-h-0">
                     {(() => {
                         // Flatten protocols from the selected suite (or first suite)
                         const activeSuite = suites.find(s => s.id === selectedSuiteId) || suites[0];
@@ -662,45 +738,85 @@ const TestPlanPanel: React.FC<{
 
                         const displayProtocols = activeSuite.protocols.filter(p => !searchTerm || p.namespace.toLowerCase().includes(searchTerm.toLowerCase()) || p.name.toLowerCase().includes(searchTerm.toLowerCase()));
 
-                        return displayProtocols.map(protocol => {
-                            const isProtoSelected = selectedProtocolId === protocol.id;
+                        const allSelected = displayProtocols.length > 0 && displayProtocols.every(p => selectedProtocols.has(p.id));
+                        const someSelected = displayProtocols.some(p => selectedProtocols.has(p.id));
 
-                            // 基于 reviewStatus 直接决定图标和颜色
-                            const isVerified = protocol.reviewStatus === 'VERIFIED';
-                            const StatusIcon = isVerified ? CheckCircle2 : AlertTriangle;
-                            const statusColor = isVerified ? 'text-emerald-500' : 'text-amber-500';
-                            const statusTitle = isVerified ? '已审核' : '未审核';
-
-                            return (
-                                <div key={protocol.id} className={`group/proto flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-all ${isProtoSelected ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/20' : `text-slate-400 hover:bg-slate-800 hover:text-slate-200`}`}
-                                    onClick={(e) => { e.stopPropagation(); onSelectProtocol(protocol); }}>
-
-                                    <div onClick={e => e.stopPropagation()} className="flex items-center">
-                                        <input type="checkbox" checked={selectedProtocols.has(protocol.id)} onChange={(e) => onToggleProtocolSelection(protocol.id, e.target.checked)}
-                                            className={`w-4 h-4 rounded border-slate-600 bg-slate-800 accent-emerald-500 cursor-pointer ${isProtoSelected ? 'border-white/50' : ''}`} />
-                                    </div>
-
-                                    <span className="flex-1 text-sm font-medium truncate font-mono" title={protocol.namespace}>{protocol.namespace}</span>
-
-                                    {/* Delete Button - Visible on Hover */}
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            onDeleteProtocol(protocol.id);
-                                        }}
-                                        className={`p-1 rounded-md opacity-0 group-hover/proto:opacity-100 transition-opacity ${isProtoSelected ? 'hover:bg-indigo-500 text-indigo-200 hover:text-white' : 'hover:bg-slate-700 text-slate-500 hover:text-red-400'}`}
-                                        title="删除协议"
-                                    >
-                                        <Trash2 size={14} />
+                        return (
+                            <>
+                                {/* 批量操作区 */}
+                                <div className="px-5 py-2 flex items-center justify-between bg-slate-800/50 border-y border-slate-800 shrink-0">
+                                    <label className="flex items-center gap-2 cursor-pointer group w-full">
+                                        <input
+                                            type="checkbox"
+                                            checked={allSelected}
+                                            ref={input => { if (input) input.indeterminate = someSelected && !allSelected; }}
+                                            onChange={(e) => onToggleFilteredProtocols(displayProtocols.map(p => p.id), e.target.checked)}
+                                            className="w-4 h-4 rounded border-slate-600 bg-slate-800 accent-emerald-500 cursor-pointer"
+                                        />
+                                        <span className="text-[11px] font-bold text-slate-400 group-hover:text-slate-300">
+                                            全选 / 取消全选 <span className="text-slate-500 font-normal">({displayProtocols.length})</span>
+                                        </span>
+                                    </label>
+                                    <button onClick={() => setShowSortModal(true)} className="p-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="列表顺序调整">
+                                        <ListOrdered size={14} />
                                     </button>
-
-                                    {/* Status Icon (Right aligned) - 基于审核状态 */}
-                                    <div title={statusTitle}>
-                                        <StatusIcon size={16} className={`${isProtoSelected ? 'text-white/80' : statusColor} shrink-0`} />
-                                    </div>
                                 </div>
-                            );
-                        });
+
+                                <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
+                                    {displayProtocols.map((protocol, idx) => {
+                                        const isProtoSelected = selectedProtocolId === protocol.id;
+
+                                        // 基于 reviewStatus 直接决定图标和颜色
+                                        const isVerified = protocol.reviewStatus === 'VERIFIED';
+                                        const StatusIcon = isVerified ? CheckCircle2 : AlertTriangle;
+                                        const statusColor = isVerified ? 'text-emerald-500' : 'text-amber-500';
+                                        const statusTitle = isVerified ? '已审核' : '未审核';
+
+                                        return (
+                                            <div key={protocol.id} className={`group/proto flex items-center gap-2 pl-2 pr-1 py-2.5 rounded-lg cursor-pointer transition-all ${isProtoSelected ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/20' : `text-slate-400 hover:bg-slate-800 hover:text-slate-200`}`}
+                                                onClick={(e) => { e.stopPropagation(); onSelectProtocol(protocol); }}>
+
+                                                <div onClick={e => e.stopPropagation()} className="flex items-center shrink-0">
+                                                    <input type="checkbox" checked={selectedProtocols.has(protocol.id)} onChange={(e) => onToggleProtocolSelection(protocol.id, e.target.checked)}
+                                                        className={`w-4 h-4 rounded border-slate-600 bg-slate-800 accent-emerald-500 cursor-pointer ${isProtoSelected ? 'border-white/50' : ''}`} />
+                                                </div>
+
+                                                <span className="flex-1 text-sm font-medium truncate font-mono min-w-0" title={protocol.namespace}>{protocol.namespace}</span>
+
+                                                {/* Delete Button - Visible on Hover */}
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        onDeleteProtocol(protocol.id);
+                                                    }}
+                                                    className={`p-1 rounded-md opacity-0 group-hover/proto:opacity-100 transition-opacity shrink-0 ${isProtoSelected ? 'hover:bg-indigo-500 text-indigo-200 hover:text-white' : 'hover:bg-slate-700 text-slate-500 hover:text-red-400'}`}
+                                                    title="删除协议"
+                                                >
+                                                    <Trash2 size={14} />
+                                                </button>
+
+                                                {/* Status Icon (Right aligned) - 基于审核状态 */}
+                                                <div title={statusTitle} className="shrink-0">
+                                                    <StatusIcon size={16} className={`${isProtoSelected ? 'text-white/80' : statusColor}`} />
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {/* 排列弹窗 */}
+                                {showSortModal && (
+                                    <SortProtocolsModal
+                                        protocols={displayProtocols}
+                                        onClose={() => setShowSortModal(false)}
+                                        onSave={(newOrder) => {
+                                            onReorderProtocols(newOrder);
+                                            setShowSortModal(false);
+                                        }}
+                                    />
+                                )}
+                            </>
+                        );
                     })()}
                 </div>
                 <div className="p-2 border-t border-slate-800">
@@ -1580,7 +1696,34 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     }, []);
 
     // P1 Optimization: Test Progress Tracking
-    const [testProgress, setTestProgress] = useState<{ current: number; total: number; currentProtocol: string; startTime: number } | null>(null);
+    const [testProgressMinimized, setTestProgressMinimized] = useState(false);
+    const [testProgress, setTestProgress] = useState<{
+        current: number; total: number; currentProtocol: string; startTime: number;
+        stepCurrent?: number; stepTotal?: number; stepDescription?: string;
+        stepType?: StepType; countdown?: number; waitingForUser?: boolean;
+    } | null>(null);
+
+    // 执行计划：手动操作暂停弹窗
+    const [manualActionModal, setManualActionModal] = useState<{
+        show: boolean;
+        instruction: string;
+        confirmText: string;
+        protocolName: string;
+        stepIndex: number;
+        totalSteps: number;
+        resolve?: () => void;
+    } | null>(null);
+
+    // 执行计划：手动输入弹窗
+    const [manualInputModal, setManualInputModal] = useState<{
+        show: boolean;
+        fields: ManualField[];
+        protocolName: string;
+        targetMethod: string;
+        stepIndex: number;
+        totalSteps: number;
+        resolve?: (values: Record<string, any>) => void;
+    } | null>(null);
 
     // Audit Confirmation State
     const [auditConfirmation, setAuditConfirmation] = useState<{
@@ -1598,6 +1741,14 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
     // Stop test control
     const stopTestRef = useRef(false);
+    const isPausedRef = useRef(false);
+    const [isPaused, setIsPaused] = useState(false);
+
+    const checkPause = async () => {
+        while (isPausedRef.current && !stopTestRef.current) {
+            await new Promise(r => setTimeout(r, 500));
+        }
+    };
 
     // Batch selection for protocols
     const [selectedProtocols, setSelectedProtocols] = useState<Set<string>>(new Set());
@@ -1705,7 +1856,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
     const [autoScroll, setAutoScroll] = useState(true);
     const [rightPanelTab, setRightPanelTab] = useState<'overview' | 'edit' | 'results' | 'review'>('overview');
     const [viewingRunId, setViewingRunId] = useState<string | null>(null);
-    const [editingMethod, setEditingMethod] = useState<RequestMethod>('GET');
+    const [editingMethod, setEditingMethod] = useState<EditingTarget>('GET');
 
     // Copy Protocol
     const [showCopyProtocolModal, setShowCopyProtocolModal] = useState(false);
@@ -2603,7 +2754,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
         // Initial result container
         let result: DetailedTestResult = {
-            status: 'PENDING',
+            status: 'FAIL',
             duration: 0,
             namespace: protocol.namespace,
             method: 'PUSH',
@@ -2719,11 +2870,410 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         }
     };
 
+    // ==================== 自定义执行计划引擎 ====================
+
+    /** 将手动输入的值按 JSON path 写入 payload */
+    const applyManualInputToPayload = (payload: string, fields: ManualField[], values: Record<string, any>): string => {
+        try {
+            const obj = JSON.parse(payload);
+            for (const field of fields) {
+                const parts = field.path.split('.');
+                let current = obj;
+                for (let i = 0; i < parts.length - 1; i++) {
+                    const key = parts[i];
+                    if (/^\d+$/.test(key)) {
+                        current = current[parseInt(key)];
+                    } else {
+                        if (!current[key]) current[key] = {};
+                        current = current[key];
+                    }
+                }
+                const lastKey = parts[parts.length - 1];
+                let val = values[field.path];
+                // 类型转换
+                if (field.type === 'number') val = Number(val);
+                if (field.type === 'boolean') val = val === 'true' || val === true;
+                if (/^\d+$/.test(lastKey)) {
+                    current[parseInt(lastKey)] = val;
+                } else {
+                    current[lastKey] = val;
+                }
+            }
+            return JSON.stringify(obj);
+        } catch (e) {
+            console.error('[ExecutionPlan] Failed to apply manual input:', e);
+            return payload;
+        }
+    };
+
+    /** 获取步骤默认描述 */
+    const getStepDefaultDescription = (step: TestStep): string => {
+        switch (step.type) {
+            case 'send_request': return `发送 ${step.config.method || 'GET'} 请求`;
+            case 'wait_push': return '等待设备 PUSH';
+            case 'delay': return `延时 ${((step.config.duration || 3000) / 1000).toFixed(1)} 秒`;
+            case 'manual_action': return step.config.instruction || '等待手动操作';
+            case 'manual_input': return `输入 ${(step.config.fields || []).length} 个参数`;
+            case 'prerequisite': return `前置: ${step.config.protocolNamespace || ''}`;
+            default: return '';
+        }
+    };
+
+    /** 按自定义执行计划逐步执行一个协议的测试 */
+    const executeCustomPlan = async (
+        protocol: ProtocolDefinition,
+        plan: TestExecutionPlan,
+        run: any, // TestRun
+        batchResult: BatchTestResult,
+        currentTestIndexRef: { value: number },
+        totalTests: number
+    ): Promise<void> => {
+        const steps = [...plan.steps].sort((a, b) => a.order - b.order);
+        // 临时 payload 覆盖存储（手动输入后修改的 payload）
+        const payloadOverrides: Record<string, string> = {};
+
+        addTestLog('INFO', `[执行计划] 开始执行 ${protocol.namespace}，共 ${steps.length} 个步骤`);
+
+        for (let i = 0; i < steps.length; i++) {
+            await checkPause();
+            if (stopTestRef.current) break;
+
+            const step = steps[i];
+            const stepDesc = step.description || getStepDefaultDescription(step);
+
+            // 更新进度
+            setTestProgress(prev => prev ? {
+                ...prev,
+                current: currentTestIndexRef.value,
+                currentProtocol: protocol.namespace,
+                stepCurrent: i + 1,
+                stepTotal: steps.length,
+                stepDescription: stepDesc,
+                stepType: step.type,
+                countdown: undefined,
+                waitingForUser: false,
+            } : null);
+
+            addTestLog('INFO', `[步骤 ${i + 1}/${steps.length}] ${stepDesc}`);
+
+            try {
+                switch (step.type) {
+                    case 'send_request': {
+                        const method = step.config.method as RequestMethod || 'GET';
+                        setRunningTest(`${protocol.id}:${method}`);
+                        currentTestIndexRef.value++;
+                        setTestProgress(prev => prev ? { ...prev, current: currentTestIndexRef.value } : null);
+
+                        // 如果有手动输入覆盖的 payload，临时替换
+                        const originalPayload = protocol.methods[method]?.payload;
+                        if (payloadOverrides[method] && protocol.methods[method]) {
+                            (protocol.methods[method] as any).payload = payloadOverrides[method];
+                        }
+
+                        const result = await runSingleTest(protocol, method, false);
+
+                        // 恢复原始 payload
+                        if (originalPayload !== undefined && protocol.methods[method]) {
+                            (protocol.methods[method] as any).payload = originalPayload;
+                        }
+
+                        // 记录结果
+                        run.results.push({
+                            protocolId: protocol.id,
+                            namespace: protocol.namespace,
+                            method,
+                            status: result.status,
+                            duration: result.duration,
+                            response: result.response,
+                            error: result.error,
+                            request: result.request,
+                            expectedSchema: result.expectedSchema,
+                            schemaErrors: result.schemaErrors,
+                        });
+                        batchResult.results.push(result);
+
+                        run.summary.total++;
+                        batchResult.summary.total++;
+                        if (result.status === 'PASS') { run.summary.passed++; batchResult.summary.passed++; }
+                        else if (result.status === 'TIMEOUT') { run.summary.timeout++; batchResult.summary.timeout++; }
+                        else { run.summary.failed++; batchResult.summary.failed++; }
+
+                        // 失败时检查是否终止
+                        if (result.status !== 'PASS' && !step.continueOnFail) {
+                            addTestLog('ERROR', `[步骤 ${i + 1}] ${method} 失败，终止后续步骤`);
+                            return;
+                        }
+                        break;
+                    }
+
+                    case 'wait_push': {
+                        const pushTimeout = step.timeout || 15000;
+                        setRunningTest(`${protocol.id}:PUSH`);
+
+                        // 倒计时显示
+                        const countdownInterval = setInterval(() => {
+                            setTestProgress(prev => {
+                                if (!prev) return null;
+                                const elapsed = Date.now() - (prev.startTime || Date.now());
+                                const remaining = Math.max(0, Math.ceil((pushTimeout - (elapsed % pushTimeout)) / 1000));
+                                return { ...prev, countdown: remaining };
+                            });
+                        }, 500);
+
+                        try {
+                            const result = await waitForPush(protocol);
+                            clearInterval(countdownInterval);
+
+                            run.results.push({
+                                protocolId: protocol.id,
+                                namespace: protocol.namespace,
+                                method: 'PUSH',
+                                status: result.status,
+                                duration: result.duration,
+                                response: result.response,
+                                error: result.error,
+                                request: result.request,
+                                expectedSchema: result.expectedSchema,
+                                schemaErrors: result.schemaErrors,
+                            });
+                            batchResult.results.push(result);
+
+                            run.summary.total++;
+                            batchResult.summary.total++;
+                            if (result.status === 'PASS') { run.summary.passed++; batchResult.summary.passed++; }
+                            else if (result.status === 'TIMEOUT') { run.summary.timeout++; batchResult.summary.timeout++; }
+                            else { run.summary.failed++; batchResult.summary.failed++; }
+
+                            if (result.status !== 'PASS' && !step.continueOnFail) {
+                                addTestLog('ERROR', `[步骤 ${i + 1}] PUSH 等待失败，终止后续步骤`);
+                                return;
+                            }
+                        } catch (e) {
+                            clearInterval(countdownInterval);
+                            if (!step.continueOnFail) return;
+                        }
+                        break;
+                    }
+
+                    case 'delay': {
+                        const duration = step.config.duration || 3000;
+                        const startTime = Date.now();
+
+                        await new Promise<void>((resolve) => {
+                            const interval = setInterval(() => {
+                                const elapsed = Date.now() - startTime;
+                                const remaining = Math.max(0, Math.ceil((duration - elapsed) / 1000));
+                                setTestProgress(prev => prev ? { ...prev, countdown: remaining, stepDescription: `延时等待 ${remaining} 秒...` } : null);
+
+                                if (elapsed >= duration || stopTestRef.current) {
+                                    clearInterval(interval);
+                                    resolve();
+                                }
+                            }, 200);
+                        });
+                        break;
+                    }
+
+                    case 'manual_action': {
+                        setTestProgress(prev => prev ? { ...prev, waitingForUser: true, stepDescription: step.config.instruction || '等待手动操作' } : null);
+
+                        await new Promise<void>((resolve) => {
+                            setManualActionModal({
+                                show: true,
+                                instruction: step.config.instruction || '请执行手动操作',
+                                confirmText: step.config.confirmText || '已完成，继续',
+                                protocolName: protocol.namespace,
+                                stepIndex: i + 1,
+                                totalSteps: steps.length,
+                                resolve,
+                            });
+                        });
+
+                        setManualActionModal(null);
+                        addTestLog('INFO', `[步骤 ${i + 1}] 手动操作已确认`);
+                        break;
+                    }
+
+                    case 'manual_input': {
+                        const fields = step.config.fields || [];
+                        if (fields.length === 0) break;
+
+                        setTestProgress(prev => prev ? { ...prev, waitingForUser: true, stepDescription: `输入 ${fields.length} 个参数` } : null);
+
+                        const values = await new Promise<Record<string, any>>((resolve) => {
+                            setManualInputModal({
+                                show: true,
+                                fields,
+                                protocolName: protocol.namespace,
+                                targetMethod: step.config.targetMethod || 'SET',
+                                stepIndex: i + 1,
+                                totalSteps: steps.length,
+                                resolve,
+                            });
+                        });
+
+                        setManualInputModal(null);
+
+                        // 将输入值写入目标 method 的 payload
+                        const targetMethod = (step.config.targetMethod || 'SET') as RequestMethod;
+                        const currentPayload = protocol.methods[targetMethod]?.payload || '{}';
+                        payloadOverrides[targetMethod] = applyManualInputToPayload(currentPayload, fields, values);
+                        addTestLog('INFO', `[步骤 ${i + 1}] 参数已输入，应用到 ${targetMethod} payload`);
+                        break;
+                    }
+
+                    case 'prerequisite': {
+                        const prereqId = step.config.protocolId;
+                        const prereqMethod = (step.config.prerequisiteMethod || 'GET') as RequestMethod;
+
+                        // 在当前 suite 中查找前置协议
+                        const allProtocols = suites.flatMap(s => s.protocols);
+                        const prereqProtocol = allProtocols.find(p => p.id === prereqId);
+
+                        if (!prereqProtocol) {
+                            addTestLog('ERROR', `[步骤 ${i + 1}] 前置协议未找到: ${step.config.protocolNamespace || prereqId}`);
+                            if (step.config.failAction !== 'continue') return;
+                            break;
+                        }
+
+                        addTestLog('INFO', `[步骤 ${i + 1}] 执行前置协议: ${prereqProtocol.namespace} ${prereqMethod}`);
+                        setRunningTest(`${prereqProtocol.id}:${prereqMethod}`);
+
+                        const result = await runSingleTest(prereqProtocol, prereqMethod, false);
+
+                        if (result.status !== 'PASS') {
+                            addTestLog('ERROR', `[步骤 ${i + 1}] 前置协议执行失败: ${result.error || result.status}`);
+                            if (step.config.failAction !== 'continue') return;
+                        } else {
+                            addTestLog('INFO', `[步骤 ${i + 1}] 前置协议执行成功`);
+                        }
+                        break;
+                    }
+
+                    case 'wait_serial': {
+                        const targetNs = step.config.serialNamespace || protocol.namespace;
+                        const timeoutMs = step.timeout || 30000;
+                        const matchRegexStr = step.config.serialMatchRegex;
+                        setTestProgress(prev => prev ? { ...prev, waitingForUser: false, stepDescription: `串口监控 ${targetNs}`, countdown: Math.ceil(timeoutMs / 1000) } : null);
+
+                        addTestLog('INFO', `[步骤 ${i + 1}] 开始监控串口 (目标: ${targetNs}, 超时: ${Math.ceil(timeoutMs / 1000)}s)`);
+
+                        // 倒计时 timer
+                        const progressInterval = setInterval(() => {
+                            setTestProgress(prev => {
+                                if (!prev || prev.countdown === undefined || prev.countdown <= 0) return prev;
+                                return { ...prev, countdown: prev.countdown - 1 };
+                            });
+                        }, 1000);
+
+                        try {
+                            const result = await new Promise<boolean>((resolve) => {
+                                let regex: RegExp | null = null;
+                                if (matchRegexStr) {
+                                    try {
+                                        regex = new RegExp(matchRegexStr);
+                                    } catch (e) {
+                                        addTestLog('ERROR', `[步骤 ${i + 1}] 串口正则语法错误: ${matchRegexStr}`);
+                                    }
+                                }
+
+                                const timer = setTimeout(() => {
+                                    cleanup();
+                                    resolve(false); // timeout
+                                }, timeoutMs);
+
+                                const checkStop = setInterval(() => {
+                                    if (stopTestRef.current) {
+                                        cleanup();
+                                        resolve(false);
+                                    }
+                                }, 500);
+
+                                let unsubscribe: (() => void) | null = null;
+
+                                const cleanup = () => {
+                                    clearTimeout(timer);
+                                    clearInterval(checkStop);
+                                    if (unsubscribe) unsubscribe();
+                                };
+
+                                const handleSerialData = (event: any, data: { line: string, timestamp: number, type?: string }) => {
+                                    if (!data || !data.line) return;
+                                    const line = data.line;
+
+                                    // 检查是否包含 namespace
+                                    if (line.includes(targetNs)) {
+                                        // 检查正则
+                                        if (regex && !regex.test(line)) {
+                                            return;
+                                        }
+                                        cleanup();
+                                        addTestLog('RX', `[串口] 命中目标: ${line.substring(0, 80)}${line.length > 80 ? '...' : ''}`);
+                                        resolve(true);
+                                    }
+                                };
+
+                                // 注册监听器 (使用 generic electron ipcRenderer)
+                                if ((window as any).electron?.ipcRenderer?.on) {
+                                    unsubscribe = (window as any).electron.ipcRenderer.on('serial:data', handleSerialData);
+                                } else {
+                                    addTestLog('ERROR', `[步骤 ${i + 1}] 无法监听串口，环境不支持或未运行客户端`);
+                                    cleanup();
+                                    resolve(false);
+                                }
+                            });
+
+                            clearInterval(progressInterval);
+
+                            if (result) {
+                                addTestLog('INFO', `[步骤 ${i + 1}] 串口监控成功匹配`);
+                            } else if (stopTestRef.current) {
+                                addTestLog('INFO', `[步骤 ${i + 1}] 串口监控被终止`);
+                                return;
+                            } else {
+                                addTestLog('ERROR', `[步骤 ${i + 1}] 串口监控超时未匹配到目标`);
+                                if (!step.continueOnFail) return;
+                            }
+                        } catch (err: any) {
+                            clearInterval(progressInterval);
+                            addTestLog('ERROR', `[步骤 ${i + 1}] 串口监控异常: ${err.message}`);
+                            if (!step.continueOnFail) return;
+                        }
+
+                        break;
+                    }
+                }
+
+                // 步骤间短暂延时
+                if (i < steps.length - 1 && !stopTestRef.current) {
+                    await new Promise(r => setTimeout(r, 200));
+                }
+            } catch (err: any) {
+                addTestLog('ERROR', `[步骤 ${i + 1}] 执行异常: ${err.message || err}`);
+                if (!step.continueOnFail) return;
+            }
+        }
+
+        addTestLog('INFO', `[执行计划] ${protocol.namespace} 执行完毕`);
+    };
+
     const stopTests = () => {
         stopTestRef.current = true;
+        isPausedRef.current = false;
+        setIsPaused(false);
         setIsRunning(false);
         setRunningTest(null);
-        showToast('info', '测试已停止');
+        showToast('info', '测试已被用户终止');
+    };
+
+    const togglePauseTest = () => {
+        isPausedRef.current = !isPausedRef.current;
+        setIsPaused(isPausedRef.current);
+        if (isPausedRef.current) {
+            showToast('info', '测试暂停中');
+        } else {
+            showToast('info', '测试恢复执行');
+        }
     };
 
     const runAllTests = async (protocolsOverride?: any) => {
@@ -2799,11 +3349,16 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         let totalTests = 0;
         let currentTestIndex = 0;
         for (const p of protocolsToRun) {
-            for (const m of REQUEST_METHODS) {
-                const mc = p.methods[m];
-                if (!mc?.enabled) continue;
-                const cases = mc.testCases || [];
-                totalTests += cases.length > 0 ? cases.length : 1;
+            // 自定义执行计划：按 send_request + wait_push 步骤数计算
+            if (p.executionPlan?.enabled && p.executionPlan.steps.length > 0) {
+                totalTests += p.executionPlan.steps.filter(s => s.type === 'send_request' || s.type === 'wait_push').length || 1;
+            } else {
+                for (const m of REQUEST_METHODS) {
+                    const mc = p.methods[m];
+                    if (!mc?.enabled) continue;
+                    const cases = mc.testCases || [];
+                    totalTests += cases.length > 0 ? cases.length : 1;
+                }
             }
         }
 
@@ -2816,6 +3371,18 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
         outerLoop: for (const protocol of protocolsToRun) {
             if (stopTestRef.current) break;
+
+            // ===== 自定义执行计划分流 =====
+            if (protocol.executionPlan?.enabled && protocol.executionPlan.steps.length > 0) {
+                const currentTestIndexRef = { value: currentTestIndex };
+                await executeCustomPlan(protocol, protocol.executionPlan, run, batchResult, currentTestIndexRef, totalTests);
+                currentTestIndex = currentTestIndexRef.value;
+                setCurrentRun({ ...run });
+                setBatchTestResult({ ...batchResult });
+                continue; // 跳过下面的默认逻辑
+            }
+
+            // ===== 默认逻辑（无自定义计划）=====
             for (const methodName of REQUEST_METHODS) {
                 if (stopTestRef.current) break;
                 const methodConfig = protocol.methods[methodName];
@@ -2826,6 +3393,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                 if (testCases.length > 0) {
                     // Run Test Cases
                     for (const testCase of testCases) {
+                        await checkPause();
                         if (stopTestRef.current) break;
                         setRunningTest(`${protocol.id}:${methodName}:${testCase.id}`);
                         currentTestIndex++;
@@ -2847,7 +3415,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                             testCaseId: testCase.id,
                             testCaseName: testCase.name,
                             request: result.request,
-                            expectedSchema: result.expectedSchema
+                            expectedSchema: result.expectedSchema,
+                            schemaErrors: result.schemaErrors
                         });
 
                         // result 本身就是 DetailedTestResult，直接 push
@@ -2881,7 +3450,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                     testCaseId: testCase.id, // Associate with test case
                                     testCaseName: `PUSH Verification (after ${testCase.name})`,
                                     request: pushResult.request,
-                                    expectedSchema: pushResult.expectedSchema
+                                    expectedSchema: pushResult.expectedSchema,
+                                    schemaErrors: pushResult.schemaErrors
                                 });
                                 batchResult.results.push(pushResult);
 
@@ -2970,7 +3540,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         response: result.response,
                         error: result.error,
                         request: result.request,
-                        expectedSchema: result.expectedSchema
+                        expectedSchema: result.expectedSchema,
+                        schemaErrors: result.schemaErrors
                     });
 
                     // result 本身就是 DetailedTestResult，直接 push
@@ -3003,7 +3574,8 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                 response: pushResult.response,
                                 error: pushResult.error,
                                 request: pushResult.request,
-                                expectedSchema: pushResult.expectedSchema
+                                expectedSchema: pushResult.expectedSchema,
+                                schemaErrors: pushResult.schemaErrors
                             });
                             batchResult.results.push(pushResult);
 
@@ -3459,13 +4031,13 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                             else suite.protocols.forEach(p => newSelected.delete(p.id));
                             setSelectedProtocols(newSelected);
                         }}
-                        onSelectAllProtocols={(selected) => {
-                            if (selected) {
-                                const allIds = suites.flatMap(s => s.protocols.map(p => p.id));
-                                setSelectedProtocols(new Set(allIds));
-                            } else {
-                                setSelectedProtocols(new Set());
-                            }
+                        onToggleFilteredProtocols={(ids, selected) => {
+                            const newSelected = new Set(selectedProtocols);
+                            ids.forEach(id => {
+                                if (selected) newSelected.add(id);
+                                else newSelected.delete(id);
+                            });
+                            setSelectedProtocols(newSelected);
                         }}
                         verificationErrorSuiteId={verificationErrorSuiteId}
                         getProtocolStatus={getProtocolStatus}
@@ -3486,6 +4058,15 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         onDeleteSuite={deleteSuite}
                         onDeleteProtocol={deleteProtocol}
                         onMoveProtocol={moveProtocol}
+                        onReorderProtocols={(newOrderIds) => {
+                            if (!selectedSuiteId) return;
+                            setSuites(prev => prev.map(s => {
+                                if (s.id !== selectedSuiteId) return s;
+                                const originalMapped = new Map(s.protocols.map(p => [p.id, p]));
+                                const newProtocols = newOrderIds.map(id => originalMapped.get(id)).filter(Boolean) as ProtocolDefinition[];
+                                return { ...s, protocols: newProtocols, updatedAt: Date.now() };
+                            }));
+                        }}
                     />
 
                     <WorkbenchPanel>
@@ -3516,14 +4097,14 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                             </tr>
                                                         </thead>
                                                         <tbody className="divide-y divide-slate-800">
-                                                            {testHistory.filter(h => h.suiteId === selectedSuite.id || h.projectId === selectedSuite.id).length === 0 ? (
+                                                            {testHistory.filter(h => h.suiteId === selectedSuite.id || (h as any).projectId === selectedSuite.id).length === 0 ? (
                                                                 <tr>
                                                                     <td colSpan={7} className="p-8 text-center text-slate-500 text-sm">
                                                                         暂无测试记录
                                                                     </td>
                                                                 </tr>
                                                             ) : (
-                                                                testHistory.filter(h => h.suiteId === selectedSuite.id || h.projectId === selectedSuite.id).map((run, index) => (
+                                                                testHistory.filter(h => h.suiteId === selectedSuite.id || (h as any).projectId === selectedSuite.id).map((run, index) => (
                                                                     <tr key={run.id} className="hover:bg-slate-800/30 transition-colors select-text group">
                                                                         <td className="p-4 text-sm text-slate-400">{index + 1}</td>
                                                                         <td className="p-4 text-sm font-medium text-white">{run.suiteName}</td>
@@ -3680,7 +4261,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                             </div>
 
                                                             {/* Methods Row */}
-                                                            <div className="flex flex-wrap gap-2">
+                                                            <div className="flex items-center flex-wrap gap-2 w-full">
                                                                 {ALL_METHODS.map(method => {
                                                                     const isEnabled = newProtocol.methods[method]?.enabled || false;
                                                                     const isEditing = editingMethod === method;
@@ -3710,61 +4291,167 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                                         </div>
                                                                     );
                                                                 })}
+
+                                                                {/* 执行计划入口按钮 */}
+                                                                <div className="flex items-center gap-2 ml-auto">
+                                                                    <div className="h-6 w-px bg-slate-700 mx-1" />
+                                                                    <button
+                                                                        onClick={() => setEditingMethod('executionPlan')}
+                                                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-all
+                                                                            ${editingMethod === 'executionPlan'
+                                                                                ? 'bg-indigo-500 text-white ring-2 ring-indigo-500 ring-offset-1 ring-offset-slate-950'
+                                                                                : 'bg-slate-800/50 border border-slate-700 text-slate-400 hover:text-white hover:bg-slate-700'
+                                                                            }`}
+                                                                    >
+                                                                        <Settings size={14} />
+                                                                        执行计划
+                                                                        {newProtocol.executionPlan?.enabled && (
+                                                                            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                                                                        )}
+                                                                    </button>
+                                                                </div>
                                                             </div>
                                                         </div>
 
-                                                        {/* Method Editor Area */}
-                                                        <div className="flex-1 flex min-h-0 border-t border-slate-800">
-                                                            {/* Left: Request Payload */}
-                                                            <div className="w-1/2 flex flex-col border-r border-slate-800 bg-slate-950">
-                                                                <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
-                                                                    <div className="flex items-center gap-2">
-                                                                        <span className={`w-2.5 h-2.5 rounded-full ${METHOD_COLORS[editingMethod]?.bg || 'bg-slate-500'}`} />
-                                                                        <span className="text-xs font-bold text-slate-300 uppercase">Request Payload</span>
-                                                                        <span className="text-xs text-slate-500 font-normal ml-2">(发送给设备的数据)</span>
+                                                        {/* Method Editor Area / Execution Plan Editor */}
+                                                        {editingMethod === 'executionPlan' ? (
+                                                            /* 执行计划编辑器 */
+                                                            <div className="flex-1 flex min-h-0 border-t border-slate-800">
+                                                                <ExecutionPlanEditor
+                                                                    plan={newProtocol.executionPlan}
+                                                                    protocol={newProtocol}
+                                                                    allProtocols={selectedSuite?.protocols || []}
+                                                                    onChange={(plan) => setNewProtocol(p => ({ ...p, executionPlan: plan }))}
+                                                                />
+                                                            </div>
+                                                        ) : (
+                                                            /* 原有 Method 编辑区 */
+                                                            <div className="flex-1 flex min-h-0 border-t border-slate-800">
+                                                                {/* Left: Request Payload */}
+                                                                <div className="w-1/2 flex flex-col border-r border-slate-800 bg-slate-950">
+                                                                    <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
+                                                                        <div className="flex items-center gap-2">
+                                                                            <span className={`w-2.5 h-2.5 rounded-full ${METHOD_COLORS[editingMethod]?.bg || 'bg-slate-500'}`} />
+                                                                            <span className="text-xs font-bold text-slate-300 uppercase">Request Payload</span>
+                                                                            <span className="text-xs text-slate-500 font-normal ml-2">(发送给设备的数据)</span>
+                                                                        </div>
+                                                                        <div className="flex items-center gap-2">
+                                                                            <button onClick={() => {
+                                                                                setJsonExampleInput('');
+                                                                                setJsonExtractMode('payload');
+                                                                                setShowJsonToSchemaModal(true);
+                                                                            }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
+                                                                                <Copy size={12} /> 从示例提取
+                                                                            </button>
+                                                                            <button onClick={() => {
+                                                                                const currentPayload = newProtocol.methods[editingMethod]?.payload || '{}';
+                                                                                try {
+                                                                                    const formatted = JSON.stringify(JSON.parse(currentPayload), null, 2);
+                                                                                    setNewProtocol(p => ({
+                                                                                        ...p,
+                                                                                        methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], payload: formatted } }
+                                                                                    }));
+                                                                                    showToast('success', '格式化成功');
+                                                                                } catch (e) {
+                                                                                    showToast('error', 'JSON 格式错误，无法格式化');
+                                                                                }
+                                                                            }} className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors">
+                                                                                <AlignLeft size={12} /> 格式化
+                                                                            </button>
+                                                                        </div>
                                                                     </div>
-                                                                    <div className="flex items-center gap-2">
-                                                                        <button onClick={() => {
-                                                                            setJsonExampleInput('');
-                                                                            setJsonExtractMode('payload');
-                                                                            setShowJsonToSchemaModal(true);
-                                                                        }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
-                                                                            <Copy size={12} /> 从示例提取
-                                                                        </button>
-                                                                        <button onClick={() => {
-                                                                            const currentPayload = newProtocol.methods[editingMethod]?.payload || '{}';
-                                                                            try {
-                                                                                const formatted = JSON.stringify(JSON.parse(currentPayload), null, 2);
-                                                                                setNewProtocol(p => ({
-                                                                                    ...p,
-                                                                                    methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], payload: formatted } }
-                                                                                }));
-                                                                                showToast('success', '格式化成功');
-                                                                            } catch (e) {
-                                                                                showToast('error', 'JSON 格式错误，无法格式化');
-                                                                            }
-                                                                        }} className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors">
-                                                                            <AlignLeft size={12} /> 格式化
-                                                                        </button>
+                                                                    <div className="flex-1 overflow-hidden relative group/editor">
+                                                                        {newProtocol.methods[editingMethod]?.enabled ? (
+                                                                            editingMethod === 'PUSH' ? (
+                                                                                <div className="flex flex-col items-center justify-center h-full text-slate-500 p-6 text-center">
+                                                                                    <Bell size={32} className="mb-3 opacity-50" />
+                                                                                    <p className="text-xs font-bold mb-1">PUSH 方法</p>
+                                                                                    <p className="text-[10px] max-w-[180px] text-slate-600">设备主动推送消息，无需配置请求载荷</p>
+                                                                                </div>
+                                                                            ) : (
+                                                                                <div className="absolute inset-0 overflow-hidden">
+                                                                                    <PayloadEditor
+                                                                                        value={newProtocol.methods[editingMethod]?.payload || '{}'}
+                                                                                        onChange={(v) => setNewProtocol(p => ({
+                                                                                            ...p,
+                                                                                            methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], payload: v } }
+                                                                                        }))}
+                                                                                        mode="payload"
+                                                                                        protocol={newProtocol}
+                                                                                        method={editingMethod}
+                                                                                        session={session}
+                                                                                    />
+                                                                                    {/* JSON Error Indicator */}
+                                                                                    {(() => {
+                                                                                        try {
+                                                                                            JSON.parse(newProtocol.methods[editingMethod]?.payload || '{}');
+                                                                                            return null;
+                                                                                        } catch (e) {
+                                                                                            return (
+                                                                                                <div className="absolute bottom-4 right-4 px-3 py-1.5 bg-red-500/10 border border-red-500/50 rounded text-red-400 text-xs font-mono flex items-center gap-2 backdrop-blur-sm shadow-lg">
+                                                                                                    <AlertTriangle size={12} /> JSON 格式错误
+                                                                                                </div>
+                                                                                            );
+                                                                                        }
+                                                                                    })()}
+                                                                                </div>
+                                                                            )
+                                                                        ) : (
+                                                                            <div className="flex flex-col items-center justify-center h-full text-slate-600">
+                                                                                <p className="text-sm">方法未启用</p>
+                                                                                <button onClick={() => {
+                                                                                    setNewProtocol(p => ({
+                                                                                        ...p,
+                                                                                        methods: { ...p.methods, [editingMethod]: { ...(p.methods[editingMethod] || { payload: '{}', schema: '{}' }), enabled: true } }
+                                                                                    }));
+                                                                                }} className="mt-2 text-indigo-400 hover:text-indigo-300 text-xs underline">
+                                                                                    启用 {editingMethod}
+                                                                                </button>
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                 </div>
-                                                                <div className="flex-1 overflow-hidden relative group/editor">
-                                                                    {newProtocol.methods[editingMethod]?.enabled ? (
-                                                                        editingMethod === 'PUSH' ? (
-                                                                            <div className="flex flex-col items-center justify-center h-full text-slate-500 p-6 text-center">
-                                                                                <Bell size={32} className="mb-3 opacity-50" />
-                                                                                <p className="text-xs font-bold mb-1">PUSH 方法</p>
-                                                                                <p className="text-[10px] max-w-[180px] text-slate-600">设备主动推送消息，无需配置请求载荷</p>
-                                                                            </div>
-                                                                        ) : (
+
+                                                                {/* Right: Response Schema */}
+                                                                <div className="w-1/2 flex flex-col bg-slate-950">
+                                                                    <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
+                                                                        <div className="flex items-center gap-2">
+                                                                            <span className={`w-2.5 h-2.5 rounded-full ${METHOD_COLORS[editingMethod]?.bg || 'bg-slate-500'}`} />
+                                                                            <span className="text-xs font-bold text-slate-300 uppercase">Response Payload</span>
+                                                                            <span className="text-xs text-slate-500 font-normal ml-2">(用于验证设备响应)</span>
+                                                                        </div>
+                                                                        <div className="flex items-center gap-2">
+                                                                            <button onClick={() => {
+                                                                                setJsonExampleInput('');
+                                                                                setJsonExtractMode('schema_payload');
+                                                                                setShowJsonToSchemaModal(true);
+                                                                            }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
+                                                                                <Copy size={12} /> 从示例提取 Payload
+                                                                            </button>
+                                                                            <button onClick={() => {
+                                                                                setShowSchemaPreview(true);
+                                                                            }} className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors">
+                                                                                <FileJson size={12} /> 查看 Schema
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="flex-1 overflow-hidden relative">
+                                                                        {newProtocol.methods[editingMethod]?.enabled ? (
                                                                             <div className="absolute inset-0 overflow-hidden">
                                                                                 <PayloadEditor
-                                                                                    value={newProtocol.methods[editingMethod]?.payload || '{}'}
+                                                                                    value={newProtocol.methods[editingMethod]?.schema || '{}'}
                                                                                     onChange={(v) => setNewProtocol(p => ({
                                                                                         ...p,
-                                                                                        methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], payload: v } }
+                                                                                        methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], schema: v } }
                                                                                     }))}
-                                                                                    mode="payload"
+                                                                                    mode={(() => {
+                                                                                        try {
+                                                                                            const obj = JSON.parse(newProtocol.methods[editingMethod]?.schema || '{}');
+                                                                                            return isLikelySchema(obj) ? 'schema' : 'payload';
+                                                                                        } catch {
+                                                                                            return 'payload';
+                                                                                        }
+                                                                                    })()}
                                                                                     protocol={newProtocol}
                                                                                     method={editingMethod}
                                                                                     session={session}
@@ -3772,7 +4459,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                                                 {/* JSON Error Indicator */}
                                                                                 {(() => {
                                                                                     try {
-                                                                                        JSON.parse(newProtocol.methods[editingMethod]?.payload || '{}');
+                                                                                        JSON.parse(newProtocol.methods[editingMethod]?.schema || '{}');
                                                                                         return null;
                                                                                     } catch (e) {
                                                                                         return (
@@ -3783,89 +4470,15 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                                                                                     }
                                                                                 })()}
                                                                             </div>
-                                                                        )
-                                                                    ) : (
-                                                                        <div className="flex flex-col items-center justify-center h-full text-slate-600">
-                                                                            <p className="text-sm">方法未启用</p>
-                                                                            <button onClick={() => {
-                                                                                setNewProtocol(p => ({
-                                                                                    ...p,
-                                                                                    methods: { ...p.methods, [editingMethod]: { ...(p.methods[editingMethod] || { payload: '{}', schema: '{}' }), enabled: true } }
-                                                                                }));
-                                                                            }} className="mt-2 text-indigo-400 hover:text-indigo-300 text-xs underline">
-                                                                                启用 {editingMethod}
-                                                                            </button>
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            </div>
-
-                                                            {/* Right: Response Schema */}
-                                                            <div className="w-1/2 flex flex-col bg-slate-950">
-                                                                <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
-                                                                    <div className="flex items-center gap-2">
-                                                                        <span className={`w-2.5 h-2.5 rounded-full ${METHOD_COLORS[editingMethod]?.bg || 'bg-slate-500'}`} />
-                                                                        <span className="text-xs font-bold text-slate-300 uppercase">Response Payload</span>
-                                                                        <span className="text-xs text-slate-500 font-normal ml-2">(用于验证设备响应)</span>
-                                                                    </div>
-                                                                    <div className="flex items-center gap-2">
-                                                                        <button onClick={() => {
-                                                                            setJsonExampleInput('');
-                                                                            setJsonExtractMode('schema_payload');
-                                                                            setShowJsonToSchemaModal(true);
-                                                                        }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
-                                                                            <Copy size={12} /> 从示例提取 Payload
-                                                                        </button>
-                                                                        <button onClick={() => {
-                                                                            setShowSchemaPreview(true);
-                                                                        }} className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors">
-                                                                            <FileJson size={12} /> 查看 Schema
-                                                                        </button>
+                                                                        ) : (
+                                                                            <div className="flex items-center justify-center h-full text-slate-600 text-sm">
+                                                                                方法未启用
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                 </div>
-                                                                <div className="flex-1 overflow-hidden relative">
-                                                                    {newProtocol.methods[editingMethod]?.enabled ? (
-                                                                        <div className="absolute inset-0 overflow-hidden">
-                                                                            <PayloadEditor
-                                                                                value={newProtocol.methods[editingMethod]?.schema || '{}'}
-                                                                                onChange={(v) => setNewProtocol(p => ({
-                                                                                    ...p,
-                                                                                    methods: { ...p.methods, [editingMethod]: { ...p.methods[editingMethod], schema: v } }
-                                                                                }))}
-                                                                                mode={(() => {
-                                                                                    try {
-                                                                                        const obj = JSON.parse(newProtocol.methods[editingMethod]?.schema || '{}');
-                                                                                        return isLikelySchema(obj) ? 'schema' : 'payload';
-                                                                                    } catch {
-                                                                                        return 'payload';
-                                                                                    }
-                                                                                })()}
-                                                                                protocol={newProtocol}
-                                                                                method={editingMethod}
-                                                                                session={session}
-                                                                            />
-                                                                            {/* JSON Error Indicator */}
-                                                                            {(() => {
-                                                                                try {
-                                                                                    JSON.parse(newProtocol.methods[editingMethod]?.schema || '{}');
-                                                                                    return null;
-                                                                                } catch (e) {
-                                                                                    return (
-                                                                                        <div className="absolute bottom-4 right-4 px-3 py-1.5 bg-red-500/10 border border-red-500/50 rounded text-red-400 text-xs font-mono flex items-center gap-2 backdrop-blur-sm shadow-lg">
-                                                                                            <AlertTriangle size={12} /> JSON 格式错误
-                                                                                        </div>
-                                                                                    );
-                                                                                }
-                                                                            })()}
-                                                                        </div>
-                                                                    ) : (
-                                                                        <div className="flex items-center justify-center h-full text-slate-600 text-sm">
-                                                                            方法未启用
-                                                                        </div>
-                                                                    )}
-                                                                </div>
                                                             </div>
-                                                        </div>
+                                                        )}
                                                     </div>
                                                 )}
 
@@ -3873,9 +4486,6 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
 
                                             </div>
                                         )}
-
-
-
 
 
 
@@ -4493,35 +5103,138 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         }}
                     />
 
-                    {/* Test Progress Modal */}
+                    {/* Test Progress Floating Panel */}
                     {testProgress && (
-                        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[200]">
-                            <div className="bg-slate-900 border border-slate-700 rounded-2xl p-8 w-[400px] flex flex-col items-center shadow-2xl">
-                                <div className="relative w-16 h-16 mb-4">
-                                    <svg className="w-full h-full transform -rotate-90">
-                                        <circle cx="32" cy="32" r="28" stroke="currentColor" strokeWidth="4" fill="none" className="text-slate-800" />
-                                        <circle cx="32" cy="32" r="28" stroke="currentColor" strokeWidth="4" fill="none" className="text-indigo-500 transition-all duration-300 ease-out"
-                                            strokeDasharray={175.9}
-                                            strokeDashoffset={175.9 - (175.9 * testProgress.current) / testProgress.total}
-                                        />
-                                    </svg>
-                                    <div className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white">
-                                        {Math.round((testProgress.current / testProgress.total) * 100)}%
+                        <div className={`fixed z-[200] transition-all duration-300 ease-in-out ${testProgressMinimized ? 'bottom-6 right-6 w-72' : 'bottom-6 right-6 w-[400px] shadow-2xl'} bg-slate-900 border border-slate-700 rounded-xl flex flex-col overflow-hidden`}>
+                            {/* Header / Drag Handle area (non-draggable for now, just header) */}
+                            <div className="bg-slate-800/80 px-4 py-3 flex items-center justify-between border-b border-slate-700">
+                                <div className="flex items-center gap-2">
+                                    {isPaused ? <Activity size={16} className="text-amber-500" /> : <Activity size={16} className="text-indigo-400 animate-pulse" />}
+                                    <h3 className="text-sm font-bold text-white">
+                                        {isPaused ? '测试已暂停' : testProgress.waitingForUser ? '等待操作...' : '正在执行测试...'}
+                                    </h3>
+                                </div>
+                                <div className="flex items-center gap-1 text-slate-400">
+                                    <button onClick={() => setTestProgressMinimized(!testProgressMinimized)} className="p-1 hover:text-white hover:bg-slate-700 rounded transition-colors" title={testProgressMinimized ? '展开' : '最小化'}>
+                                        {testProgressMinimized ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Content */}
+                            {!testProgressMinimized && (
+                                <div className="p-5 flex flex-col">
+                                    {/* Primary Progress Info */}
+                                    <div className="flex items-center gap-4 mb-4">
+                                        <div className="relative w-12 h-12 shrink-0">
+                                            <svg className="w-full h-full transform -rotate-90">
+                                                <circle cx="24" cy="24" r="20" stroke="currentColor" strokeWidth="4" fill="none" className="text-slate-800" />
+                                                <circle cx="24" cy="24" r="20" stroke="currentColor" strokeWidth="4" fill="none" className={`${isPaused ? 'text-amber-500' : 'text-indigo-500'} transition-all duration-300 ease-out`}
+                                                    strokeDasharray={125.6}
+                                                    strokeDashoffset={125.6 - (125.6 * testProgress.current) / testProgress.total}
+                                                />
+                                            </svg>
+                                            <div className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white">
+                                                {Math.round((testProgress.current / testProgress.total) * 100)}%
+                                            </div>
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-xs font-mono text-slate-500 mb-1">
+                                                ({testProgress.current} / {testProgress.total})
+                                            </div>
+                                            <p className="text-sm text-slate-200 font-medium truncate" title={testProgress.currentProtocol}>
+                                                {testProgress.currentProtocol || '准备中...'}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    {/* Step Progress Info */}
+                                    {testProgress.stepCurrent && testProgress.stepTotal && (
+                                        <div className="bg-slate-800/50 rounded-lg p-3 mb-4 border border-slate-700/50">
+                                            <div className="flex justify-between items-center mb-1.5">
+                                                <span className="text-[11px] font-bold text-indigo-400">Step {testProgress.stepCurrent}/{testProgress.stepTotal}</span>
+                                                {testProgress.countdown !== undefined && (
+                                                    <span className="text-[11px] font-mono text-amber-400 font-bold bg-amber-500/10 px-1.5 py-0.5 rounded">{testProgress.countdown}s 剩余</span>
+                                                )}
+                                            </div>
+                                            <p className="text-xs text-slate-400 truncate mb-2" title={testProgress.stepDescription}>
+                                                {testProgress.stepDescription}
+                                            </p>
+                                            <div className="w-full bg-slate-800 rounded-full h-1">
+                                                <div className={`h-1 rounded-full transition-all duration-300 ${isPaused ? 'bg-amber-500' : 'bg-indigo-500'}`}
+                                                    style={{ width: `${(testProgress.stepCurrent / testProgress.stepTotal) * 100}%` }}
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Controls */}
+                                    <div className="flex items-center gap-2 mt-2 pt-4 border-t border-slate-800">
+                                        <button
+                                            onClick={togglePauseTest}
+                                            className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold transition-all ${isPaused ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white'}`}
+                                        >
+                                            {isPaused ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />}
+                                            {isPaused ? '继续执行' : '暂停'}
+                                        </button>
+                                        <button
+                                            onClick={stopTests}
+                                            className="px-4 py-2 hover:bg-red-900/40 text-red-500 hover:text-red-400 bg-red-950/20 border border-red-900/30 hover:border-red-500/50 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
+                                        >
+                                            <Square size={12} fill="currentColor" /> 终止
+                                        </button>
                                     </div>
                                 </div>
-                                <h3 className="text-lg font-bold text-white mb-1">Running Tests...</h3>
-                                <p className="text-sm text-slate-400 mb-6 text-center truncate w-full px-4">
-                                    {testProgress.currentProtocol}
-                                </p>
-                                <div className="flex gap-4 text-xs font-mono text-slate-500">
-                                    <span>Total: {testProgress.total}</span>
-                                    <span>Current: {testProgress.current}</span>
+                            )}
+
+                            {/* Minimized Progress Bar (bottom edge) */}
+                            {testProgressMinimized && (
+                                <div className="h-1 w-full bg-slate-800 relative">
+                                    <div className={`absolute left-0 top-0 h-full ${isPaused ? 'bg-amber-500' : 'bg-indigo-500'} transition-all duration-300`}
+                                        style={{ width: `${(testProgress.current / testProgress.total) * 100}%` }}
+                                    />
+                                    {isPaused && <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-full animate-pulse bg-white/20" />}
                                 </div>
-                                <button onClick={stopTests} className="mt-6 px-6 py-2 bg-slate-800 hover:bg-red-900/30 text-slate-300 hover:text-red-400 rounded-lg text-sm font-bold transition-colors border border-slate-700 hover:border-red-500/30">
-                                    Stop Execution
+                            )}
+                        </div>
+                    )}
+
+                    {/* 手动操作确认弹窗 */}
+                    {manualActionModal?.show && (
+                        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-[250]">
+                            <div className="bg-slate-900 border border-amber-500/30 rounded-2xl p-8 w-[440px] flex flex-col items-center shadow-2xl">
+                                <div className="w-14 h-14 rounded-full bg-amber-500/10 border-2 border-amber-500/30 flex items-center justify-center mb-4">
+                                    <AlertTriangle size={28} className="text-amber-400" />
+                                </div>
+                                <h3 className="text-lg font-bold text-white mb-1">需要手动操作</h3>
+                                <p className="text-xs text-slate-500 mb-4">
+                                    {manualActionModal.protocolName} · 步骤 {manualActionModal.stepIndex}/{manualActionModal.totalSteps}
+                                </p>
+                                <div className="w-full bg-slate-800/50 rounded-lg p-4 mb-6 border border-slate-700">
+                                    <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-wrap">
+                                        {manualActionModal.instruction}
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={() => manualActionModal.resolve?.()}
+                                    className="px-8 py-2.5 bg-amber-500 hover:bg-amber-400 text-black font-bold rounded-lg text-sm transition-colors"
+                                >
+                                    {manualActionModal.confirmText}
                                 </button>
                             </div>
                         </div>
+                    )}
+
+                    {/* 手动输入弹窗 */}
+                    {manualInputModal?.show && (
+                        <ManualInputDialog
+                            fields={manualInputModal.fields}
+                            protocolName={manualInputModal.protocolName}
+                            targetMethod={manualInputModal.targetMethod}
+                            stepIndex={manualInputModal.stepIndex}
+                            totalSteps={manualInputModal.totalSteps}
+                            onConfirm={(values: Record<string, any>) => manualInputModal.resolve?.(values)}
+                        />
                     )}
 
                     {/* Audit Confirmation Modal */}
