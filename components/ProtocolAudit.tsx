@@ -3946,26 +3946,10 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                     >
                         {activeProject?.name}
                     </button>
-                    <span className="text-xs text-slate-500 px-2 py-0.5 bg-slate-800 rounded-full">
-                        {activeProject?.targetDeviceName || 'No Device'}
-                    </span>
                 </div>
 
                 {/* Header Actions */}
                 <div className="flex items-center gap-2">
-                    {/* Config */}
-                    <button
-                        onClick={() => {
-                            setTempExecutionConfig(selectedSuite?.executionConfig || DEFAULT_EXECUTION_CONFIG);
-                            setShowExecutionConfigModal(true);
-                        }}
-                        className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg flex items-center gap-1 border border-slate-700 transition-colors"
-                        title={`超时: ${(selectedSuite?.executionConfig?.timeout || DEFAULT_EXECUTION_CONFIG.timeout) / 1000}s`}
-                    >
-                        <span className="text-xs text-slate-400 font-bold">
-                            {(selectedSuite?.executionConfig?.timeout || DEFAULT_EXECUTION_CONFIG.timeout) / 1000}s
-                        </span>
-                    </button>
                     {/* Run/Stop - 始终显示，不受 selectedProtocolId 限制 */}
                     {isRunning ? (
                         <button onClick={stopTests} className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg shadow-lg shadow-red-900/20 transition-all font-bold flex items-center gap-2" title="停止测试">
@@ -3988,15 +3972,17 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
                         setImportSelectedTags(new Set());
                         setImportSelectedProtocols(new Set());
                         setShowImportProtocolModal(true);
-                    })} className="p-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg shadow-lg shadow-slate-900/20 transition-all border border-slate-700" title="导入协议">
-                        <Download size={18} />
+                    })} className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-lg shadow-lg shadow-slate-900/20 transition-all border border-slate-700 flex items-center gap-2" title="导入协议">
+                        <Download size={16} />
+                        导入协议
                     </button>
                     {/* Add Protocol */}
                     <button onClick={() => safeNavigate(() => {
                         resetProtocolWizard();
                         setIsAddingProtocol(true);
-                    })} className="p-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg shadow-lg shadow-indigo-900/20 transition-all" title="Add Protocol">
-                        <Plus size={18} />
+                    })} className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg shadow-lg shadow-indigo-900/20 transition-all flex items-center gap-2" title="新增单条协议">
+                        <Plus size={16} />
+                        新增协议
                     </button>
                 </div>
             </div>
