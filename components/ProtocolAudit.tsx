@@ -2085,6 +2085,38 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         }
     }, [testHistory]);
 
+    // Phase P0 Bugfix: Auto-fetch Appliance.System.All for uninitialized devices upon entering suite
+    useEffect(() => {
+        if (!activeProject || !targetDevice || !mqttConnected) return;
+
+        // If device IP is uninitialized ('0.0.0.0'), actively request its info to update it
+        if (targetDevice.ip === '0.0.0.0') {
+            const requestId = md5(Math.random().toString(36)).toLowerCase();
+            const replyTopic = `/app/${session?.uid}-${appid}/subscribe`;
+            const ts = Math.floor(Date.now() / 1000);
+            const sign = md5(requestId + session?.key + String(ts)).toLowerCase();
+
+            const message = {
+                header: {
+                    messageId: requestId,
+                    namespace: 'Appliance.System.All',
+                    method: 'GET',
+                    payloadVersion: 1,
+                    from: replyTopic,
+                    timestamp: ts,
+                    timestampMs: Date.now(),
+                    sign: sign
+                },
+                payload: {}
+            };
+
+            const topic = `/appliance/${targetDevice.id}/subscribe`;
+            onMqttPublish?.(topic, JSON.stringify(message));
+            onMqttSubscribe?.(replyTopic);
+            console.log(`[ProtocolAudit] Auto-probing uninitialized device ${targetDevice.name} (IP: 0.0.0.0)`);
+        }
+    }, [activeProject, targetDevice, mqttConnected, session, appid]);
+
     // Save target device ID when it changes
     useEffect(() => {
         if (targetDeviceId) {
@@ -2121,7 +2153,6 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         if (selectedProtocolId) setRightPanelTab('edit');
     }, [selectedProtocolId]);
 
-    // Suite Actions
     // Suite Actions
     const startEditingSuite = (suite: ProtocolTestSuite) => {
         setNewSuite({ name: suite.name, description: suite.description || '' });
