@@ -1085,7 +1085,9 @@ ${content.slice(0, 15000)}
             "description": "GET 方法描述"
         },
         "SET": { ... },
-        "PUSH": { ... }
+        "PUSH": { ... },
+        "DELETE": { ... },
+        "SYNC": { ... }
     },
     "confidence": 0.0-1.0
 }
@@ -1132,7 +1134,7 @@ ${content.slice(0, 15000)}
             // 构建协议结果
             const methods: AIGeneratedProtocol['methods'] = {};
 
-            for (const method of ['GET', 'SET', 'PUSH']) {
+            for (const method of ['GET', 'SET', 'PUSH', 'DELETE', 'SYNC']) {
                 const methodData = parsed.methods?.[method];
                 if (methodData) {
                     methods[method] = {
