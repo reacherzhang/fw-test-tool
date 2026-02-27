@@ -1815,9 +1815,16 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
         }
     }, [activeProject]);
 
-    // Phase P0 Bugfix: Clear selected protocols when switching suites
+    // Phase P0 Bugfix: Clear selected protocols and current editing protocol when switching suites
     useEffect(() => {
         setSelectedProtocols(new Set());
+        setNewProtocol({
+            id: '',
+            namespace: '',
+            name: '',
+            methods: ALL_METHODS.reduce((acc, m) => ({ ...acc, [m]: { enabled: false, requestPayload: {}, responseSchema: {} } }), {} as any)
+        });
+        setOriginalProtocol(null);
     }, [selectedSuiteId]);
 
     // Sync suites changes back to activeProject and projects (Auto-save)
