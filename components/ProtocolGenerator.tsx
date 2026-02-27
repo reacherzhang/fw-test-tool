@@ -1607,11 +1607,12 @@ export const ProtocolGenerator: React.FC<ProtocolGeneratorProps> = ({
                                                             log.type === 'analyze' ? 'text-purple-400' :
                                                                 log.type === 'extract' ? 'text-amber-400' :
                                                                     log.type === 'complete' ? 'text-emerald-400' :
-                                                                        log.type === 'error' ? 'text-red-400' : 'text-slate-400'
+                                                                        log.type === 'error' ? 'text-red-400' :
+                                                                            log.type === 'warning' ? 'text-orange-400' : 'text-slate-400'
                                                             }`}>
                                                             [{log.type.toUpperCase()}]
                                                         </span>
-                                                        <span className="text-slate-300 break-all">
+                                                        <span className={`break-all ${log.type === 'warning' || log.type === 'error' ? 'text-orange-400' : 'text-slate-300'}`}>
                                                             {log.message}
                                                         </span>
                                                     </div>

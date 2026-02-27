@@ -27,7 +27,7 @@ export interface AIMatchStrategy {
 // AI 处理日志
 export interface AIProcessLog {
     timestamp: number;
-    type: 'search' | 'analyze' | 'extract' | 'complete' | 'error' | 'info';
+    type: 'search' | 'analyze' | 'extract' | 'complete' | 'error' | 'info' | 'warning';
     message: string;
     namespace?: string;
 }
@@ -256,12 +256,26 @@ export class AIProtocolService {
                         matchConfidence = matchResult.document.confidence;
                         matchMethod = matchResult.document.matchReason;
 
+                        const isLowConfidence = matchConfidence < 0.8;
                         onProgress(processedCount, total, namespace, {
                             timestamp: Date.now(),
-                            type: 'search',
-                            message: `✓ 匹配到: "${bestMatch.title}" (${Math.round(matchConfidence * 100)}% ${matchMethod})`,
+                            type: isLowConfidence ? 'warning' : 'search',
+                            message: `${isLowConfidence ? '⚠️' : '✓'} 匹配到: "${bestMatch.title}" (${Math.round(matchConfidence * 100)}% ${matchMethod})`,
                             namespace
                         });
+
+                        if (isLowConfidence) {
+                            onProgress(processedCount, total, namespace, {
+                                timestamp: Date.now(),
+                                type: 'error',
+                                message: `匹配度过低，跳过深度分析。已标记为异常。`,
+                                namespace
+                            });
+                            results.set(namespace, this.createDefaultProtocol(namespace, [`匹配度低于80% (${Math.round(matchConfidence * 100)}%)，未生成内容`]));
+                            processedCount++;
+                            await this.delay(500);
+                            return;
+                        }
                     } else {
                         onProgress(processedCount, total, namespace, {
                             timestamp: Date.now(),

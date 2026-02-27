@@ -173,6 +173,7 @@ interface TestRun {
     startTime: number;
     endTime?: number;
     status: 'RUNNING' | 'COMPLETED' | 'FAILED';
+    triggerBy?: string;
     results: {
         protocolId: string;
         namespace: string;
@@ -3359,6 +3360,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             startTime: Date.now(),
             status: 'RUNNING',
             results: [],
+            triggerBy: session.email || session.uid,
             summary: { total: 0, passed: 0, failed: 0, timeout: 0 }
         };
         setCurrentRun(run);
@@ -3373,6 +3375,7 @@ export const ProtocolAudit: React.FC<ProtocolAuditProps> = ({
             startTime: Date.now(),
             status: 'RUNNING',
             results: [],
+            triggerBy: session.email || session.uid,
             summary: { total: 0, passed: 0, failed: 0, timeout: 0 }
         };
         setBatchTestResult(batchResult);

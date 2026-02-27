@@ -84,6 +84,7 @@ export interface BatchTestResult {
     endTime?: number;
     status?: 'RUNNING' | 'COMPLETED' | 'FAILED';
     results: DetailedTestResult[];
+    triggerBy?: string;
     summary: {
         total: number;
         passed: number;

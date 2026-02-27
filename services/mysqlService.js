@@ -367,6 +367,7 @@ export function registerDatabaseHandlers() {
             const summaryWithResults = {
                 ...testRun.summary,
                 clientVersion: clientVersion,
+                device_uuid: testRun.deviceId || testRun.deviceUuid,
                 results: (testRun.results || []).map(r => ({
                     protocolId: r.protocolId,
                     namespace: r.namespace,

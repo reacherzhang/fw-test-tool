@@ -53,6 +53,7 @@ export interface StoredProtocolDefinition {
         [key: string]: StoredMethodTest | undefined;
     };
     reviewStatus?: 'UNVERIFIED' | 'VERIFIED';
+    executionPlan?: any; // 用于持久化存取 TestExecutionPlan
 }
 
 export interface StoredAuditProject {
@@ -105,6 +106,7 @@ export interface StoredTestRun {
     endTime?: number;
     status: 'RUNNING' | 'COMPLETED' | 'FAILED';
     results: StoredTestResult[];
+    triggerBy?: string;
     summary: {
         total: number;
         passed: number;
