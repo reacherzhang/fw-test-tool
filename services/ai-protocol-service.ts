@@ -1063,7 +1063,7 @@ ${candidates.map((c, i) => `${i + 1}. 标题: "${c.title}"
 ${content.slice(0, 15000)}
 
 请遵循以下步骤进行分析：
-1. **识别交互方式**：查看文档中的交互方式表，确定支持的方法（GET, SET, PUSH）。
+1. **识别交互方式**：查看文档中的交互方式表，确定支持的方法（GET, SET, PUSH, DELETE, SYNC）。
 2. **提取 Request Payload(JSON 示例)**：
    - 生成纯粹的 JSON 数据示例，用于发送请求。
 3. **类型映射规则（非常重要）**：
