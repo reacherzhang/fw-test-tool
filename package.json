@@ -1,6 +1,6 @@
 {
   "name": "iot-nexus-core",
-  "version": "1.1.21",
+  "version": "1.1.22",
   "description": "Enterprise IoT Device Management Platform",
   "main": "main.js",
   "type": "module",
