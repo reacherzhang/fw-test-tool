@@ -64,6 +64,7 @@
       "dist/**/*",
       "main.js",
       "preload.js",
+      "matter-commissioner.cjs",
       "package.json",
       "services/**/*"
     ],
