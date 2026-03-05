@@ -22,7 +22,9 @@
     "@matter/main": "^0.15.6",
     "@matter/nodejs": "^0.15.6",
     "@matter/nodejs-ble": "^0.15.6",
+    "@matter/protocol": "^0.15.6",
     "@project-chip/matter.js": "^0.15.6",
+    "@serialport/parser-readline": "^13.0.0",
     "@stoprocent/noble": "^2.3.10",
     "ajv": "^6.12.6",
     "axios": "^1.13.3",
@@ -67,6 +69,8 @@
       "main.js",
       "preload.js",
       "matter-commissioner.cjs",
+      "matter-controller.cjs",
+      "discovery-service.cjs",
       "package.json",
       "services/**/*"
     ],
