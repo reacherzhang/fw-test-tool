@@ -1305,37 +1305,60 @@ async function readAttribute(nodeId, endpointId, clusterId, attributeId) {
             connectedNodes.set(nodeId.toString(), node);
         }
 
-        const interactionClient = await commissioningController.createInteractionClient(
-            NodeId(BigInt(nodeId.toString()))
-        );
-
         const epId = parseInt(endpointId);
         const clId = parseInt(clusterId);
         const atId = parseInt(attributeId);
 
-        // getMultipleAttributes with timeout protection
+        // Try reading via ClusterClient first (high-level API, handles Sleepy devices better)
+        const devices = node.getDevices();
+        for (const device of devices) {
+            if (device.number === epId) {
+                const clusterClients = device.getClusterClients ? device.getClusterClients() : new Map();
+                for (const [cId, cluster] of clusterClients) {
+                    if (cId === clId) {
+                        const attributes = cluster.attributes || {};
+                        for (const [attrName, attr] of Object.entries(attributes)) {
+                            if (attr?.id === atId) {
+                                console.log(`[Commissioner] Reading attribute '${attrName}' from ClusterClient...`);
+                                const methodName = 'get' + attrName.charAt(0).toUpperCase() + attrName.slice(1) + 'Attribute';
+                                if (typeof cluster[methodName] === 'function') {
+                                    try {
+                                        // Try forcing a read from device directly (15s timeout for Sleepy devices)
+                                        const value = await waitWithTimeout(cluster[methodName](true), 15000, 'Device read attribute timeout');
+                                        return { success: true, value, path: { endpointId: epId, clusterId: clId, attributeId: atId } };
+                                    } catch (err) {
+                                        console.warn(`[Commissioner] Read from device failed: ${err.message}. Trying cached state...`);
+                                        try {
+                                            const cachedValue = await cluster[methodName]();
+                                            return { success: true, value: cachedValue !== undefined ? cachedValue : '(no cache available)', path: { endpointId: epId, clusterId: clId, attributeId: atId }, cached: true };
+                                        } catch (cachedErr) {
+                                            console.warn(`[Commissioner] Read from cache failed: ${cachedErr.message}`);
+                                        }
+                                        return { success: false, error: err.message || JSON.stringify(err) };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback to Interaction Client
+        const interactionClient = await commissioningController.createInteractionClient(NodeId(BigInt(nodeId.toString())));
         const result = await waitWithTimeout(interactionClient.getMultipleAttributes({
-            attributes: [{
-                endpointId: epId,
-                clusterId: clId,
-                attributeId: atId,
-            }],
-        }), 10000, 'Device read attribute timeout');
+            attributes: [{ endpointId: epId, clusterId: clId, attributeId: atId }],
+        }), 15000, 'Device read attribute timeout');
 
         if (result.length > 0) {
-            const attr = result[0];
-            console.log(`[Commissioner] Read ${nodeId}/${epId}/${clId}/${atId}: ${JSON.stringify(attr.value)}`);
-            return {
-                success: true,
-                value: attr.value,
-                path: attr.path,
-            };
+            console.log(`[Commissioner] Read ${nodeId}/${epId}/${clId}/${atId}: ${JSON.stringify(result[0].value)}`);
+            return { success: true, value: result[0].value, path: result[0].path };
         }
 
         return { success: false, error: 'No data returned' };
     } catch (error) {
         console.error(`[Commissioner] Read attribute error:`, error);
-        return { success: false, error: error.message };
+        return { success: false, error: error.message || JSON.stringify(error) };
     }
 }
 
@@ -1415,7 +1438,7 @@ async function writeAttribute(nodeId, endpointId, clusterId, attributeId, value)
         return { success: false, error: `Could not find writable attribute at ${epId}/${clId}/${atId}` };
     } catch (error) {
         console.error(`[Commissioner] Write attribute error:`, error);
-        return { success: false, error: error.message };
+        return { success: false, error: error.message || JSON.stringify(error) };
     }
 }
 
@@ -1468,7 +1491,7 @@ async function invokeCommand(nodeId, endpointId, clusterId, commandId, commandFi
         return { success: false, error: `Could not find command at ${epId}/${clId}/${cmdId}` };
     } catch (error) {
         console.error(`[Commissioner] Invoke command error:`, error);
-        return { success: false, error: error.message };
+        return { success: false, error: error.message || JSON.stringify(error) };
     }
 }
 
