@@ -22,6 +22,13 @@ let bleAvailable = false;
 let masterWin = null; // Reference for sending IPC logs
 let commissioningAbortController = null; // { aborted: boolean, reject: Function }
 
+const waitWithTimeout = async (promise, ms, rejectMsg = 'timeout') => {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(rejectMsg)), ms))
+    ]);
+};
+
 // === Log Interceptor ===
 const originalLog = console.log;
 const originalWarn = console.warn;
@@ -851,7 +858,7 @@ async function connectNode(nodeId) {
         // 等待初始化完成
         if (!node.initialized) {
             console.log(`[Commissioner] Waiting for node ${nodeId} initialization...`);
-            await node.events.initialized;
+            await waitWithTimeout(node.events.initialized, 15000, `Node ${nodeId} initialization timeout`);
         }
 
         connectedNodes.set(nodeId.toString(), node);
@@ -928,7 +935,7 @@ async function getNodeStructure(nodeId) {
             node = await commissioningController.getNode(NodeId(BigInt(nodeId.toString())));
             if (!node.isConnected) {
                 node.connect();
-                if (!node.initialized) await node.events.initialized;
+                if (!node.initialized) await waitWithTimeout(node.events.initialized, 15000, 'Node init timeout');
             }
             connectedNodes.set(nodeId.toString(), node);
         }
@@ -938,22 +945,44 @@ async function getNodeStructure(nodeId) {
         try {
             const basicInfo = node.getRootClusterClient(BasicInformationCluster);
             if (basicInfo) {
+                const safeReadAttr = async (fetcher) => {
+                    if (!fetcher) return null;
+                    try {
+                        return await Promise.race([
+                            fetcher(),
+                            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)) // 1.5s timeout per attribute
+                        ]);
+                    } catch {
+                        return null;
+                    }
+                };
+
+                const [
+                    vendorName, vendorId, productName, productId, nodeLabel, location, hardwareVersion,
+                    hardwareVersionString, softwareVersion, softwareVersionString, manufacturingDate,
+                    partNumber, productUrl, productLabel, serialNumber
+                ] = await Promise.all([
+                    safeReadAttr(() => basicInfo.getVendorNameAttribute()),
+                    safeReadAttr(() => basicInfo.getVendorIdAttribute()),
+                    safeReadAttr(() => basicInfo.getProductNameAttribute()),
+                    safeReadAttr(() => basicInfo.getProductIdAttribute()),
+                    safeReadAttr(() => basicInfo.getNodeLabelAttribute()),
+                    safeReadAttr(() => basicInfo.getLocationAttribute()),
+                    safeReadAttr(() => basicInfo.getHardwareVersionAttribute()),
+                    safeReadAttr(() => basicInfo.getHardwareVersionStringAttribute()),
+                    safeReadAttr(() => basicInfo.getSoftwareVersionAttribute()),
+                    safeReadAttr(() => basicInfo.getSoftwareVersionStringAttribute()),
+                    safeReadAttr(() => basicInfo.getManufacturingDateAttribute()),
+                    safeReadAttr(() => basicInfo.getPartNumberAttribute()),
+                    safeReadAttr(() => basicInfo.getProductUrlAttribute()),
+                    safeReadAttr(() => basicInfo.getProductLabelAttribute()),
+                    safeReadAttr(() => basicInfo.getSerialNumberAttribute())
+                ]);
+
                 deviceInfo = {
-                    vendorName: await basicInfo.getVendorNameAttribute?.().catch(() => null),
-                    vendorId: await basicInfo.getVendorIdAttribute?.().catch(() => null),
-                    productName: await basicInfo.getProductNameAttribute?.().catch(() => null),
-                    productId: await basicInfo.getProductIdAttribute?.().catch(() => null),
-                    nodeLabel: await basicInfo.getNodeLabelAttribute?.().catch(() => null),
-                    location: await basicInfo.getLocationAttribute?.().catch(() => null),
-                    hardwareVersion: await basicInfo.getHardwareVersionAttribute?.().catch(() => null),
-                    hardwareVersionString: await basicInfo.getHardwareVersionStringAttribute?.().catch(() => null),
-                    softwareVersion: await basicInfo.getSoftwareVersionAttribute?.().catch(() => null),
-                    softwareVersionString: await basicInfo.getSoftwareVersionStringAttribute?.().catch(() => null),
-                    manufacturingDate: await basicInfo.getManufacturingDateAttribute?.().catch(() => null),
-                    partNumber: await basicInfo.getPartNumberAttribute?.().catch(() => null),
-                    productUrl: await basicInfo.getProductUrlAttribute?.().catch(() => null),
-                    productLabel: await basicInfo.getProductLabelAttribute?.().catch(() => null),
-                    serialNumber: await basicInfo.getSerialNumberAttribute?.().catch(() => null),
+                    vendorName, vendorId, productName, productId, nodeLabel, location, hardwareVersion,
+                    hardwareVersionString, softwareVersion, softwareVersionString, manufacturingDate,
+                    partNumber, productUrl, productLabel, serialNumber
                 };
             }
         } catch (e) {
@@ -991,9 +1020,19 @@ async function getNodeStructure(nodeId) {
         try {
             const rootDescriptor = node.getRootClusterClient(DescriptorCluster);
             if (rootDescriptor) {
-                const partsList = await rootDescriptor.getPartsListAttribute().catch(() => []);
-                const serverList = await rootDescriptor.getServerListAttribute().catch(() => []);
-                console.log(`[Commissioner] Node ${nodeId}: parts=${partsList.length}, servers=${serverList.length}`);
+                const safeReadList = async (fetcher) => {
+                    try {
+                        return await Promise.race([
+                            fetcher(),
+                            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))
+                        ]);
+                    } catch {
+                        return [];
+                    }
+                };
+                const partsList = await safeReadList(() => rootDescriptor.getPartsListAttribute());
+                const serverList = await safeReadList(() => rootDescriptor.getServerListAttribute());
+                console.log(`[Commissioner] Node ${nodeId}: parts=${partsList?.length || 0}, servers=${serverList?.length || 0}`);
             }
         } catch (e) {
             // ignore
@@ -1023,7 +1062,7 @@ async function readAllNodeAttributes(nodeIdStr) {
             node = await commissioningController.getNode(NodeId(BigInt(nodeIdStr.toString())));
             if (!node.isConnected) {
                 node.connect();
-                if (!node.initialized) await node.events.initialized;
+                if (!node.initialized) await waitWithTimeout(node.events.initialized, 15000, 'Node init timeout');
             }
             connectedNodes.set(nodeIdStr.toString(), node);
         }
@@ -1309,7 +1348,7 @@ async function writeAttribute(nodeId, endpointId, clusterId, attributeId, value)
             node = await commissioningController.getNode(NodeId(BigInt(nodeId.toString())));
             if (!node.isConnected) {
                 node.connect();
-                if (!node.initialized) await node.events.initialized;
+                if (!node.initialized) await waitWithTimeout(node.events.initialized, 15000, 'Node init timeout');
             }
             connectedNodes.set(nodeId.toString(), node);
         }
@@ -1389,7 +1428,7 @@ async function invokeCommand(nodeId, endpointId, clusterId, commandId, commandFi
             node = await commissioningController.getNode(NodeId(BigInt(nodeId.toString())));
             if (!node.isConnected) {
                 node.connect();
-                if (!node.initialized) await node.events.initialized;
+                if (!node.initialized) await waitWithTimeout(node.events.initialized, 15000, 'Node init timeout');
             }
             connectedNodes.set(nodeId.toString(), node);
         }
@@ -1439,7 +1478,7 @@ async function subscribeNode(nodeId, win) {
             node = await commissioningController.getNode(NodeId(BigInt(nodeId.toString())));
             if (!node.isConnected) {
                 node.connect();
-                if (!node.initialized) await node.events.initialized;
+                if (!node.initialized) await waitWithTimeout(node.events.initialized, 15000, 'Node init timeout');
             }
             connectedNodes.set(nodeId.toString(), node);
         }
