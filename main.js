@@ -893,6 +893,243 @@ ipcMain.handle('matter:startClusterDetailsPrefetch', async (event, { sshConfig }
 
 // ========== END MATTER ==========
 
+// ========== MATTER COMMISSIONER (Direct BLE/IP Connection) ==========
+
+// Commissioner 独立实例（与 SSH 模式完全隔离）
+let matterCommissioner = null;
+
+function getMatterCommissioner() {
+  if (!matterCommissioner) {
+    try {
+      matterCommissioner = require('./matter-commissioner.cjs');
+    } catch (error) {
+      console.error('[Commissioner] Failed to load Matter Commissioner:', error);
+      throw error;
+    }
+  }
+  return matterCommissioner;
+}
+
+// 初始化 Commissioner
+ipcMain.handle('commissioner:init', async () => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.initializeCommissioner(win);
+  } catch (error) {
+    console.error('[Commissioner] Init error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 发现可配网设备
+ipcMain.handle('commissioner:discover', async (event, options = {}) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.discoverDevices(win, options);
+  } catch (error) {
+    console.error('[Commissioner] Discover error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 停止发现
+ipcMain.handle('commissioner:stopDiscovery', async () => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.stopDiscovery();
+  } catch (error) {
+    console.error('[Commissioner] Stop discovery error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 配网（BLE-WiFi / BLE-Thread）
+ipcMain.handle('commissioner:commission', async (event, params) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.commissionDevice(win, params);
+  } catch (error) {
+    console.error('[Commissioner] Commission error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 扫描 Thread 网络
+ipcMain.handle('commissioner:scan-thread', async (event, params) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    // Use commissionDevice with a dummy thread dataset which forces a network scan when applied
+    const dummyDataset = '0e080000000000010000000300001035060004001fffe0020811111111222222220708fd8784adacafca4b051000112233445566778899aabbccddeeff030e4f70656e54687265616444656d6f010212340410445f2b5ca6f2a93a55ce570a70efeecb0c0402a0f7f8';
+
+    // Call commissionDevice but we know it will fail with scanned networks attached
+    const result = await commissioner.commissionDevice(win, {
+      ...params,
+      pairingMode: 'ble-thread',
+      threadDataset: dummyDataset
+    });
+
+    if (result.scannedThreadNetworks) {
+      return {
+        success: true,
+        scannedThreadNetworks: result.scannedThreadNetworks || []
+      };
+    } else {
+      return {
+        success: false,
+        error: result.error || 'Failed to complete scan.',
+        scannedThreadNetworks: []
+      };
+    }
+  } catch (error) {
+    console.error('[Commissioner] Scan Thread error:', error);
+    return { success: false, error: error.message, scannedThreadNetworks: [] };
+  }
+});
+
+// 取消配网
+ipcMain.handle('commissioner:cancel-commissioning', async () => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.cancelCommissioning();
+  } catch (error) {
+    console.error('[Commissioner] Cancel commissioning error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 连接已配网设备
+ipcMain.handle('commissioner:connectNode', async (event, { nodeId }) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.connectNode(nodeId);
+  } catch (error) {
+    console.error('[Commissioner] Connect node error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 断开设备连接
+ipcMain.handle('commissioner:disconnectNode', async (event, { nodeId }) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.disconnectNode(nodeId);
+  } catch (error) {
+    console.error('[Commissioner] Disconnect node error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取已配网设备列表
+ipcMain.handle('commissioner:getNodes', async () => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.getCommissionedNodes();
+  } catch (error) {
+    console.error('[Commissioner] Get nodes error:', error);
+    return { success: false, error: error.message, nodes: [] };
+  }
+});
+
+// 获取设备结构
+ipcMain.handle('commissioner:getNodeStructure', async (event, { nodeId }) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.getNodeStructure(nodeId);
+  } catch (error) {
+    console.error('[Commissioner] Get node structure error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取设备下所有属性及其值
+ipcMain.handle('commissioner:readAllAttributes', async (event, { nodeId }) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.readAllNodeAttributes(nodeId);
+  } catch (error) {
+    console.error('[Commissioner] Read all attributes error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 读取属性
+ipcMain.handle('commissioner:readAttribute', async (event, { nodeId, endpointId, clusterId, attributeId }) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.readAttribute(nodeId, endpointId, clusterId, attributeId);
+  } catch (error) {
+    console.error('[Commissioner] Read attribute error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 写入属性
+ipcMain.handle('commissioner:writeAttribute', async (event, { nodeId, endpointId, clusterId, attributeId, value }) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.writeAttribute(nodeId, endpointId, clusterId, attributeId, value);
+  } catch (error) {
+    console.error('[Commissioner] Write attribute error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 调用命令
+ipcMain.handle('commissioner:invokeCommand', async (event, { nodeId, endpointId, clusterId, commandId, args }) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.invokeCommand(nodeId, endpointId, clusterId, commandId, args);
+  } catch (error) {
+    console.error('[Commissioner] Invoke command error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 订阅设备事件
+ipcMain.handle('commissioner:subscribeNode', async (event, { nodeId }) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.subscribeNode(nodeId, win);
+  } catch (error) {
+    console.error('[Commissioner] Subscribe error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 删除设备
+ipcMain.handle('commissioner:removeNode', async (event, { nodeId }) => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.removeNode(nodeId);
+  } catch (error) {
+    console.error('[Commissioner] Remove node error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取 Commissioner 状态
+ipcMain.handle('commissioner:status', async () => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return commissioner.getStatus();
+  } catch (error) {
+    return { initialized: false, bleAvailable: false, connectedNodes: [], commissionedNodes: [] };
+  }
+});
+
+// 关闭 Commissioner
+ipcMain.handle('commissioner:shutdown', async () => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.shutdownCommissioner();
+  } catch (error) {
+    console.error('[Commissioner] Shutdown error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ========== END MATTER COMMISSIONER ==========
+
 // ========== WIFI ==========
 
 // 扫描 WiFi

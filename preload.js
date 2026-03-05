@@ -123,6 +123,63 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('matter:commissioning-progress', (event, data) => callback(data));
   },
 
+  // ===== COMMISSIONER IPC 接口 (Direct BLE/IP Connection) =====
+  commissionerInit: () => ipcRenderer.invoke('commissioner:init'),
+  commissionerDiscover: (options) => ipcRenderer.invoke('commissioner:discover', options),
+  commissionerStopDiscovery: () => ipcRenderer.invoke('commissioner:stopDiscovery'),
+  commissionerCommission: (params) => ipcRenderer.invoke('commissioner:commission', params),
+  commissionerScanThreadNetworks: (params) => ipcRenderer.invoke('commissioner:scan-thread', params),
+  commissionerCancelCommissioning: () => ipcRenderer.invoke('commissioner:cancel-commissioning'),
+  commissionerConnectNode: (nodeId) => ipcRenderer.invoke('commissioner:connectNode', { nodeId }),
+  commissionerDisconnectNode: (nodeId) => ipcRenderer.invoke('commissioner:disconnectNode', { nodeId }),
+  commissionerGetNodes: () => ipcRenderer.invoke('commissioner:getNodes'),
+  commissionerGetNodeStructure: (nodeId) => ipcRenderer.invoke('commissioner:getNodeStructure', { nodeId }),
+  commissionerReadAllAttributes: (nodeId) => ipcRenderer.invoke('commissioner:readAllAttributes', { nodeId }),
+  commissionerReadAttribute: (args) => ipcRenderer.invoke('commissioner:readAttribute', args),
+  commissionerWriteAttribute: (args) => ipcRenderer.invoke('commissioner:writeAttribute', args),
+  commissionerInvokeCommand: (args) => ipcRenderer.invoke('commissioner:invokeCommand', args),
+  commissionerSubscribeNode: (nodeId) => ipcRenderer.invoke('commissioner:subscribeNode', { nodeId }),
+  commissionerRemoveNode: (nodeId) => ipcRenderer.invoke('commissioner:removeNode', { nodeId }),
+  commissionerStatus: () => ipcRenderer.invoke('commissioner:status'),
+  commissionerShutdown: () => ipcRenderer.invoke('commissioner:shutdown'),
+
+  // Commissioner 事件监听
+  onCommissionerLog: (callback) => {
+    ipcRenderer.on('commissioner:log', (event, data) => callback(data));
+  },
+  onCommissionerDeviceDiscovered: (callback) => {
+    ipcRenderer.removeAllListeners('commissioner:device-discovered');
+    ipcRenderer.on('commissioner:device-discovered', (event, data) => callback(data));
+  },
+  onCommissionerCommissioningProgress: (callback) => {
+    ipcRenderer.removeAllListeners('commissioner:commissioning-progress');
+    ipcRenderer.on('commissioner:commissioning-progress', (event, data) => callback(data));
+  },
+  onCommissionerNodeStateChanged: (callback) => {
+    ipcRenderer.removeAllListeners('commissioner:node-state-changed');
+    ipcRenderer.on('commissioner:node-state-changed', (event, data) => callback(data));
+  },
+  onCommissionerAttributeChanged: (callback) => {
+    ipcRenderer.removeAllListeners('commissioner:attribute-changed');
+    ipcRenderer.on('commissioner:attribute-changed', (event, data) => callback(data));
+  },
+  onCommissionerEventTriggered: (callback) => {
+    ipcRenderer.removeAllListeners('commissioner:event-triggered');
+    ipcRenderer.on('commissioner:event-triggered', (event, data) => callback(data));
+  },
+  onCommissionerStructureChanged: (callback) => {
+    ipcRenderer.removeAllListeners('commissioner:structure-changed');
+    ipcRenderer.on('commissioner:structure-changed', (event, data) => callback(data));
+  },
+  removeCommissionerListeners: () => {
+    ipcRenderer.removeAllListeners('commissioner:device-discovered');
+    ipcRenderer.removeAllListeners('commissioner:commissioning-progress');
+    ipcRenderer.removeAllListeners('commissioner:node-state-changed');
+    ipcRenderer.removeAllListeners('commissioner:attribute-changed');
+    ipcRenderer.removeAllListeners('commissioner:event-triggered');
+    ipcRenderer.removeAllListeners('commissioner:structure-changed');
+  },
+
   // ========== Discovery API ==========
   discoveryStart: () => ipcRenderer.invoke('discovery:start'),
   discoveryStop: () => ipcRenderer.invoke('discovery:stop'),

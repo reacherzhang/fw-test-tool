@@ -14,6 +14,7 @@ import { MqttSettings } from './components/MqttSettings';
 import { MqttDeviceConsole } from './components/MqttDeviceConsole';
 import { MatterConsole } from './components/MatterConsole';
 import { MatterDashboard } from './components/MatterDashboard';
+import { MatterCommissioner } from './components/MatterCommissioner';
 import { ProtocolAudit } from './components/ProtocolAudit';
 import DeviceDiscoveryModal from './components/DeviceDiscoveryModal';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -26,6 +27,7 @@ const App: React.FC = () => {
 
   const [session, setSession] = useState<CloudSession | null>(null);
   const [currentView, setCurrentView] = useState<'DASHBOARD' | 'LAB' | 'CLOUD_LAB' | 'MATTER' | 'SETTINGS' | 'DEVICE_DETAIL' | 'AUDIT'>('DASHBOARD');
+  const [matterMode, setMatterMode] = useState<'commissioner' | 'ssh'>('commissioner');
   const [lastMqttMessage, setLastMqttMessage] = useState<any>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
@@ -1337,8 +1339,48 @@ const App: React.FC = () => {
             {/* MATTER VIEW */}
             {currentView === 'MATTER' && (
               <div className="space-y-6">
-                <MatterDashboard onLog={recordGlobalLog} />
-                <MatterConsole onLog={recordGlobalLog} />
+                {/* Matter 模式选择器 */}
+                {/* Matter 模式选择器 */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-4">
+                    <div className="flex bg-slate-800 rounded-2xl p-1">
+                      <button
+                        onClick={() => setMatterMode('commissioner')}
+                        className={`px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-2 ${matterMode === 'commissioner'
+                          ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20'
+                          : 'text-slate-400 hover:text-white'
+                          }`}
+                      >
+                        <Zap size={14} /> Commissioner
+                      </button>
+                      <button
+                        onClick={() => setMatterMode('ssh')}
+                        className={`px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-2 ${matterMode === 'ssh'
+                          ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
+                          : 'text-slate-400 hover:text-white'
+                          }`}
+                      >
+                        <Terminal size={14} /> SSH Remote
+                      </button>
+                    </div>
+                    <span className="text-slate-600 text-xs hidden md:inline">
+                      {matterMode === 'commissioner'
+                        ? 'Direct BLE/IP connection to Matter devices'
+                        : 'Via SSH to Raspberry Pi running chip-tool'}
+                    </span>
+                  </div>
+                  <div id="matter-header-actions" className="flex items-center gap-2"></div>
+                </div>
+
+                {/* 根据模式渲染不同组件 */}
+                {matterMode === 'commissioner' ? (
+                  <MatterCommissioner onLog={recordGlobalLog} />
+                ) : (
+                  <>
+                    <MatterDashboard onLog={recordGlobalLog} />
+                    <MatterConsole onLog={recordGlobalLog} />
+                  </>
+                )}
               </div>
             )}
 

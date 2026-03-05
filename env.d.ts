@@ -136,6 +136,73 @@ interface Window {
 
     // ========== Discovery API ==========
     discoveryStart: () => Promise<{ success: boolean; message?: string; error?: string }>;
+
+    // ===== COMMISSIONER IPC 接口 (Direct BLE/IP Connection) =====
+    commissionerInit: () => Promise<{ success: boolean; bleAvailable?: boolean; commissionedNodeCount?: number; error?: string; message?: string }>;
+    commissionerDiscover: (options?: { discriminator?: number; timeoutSeconds?: number }) => Promise<{
+      success: boolean;
+      devices?: CommissionerDiscoveredDevice[];
+      error?: string;
+    }>;
+    commissionerStopDiscovery: () => Promise<{ success: boolean; error?: string }>;
+    commissionerCommission: (params: {
+      passcode: string;
+      discriminator?: number;
+      pairingMode: 'ble-wifi' | 'ble-thread';
+      wifiSsid?: string;
+      wifiPassword?: string;
+      threadDataset?: string;
+      knownAddress?: { ip: string; port: number };
+    }) => Promise<{ success: boolean; nodeId?: string; networkType?: string; error?: string; message?: string; scannedThreadNetworks?: any[] }>;
+    commissionerCancelCommissioning: () => Promise<{ success: boolean; error?: string; message?: string }>;
+    commissionerConnectNode: (nodeId: string) => Promise<{ success: boolean; nodeId?: string; error?: string }>;
+    commissionerDisconnectNode: (nodeId: string) => Promise<{ success: boolean; error?: string }>;
+    commissionerScanThreadNetworks: (params: any) => Promise<{ success: boolean; scannedThreadNetworks?: any[]; error?: string }>;
+    commissionerGetNodes: () => Promise<{
+      success: boolean;
+      nodes?: CommissionerNode[];
+      error?: string;
+    }>;
+    commissionerGetNodeStructure: (nodeId: string) => Promise<{
+      success: boolean;
+      deviceInfo?: Record<string, any>;
+      endpoints?: CommissionerEndpoint[];
+      error?: string;
+    }>;
+    commissionerReadAllAttributes: (nodeId: string) => Promise<{
+      success: boolean;
+      data?: any;
+      error?: string;
+    }>;
+    commissionerReadAttribute: (args: {
+      nodeId: string; endpointId: number; clusterId: number; attributeId: number;
+    }) => Promise<{ success: boolean; value?: any; path?: any; error?: string }>;
+    commissionerWriteAttribute: (args: {
+      nodeId: string; endpointId: number; clusterId: number; attributeId: number; value: any;
+    }) => Promise<{ success: boolean; error?: string }>;
+    commissionerInvokeCommand: (args: {
+      nodeId: string; endpointId: number; clusterId: number; commandId: number; args?: any;
+    }) => Promise<{ success: boolean; result?: any; error?: string }>;
+    commissionerSubscribeNode: (nodeId: string) => Promise<{ success: boolean; error?: string }>;
+    commissionerRemoveNode: (nodeId: string) => Promise<{ success: boolean; error?: string }>;
+    commissionerStatus: () => Promise<{
+      initialized: boolean;
+      bleAvailable: boolean;
+      connectedNodes: string[];
+      commissionedNodes: string[];
+    }>;
+    commissionerShutdown: () => Promise<{ success: boolean; error?: string }>;
+
+    // Commissioner 事件监听
+    onCommissionerLog?: (callback: (data: { stage?: string; message: string; type?: string; timestamp?: string }) => void) => void;
+    onCommissionerDeviceDiscovered: (callback: (device: CommissionerDiscoveredDevice) => void) => void;
+    onCommissionerCommissioningProgress: (callback: (data: { stage: string; message: string }) => void) => void;
+    onCommissionerNodeStateChanged: (callback: (data: { nodeId: string; state: string }) => void) => void;
+    onCommissionerAttributeChanged: (callback: (data: { nodeId: string; endpointId: number; clusterId: number; attributeName: string; value: any }) => void) => void;
+    onCommissionerEventTriggered: (callback: (data: { nodeId: string; endpointId: number; clusterId: number; eventName: string; events: any }) => void) => void;
+    onCommissionerStructureChanged: (callback: (data: { nodeId: string }) => void) => void;
+    removeCommissionerListeners: () => void;
+
     discoveryStop: () => Promise<{ success: boolean; message?: string; error?: string }>;
     discoveryGetDevices: () => Promise<{ success: boolean; devices?: DiscoveredDevice[]; error?: string }>;
     discoveryCheckBindStatus: (args: { ip: string; session: CloudSession }) => Promise<{
@@ -300,6 +367,39 @@ interface ChipToolCluster {
   displayName: string;
   attributes: { name: string; displayName: string }[];
   commands: { name: string; displayName: string }[];
+}
+
+// Commissioner 设备类型（直接连接模式）
+interface CommissionerDiscoveredDevice {
+  id: string;
+  deviceName: string;
+  discriminator?: number;
+  vendorId?: number;
+  productId?: number;
+  commissioningMode?: number;
+  addresses: string[];
+  port?: number;
+  discoveredVia?: string;
+  pairingHint?: number;
+  pairingInstruction?: string;
+  raw?: any;
+}
+
+interface CommissionerNode {
+  nodeId: string;
+  isConnected?: boolean;
+  [key: string]: any;
+}
+
+interface CommissionerEndpoint {
+  id: number;
+  deviceTypes: number[];
+  clusters: CommissionerCluster[];
+}
+
+interface CommissionerCluster {
+  id: number;
+  name: string;
 }
 
 // 串口信息
