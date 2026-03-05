@@ -1685,6 +1685,120 @@ async function shutdownCommissioner() {
     }
 }
 
+/**
+ * 导出存储 (备份 Commissioner Storage)
+ */
+async function exportStorage() {
+    try {
+        const { dialog } = require('electron');
+        const fs = require('fs');
+        const path = require('path');
+        const AdmZip = require('adm-zip');
+        const os = require('os');
+
+        // 提示用户选择保存位置
+        const { filePath } = await dialog.showSaveDialog({
+            title: 'Export Matter Credentials',
+            defaultPath: `matter-credentials-${new Date().toISOString().replace(/[:.]/g, '-')}.zip`,
+            filters: [
+                { name: 'Zip Files', extensions: ['zip'] },
+                { name: 'All Files', extensions: ['*'] }
+            ]
+        });
+
+        if (!filePath) {
+            return { success: false, error: 'Export cancelled' };
+        }
+
+        const zip = new AdmZip();
+
+        // 存储目录: path.join(os.homedir(), '.iot-nexus-core', 'commissioner-storage')
+        const storagePath = path.join(os.homedir(), '.iot-nexus-core', 'commissioner-storage');
+
+        if (!fs.existsSync(storagePath)) {
+            return { success: false, error: 'Storage directory does not exist' };
+        }
+
+        zip.addLocalFolder(storagePath);
+        zip.writeZip(filePath);
+
+        console.log(`[Commissioner] Storage exported to ${filePath}`);
+        return { success: true, filePath };
+    } catch (error) {
+        console.error('[Commissioner] Export storage error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * 导入存储 (恢复 Commissioner Storage)
+ */
+async function importStorage() {
+    try {
+        const { dialog, app } = require('electron');
+        const fs = require('fs');
+        const path = require('path');
+        const AdmZip = require('adm-zip');
+        const os = require('os');
+
+        // 如果已经初始化，需要确认是否重启并导入
+        if (isInitialized) {
+            const { response } = await dialog.showMessageBox({
+                type: 'warning',
+                title: 'Restart Required',
+                message: 'Importing credentials requires the app to restart. Current connections will be lost.\n\nDo you want to continue?',
+                buttons: ['Yes, Import & Restart', 'Cancel'],
+                defaultId: 0,
+                cancelId: 1
+            });
+            if (response !== 0) {
+                return { success: false, error: 'Import cancelled' };
+            }
+        }
+
+        const { filePaths } = await dialog.showOpenDialog({
+            title: 'Import Matter Credentials',
+            properties: ['openFile'],
+            filters: [
+                { name: 'Zip Files', extensions: ['zip'] },
+                { name: 'All Files', extensions: ['*'] }
+            ]
+        });
+
+        if (!filePaths || filePaths.length === 0) {
+            return { success: false, error: 'Import cancelled' };
+        }
+
+        const zipFilePath = filePaths[0];
+        const zip = new AdmZip(zipFilePath);
+
+        const storagePath = path.join(os.homedir(), '.iot-nexus-core', 'commissioner-storage');
+
+        // 先 shutdown
+        if (isInitialized) {
+            await shutdownCommissioner();
+        }
+
+        // 清空目录并解压
+        if (fs.existsSync(storagePath)) {
+            fs.rmSync(storagePath, { recursive: true, force: true });
+        }
+
+        fs.mkdirSync(storagePath, { recursive: true });
+        zip.extractAllTo(storagePath, true);
+
+        console.log(`[Commissioner] Storage imported from ${zipFilePath}`);
+
+        // 重启应用
+        app.relaunch();
+        app.exit(0);
+
+        return { success: true };
+    } catch (error) {
+        console.error('[Commissioner] Import storage error:', error);
+        return { success: false, error: error.message };
+    }
+}
 
 // ============================================================
 // 模块导出
@@ -1709,4 +1823,6 @@ module.exports = {
     shutdownCommissioner,
     __getTestHooks,
     readAllNodeAttributes,
+    exportStorage,
+    importStorage,
 };

@@ -185,6 +185,8 @@ interface Window {
     }) => Promise<{ success: boolean; result?: any; error?: string }>;
     commissionerSubscribeNode: (nodeId: string) => Promise<{ success: boolean; error?: string }>;
     commissionerRemoveNode: (nodeId: string) => Promise<{ success: boolean; error?: string }>;
+    commissionerExportStorage: () => Promise<{ success: boolean; filePath?: string; error?: string }>;
+    commissionerImportStorage: () => Promise<{ success: boolean; error?: string }>;
     commissionerStatus: () => Promise<{
       initialized: boolean;
       bleAvailable: boolean;

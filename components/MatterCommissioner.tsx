@@ -14,7 +14,8 @@ import { createPortal } from 'react-dom';
 import {
     Zap, Wifi, Radio, Search, Plus, Trash2, RefreshCw, Power, PowerOff,
     ChevronRight, ChevronDown, ChevronUp, Activity, Eye, Pencil, Send, Loader2,
-    CheckCircle, XCircle, X, AlertCircle, Link, Unlink, Settings, Maximize2, Copy, Radar, Terminal
+    CheckCircle, XCircle, X, AlertCircle, Link, Unlink, Settings, Maximize2, Copy, Radar, Terminal,
+    Download, Upload
 } from 'lucide-react';
 
 interface MatterCommissionerProps {
@@ -200,6 +201,30 @@ export const MatterCommissioner: React.FC<MatterCommissionerProps> = ({ onLog })
             addLog('discover', 'Discovery stopped', 'info');
         } catch (e: any) {
             addLog('discover', `Stop error: ${e.message}`, 'error');
+        }
+    };
+
+    const handleExportStorage = async () => {
+        try {
+            const result = await window.electronAPI?.commissionerExportStorage();
+            if (result?.success) {
+                addLog('export', `Storage exported to: ${result.filePath}`, 'success');
+            } else if (result?.error !== 'Export cancelled') {
+                addLog('export', `Export failed: ${result?.error}`, 'error');
+            }
+        } catch (e: any) {
+            addLog('export', `Export Error: ${e.message}`, 'error');
+        }
+    };
+
+    const handleImportStorage = async () => {
+        try {
+            const result = await window.electronAPI?.commissionerImportStorage();
+            if (result && !result.success && result.error !== 'Import cancelled') {
+                addLog('import', `Import failed: ${result.error}`, 'error');
+            }
+        } catch (e: any) {
+            addLog('import', `Import Error: ${e.message}`, 'error');
         }
     };
 
@@ -762,6 +787,23 @@ export const MatterCommissioner: React.FC<MatterCommissionerProps> = ({ onLog })
                         </button>
                     ) : (
                         <>
+                            <div className="flex bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50 mr-2">
+                                <button
+                                    onClick={handleImportStorage}
+                                    className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-indigo-600 hover:text-white text-slate-300 transition-all border-r border-slate-700/50 text-xs font-bold"
+                                    title="Import Credentials (Zip)"
+                                >
+                                    <Upload size={14} /> Import
+                                </button>
+                                <button
+                                    onClick={handleExportStorage}
+                                    className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-indigo-600 hover:text-white text-slate-300 transition-all text-xs font-bold"
+                                    title="Export Credentials (Zip)"
+                                >
+                                    <Download size={14} /> Export
+                                </button>
+                            </div>
+
                             <button
                                 onClick={loadCommissionedNodes}
                                 className="flex items-center justify-center p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all"
@@ -1123,13 +1165,16 @@ export const MatterCommissioner: React.FC<MatterCommissionerProps> = ({ onLog })
                                 </div>
                                 <div className="flex justify-end gap-3 pt-2">
                                     <button onClick={handleReadAttribute} disabled={isOperating} className="flex items-center justify-center gap-2 px-8 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg hover:shadow-blue-500/25">
-                                        <Eye size={16} /> Read
+                                        {isOperating ? <Loader2 size={16} className="animate-spin" /> : <Eye size={16} />}
+                                        Read
                                     </button>
                                     <button onClick={handleWriteAttribute} disabled={isOperating} className="flex items-center justify-center gap-2 px-8 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-slate-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg hover:shadow-amber-500/25">
-                                        <Pencil size={16} /> Write
+                                        {isOperating ? <Loader2 size={16} className="animate-spin" /> : <Pencil size={16} />}
+                                        Write
                                     </button>
                                     <button onClick={handleInvokeCommand} disabled={isOperating} className="flex items-center justify-center gap-2 px-8 py-2.5 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg hover:shadow-purple-500/25">
-                                        <Send size={16} /> Invoke
+                                        {isOperating ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+                                        Invoke
                                     </button>
                                 </div>
                                 {lastReadResult !== null && (

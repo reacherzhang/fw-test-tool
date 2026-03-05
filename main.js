@@ -1107,6 +1107,28 @@ ipcMain.handle('commissioner:removeNode', async (event, { nodeId }) => {
   }
 });
 
+// 导出存储
+ipcMain.handle('commissioner:exportStorage', async () => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.exportStorage();
+  } catch (error) {
+    console.error('[Commissioner] Export storage error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 导入存储
+ipcMain.handle('commissioner:importStorage', async () => {
+  try {
+    const commissioner = getMatterCommissioner();
+    return await commissioner.importStorage();
+  } catch (error) {
+    console.error('[Commissioner] Import storage error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 // 获取 Commissioner 状态
 ipcMain.handle('commissioner:status', async () => {
   try {
