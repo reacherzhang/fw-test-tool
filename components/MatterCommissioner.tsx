@@ -1121,14 +1121,14 @@ export const MatterCommissioner: React.FC<MatterCommissionerProps> = ({ onLog })
                                     <input type="text" placeholder="Value / Command args (optional json)" value={attrValue} onChange={e => setAttrValue(e.target.value)}
                                         className="flex-1 bg-slate-800 border border-slate-600 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-500 hover:border-slate-500 focus:border-indigo-500 focus:outline-none transition-all font-mono" />
                                 </div>
-                                <div className="flex gap-3 pt-2">
-                                    <button onClick={handleReadAttribute} disabled={isOperating} className="flex-1 flex items-center justify-center gap-2 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg hover:shadow-blue-500/25">
+                                <div className="flex justify-end gap-3 pt-2">
+                                    <button onClick={handleReadAttribute} disabled={isOperating} className="flex items-center justify-center gap-2 px-8 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg hover:shadow-blue-500/25">
                                         <Eye size={16} /> Read
                                     </button>
-                                    <button onClick={handleWriteAttribute} disabled={isOperating} className="flex-1 flex items-center justify-center gap-2 py-3 bg-amber-600 hover:bg-amber-500 disabled:bg-slate-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg hover:shadow-amber-500/25">
+                                    <button onClick={handleWriteAttribute} disabled={isOperating} className="flex items-center justify-center gap-2 px-8 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-slate-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg hover:shadow-amber-500/25">
                                         <Pencil size={16} /> Write
                                     </button>
-                                    <button onClick={handleInvokeCommand} disabled={isOperating} className="flex-1 flex items-center justify-center gap-2 py-3 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg hover:shadow-purple-500/25">
+                                    <button onClick={handleInvokeCommand} disabled={isOperating} className="flex items-center justify-center gap-2 px-8 py-2.5 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg hover:shadow-purple-500/25">
                                         <Send size={16} /> Invoke
                                     </button>
                                 </div>

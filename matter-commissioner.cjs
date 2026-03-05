@@ -1294,6 +1294,17 @@ async function readAttribute(nodeId, endpointId, clusterId, attributeId) {
     try {
         const { NodeId } = _matterTypes;
 
+        // Ensure node is connected first
+        let node = connectedNodes.get(nodeId.toString());
+        if (!node) {
+            node = await commissioningController.getNode(NodeId(BigInt(nodeId.toString())));
+            if (!node.isConnected) {
+                node.connect();
+                if (!node.initialized) await waitWithTimeout(node.events.initialized, 15000, 'Node init timeout');
+            }
+            connectedNodes.set(nodeId.toString(), node);
+        }
+
         const interactionClient = await commissioningController.createInteractionClient(
             NodeId(BigInt(nodeId.toString()))
         );
@@ -1302,14 +1313,14 @@ async function readAttribute(nodeId, endpointId, clusterId, attributeId) {
         const clId = parseInt(clusterId);
         const atId = parseInt(attributeId);
 
-        // getMultipleAttributes 接受 options 对象, 其中 attributes 为路径数组
-        const result = await interactionClient.getMultipleAttributes({
+        // getMultipleAttributes with timeout protection
+        const result = await waitWithTimeout(interactionClient.getMultipleAttributes({
             attributes: [{
                 endpointId: epId,
                 clusterId: clId,
                 attributeId: atId,
             }],
-        });
+        }), 10000, 'Device read attribute timeout');
 
         if (result.length > 0) {
             const attr = result[0];
@@ -1365,9 +1376,10 @@ async function writeAttribute(nodeId, endpointId, clusterId, attributeId, value)
         const atId = parseInt(attributeId);
 
         // 先读取属性以验证路径有效，同时获取 schema 信息
-        const readResult = await interactionClient.getMultipleAttributes({
+        const readPromise = interactionClient.getMultipleAttributes({
             attributes: [{ endpointId: epId, clusterId: clId, attributeId: atId }],
         });
+        const readResult = await waitWithTimeout(readPromise, 10000, 'Device read before write timeout');
 
         if (readResult.length === 0) {
             return { success: false, error: `Attribute ${epId}/${clId}/${atId} not found` };
@@ -1390,7 +1402,7 @@ async function writeAttribute(nodeId, endpointId, clusterId, attributeId, value)
                         const attributes = cluster.attributes || {};
                         for (const [attrName, attr] of Object.entries(attributes)) {
                             if (attr?.id === atId) {
-                                await cluster.setAttribute(attr, value);
+                                await waitWithTimeout(cluster.setAttribute(attr, value), 10000, 'Device write timeout');
                                 console.log(`[Commissioner] Write success via ClusterClient: ${attrName}`);
                                 return { success: true };
                             }
@@ -1443,7 +1455,7 @@ async function invokeCommand(nodeId, endpointId, clusterId, commandId, commandFi
                         const commands = cluster.commands || {};
                         for (const [cmdName, cmd] of Object.entries(commands)) {
                             if (cmd?.requestId === cmdId || cmd?.id === cmdId) {
-                                const result = await cluster.invoke(cmd, commandFields);
+                                const result = await waitWithTimeout(cluster.invoke(cmd, commandFields), 15000, 'Device command invocation timeout');
                                 console.log(`[Commissioner] Invoke success via ClusterClient: ${cmdName}, result=${JSON.stringify(result)}`);
                                 return { success: true, result };
                             }
