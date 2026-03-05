@@ -463,6 +463,9 @@ async function initializeCommissioner(win) {
         // 2. 获取或创建 Environment
         environment = Environment.default;
 
+        // --- 核心修复：强制 Matter.js 使用我们指定的自定义独立存储路径，防止跑到全局 AppData 里 ---
+        environment.vars.set('path.root', COMMISSIONER_STORAGE_PATH);
+
         // 3. 初始化 BLE 支持
         bleAvailable = false;
         if (_matterNodejsBle) {
