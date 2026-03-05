@@ -21,6 +21,8 @@
     "@google/genai": "^1.34.0",
     "@matter/main": "^0.15.6",
     "@matter/nodejs": "^0.15.6",
+    "@matter/nodejs-ble": "^0.15.6",
+    "@project-chip/matter.js": "^0.15.6",
     "@stoprocent/noble": "^2.3.10",
     "ajv": "^6.12.6",
     "axios": "^1.13.3",
