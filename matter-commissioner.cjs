@@ -782,7 +782,7 @@ async function commissionDevice(win, params) {
         // Parse thread-network-setup-failed to extract scanned networks
         let scannedNetworks = null;
         const errMsg = error.message || String(error);
-        if (errMsg.includes('did not return the requested Network Thread')) {
+        if (errMsg.includes('did not return the requested Network')) {
             try {
                 const jsonMatch = errMsg.match(/\[(\{.*\})\]/s);
                 if (jsonMatch) {
@@ -793,10 +793,49 @@ async function commissionDevice(win, params) {
             } catch { /* ignore parse error */ }
         }
 
-        sendProgress('error', `Commissioning failed: ${errMsg}`);
+        // Build user-friendly error message for Thread network mismatch
+        const mode = pairingMode || 'ble-wifi';
+        if (mode === 'ble-thread' && errMsg.includes('did not return the requested Network')) {
+            // Extract the expected network name from the dataset we parsed earlier
+            let expectedName = 'unknown';
+            try {
+                const hexClean = threadDataset.replace(/[^0-9a-fA-F]/g, '');
+                const buf = Buffer.from(hexClean, 'hex');
+                let idx = 0;
+                while (idx < buf.length) {
+                    const type = buf[idx++];
+                    const length = buf[idx++];
+                    if (type === 3) {
+                        expectedName = buf.subarray(idx, idx + length).toString('utf8');
+                        break;
+                    }
+                    idx += length;
+                }
+            } catch { /* ignore */ }
 
-        if (scannedNetworks) {
-            sendProgress('info', `Device scanned ${scannedNetworks.length} Thread networks nearby: ${scannedNetworks.map(n => `${n.networkName}(ch${n.channel},rssi:${n.rssi})`).join(', ')}`);
+            const foundNames = scannedNetworks
+                ? scannedNetworks.map(n => n.networkName).filter(Boolean)
+                : [];
+
+            sendProgress('error',
+                `Commissioning failed: Thread network "${expectedName}" not found. ` +
+                `The device scanned nearby Thread networks but could not find a match. ` +
+                `Please ensure the Thread Border Router broadcasting "${expectedName}" is online and in range.`
+            );
+            if (foundNames.length > 0) {
+                sendProgress('info',
+                    `Device found ${foundNames.length} Thread network(s) nearby: ${scannedNetworks.map(n => `${n.networkName}(ch${n.channel},rssi:${n.rssi})`).join(', ')}. ` +
+                    `None of these match the expected network "${expectedName}".`
+                );
+            } else {
+                sendProgress('info', `Device did not find any Thread networks nearby.`);
+            }
+        } else {
+            sendProgress('error', `Commissioning failed: ${errMsg}`);
+
+            if (scannedNetworks) {
+                sendProgress('info', `Device scanned ${scannedNetworks.length} Thread networks nearby: ${scannedNetworks.map(n => `${n.networkName}(ch${n.channel},rssi:${n.rssi})`).join(', ')}`);
+            }
         }
 
         return {
