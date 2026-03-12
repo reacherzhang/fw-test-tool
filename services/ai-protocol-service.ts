@@ -391,6 +391,17 @@ export class AIProtocolService {
                 });
 
             } catch (error: any) {
+                if (error.message === 'Aborted') {
+                    throw error;
+                }
+
+                if (error.message && (error.message.includes('402') || error.message.includes('insufficient_balance') || error.message.includes('Insufficient account balance'))) {
+                    if (this.abortController) {
+                        this.abortController.abort();
+                    }
+                    throw error;
+                }
+
                 onProgress(processedCount, total, namespace, {
                     timestamp: Date.now(),
                     type: 'error',
@@ -528,8 +539,11 @@ ${candidates.map((c, i) => `${i + 1}. 标题: "${c.title}"
             if (index >= 0 && index < candidates.length) {
                 return candidates[index];
             }
-        } catch (error) {
+        } catch (error: any) {
             console.error('AI selection error:', error);
+            if (error.message && (error.message.includes('402') || error.message.includes('insufficient_balance') || error.message.includes('Insufficient account balance'))) {
+                throw error;
+            }
         }
 
         return candidates[0];
@@ -1161,6 +1175,9 @@ ${content.slice(0, 15000)}
             };
         } catch (error: any) {
             console.error('AI analyze error:', error);
+            if (error.message && (error.message.includes('402') || error.message.includes('insufficient_balance') || error.message.includes('Insufficient account balance'))) {
+                throw error;
+            }
             return {
                 ...this.createDefaultProtocol(namespace, [`AI 分析失败: ${error.message}`]),
                 documentUrl: docInfo.url,
@@ -1364,8 +1381,11 @@ ${content.slice(0, 8000)}
                 console.log(`[AI Protocol] - ${name} schema:`, JSON.stringify(schema).slice(0, 150) + '...');
                 return schema;
             }
-        } catch (e) {
-            console.error(`Failed to analyze data structure for ${name}`, e);
+        } catch (error: any) {
+            console.error(`Failed to analyze data structure for ${name}`, error);
+            if (error.message && (error.message.includes('402') || error.message.includes('insufficient_balance') || error.message.includes('Insufficient account balance'))) {
+                throw error;
+            }
         }
         return null;
     }
@@ -1577,10 +1597,8 @@ ${content.slice(0, 8000)}
                     continue;
                 }
 
-                // 如果是最后一次尝试，或者不是可重试的错误，则抛出
-                if (attempt === maxRetries) {
-                    throw error;
-                }
+                // 如果不是超时错误，或者已经是最后一次尝试，直接抛出
+                throw error;
             }
         }
 

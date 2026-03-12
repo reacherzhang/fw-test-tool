@@ -10,6 +10,13 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Global Error] Unhandled Rejection at:', promise, 'reason:', reason);
+    if (reason && reason.stack) {
+        console.error(reason.stack);
+    }
+});
+
 // Commissioner 独立存储目录（与 SSH 模式隔离）
 const COMMISSIONER_STORAGE_PATH = path.join(os.homedir(), '.iot-nexus-core', 'commissioner-storage');
 
@@ -47,16 +54,18 @@ function forwardLog(level, ...args) {
             if (msg.includes('[Commissioner]')) {
                 stage = 'CMS';
                 if (level === 'error') type = 'error';
-                if (level === 'warn') type = 'progress';
-            } else if (msg.match(/^[0-9:\-\s]+(DEBUG|INFO|NOTICE|WARN|ERROR|FATAL)\s/)) {
-                const m = msg.match(/^[0-9:\-\s]+(DEBUG|INFO|NOTICE|WARN|ERROR|FATAL)\s+([a-zA-Z0-9_]+)\s/);
+                else if (level === 'warn') type = 'progress';
+                else type = 'info';
+            } else if (msg.match(/(DEBUG|INFO|NOTICE|WARN|ERROR|FATAL)/)) {
+                const m = msg.match(/(DEBUG|INFO|NOTICE|WARN|ERROR|FATAL)\s+([a-zA-Z0-9_]+)\s/);
                 stage = m ? m[2] : 'SDK';
                 if (msg.includes('ERROR') || msg.includes('FATAL')) type = 'error';
                 else if (msg.includes('WARN')) type = 'progress';
-                else if (msg.includes('DEBUG')) type = 'debug'; // Use debug or slate color
+                else if (msg.includes('DEBUG')) type = 'debug';
                 else type = 'info';
             } else {
-                return;
+                stage = 'RAW';
+                type = 'debug';
             }
 
             if (masterWin.webContents) {
@@ -456,6 +465,16 @@ async function initializeCommissioner(win) {
 
         // 1. 加载 matter.js 模块
         loadMatterModules();
+
+        // 设置 matter.js SDK 日志级别为 DEBUG，输出配网过程中每个步骤的详细日志
+        // LogLevel: 0=DEBUG, 1=INFO, 2=NOTICE, 3=WARN, 4=ERROR, 5=FATAL
+        try {
+            const { Logger } = require('@matter/general');
+            Logger.level = 0; // DEBUG - 最详细的日志级别
+            console.log('[Commissioner] SDK log level set to DEBUG for detailed commissioning logs');
+        } catch (e) {
+            console.warn('[Commissioner] Failed to set SDK log level:', e.message);
+        }
 
         const { Environment, StorageService, Time } = _matterMain;
         const { CommissioningController } = _matterJs;
