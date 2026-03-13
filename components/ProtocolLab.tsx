@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { md5 } from './AuthScreen';
 import { GlobalLogEntry, CloudSession } from '../types';
+import { QAAutoTaskRunner } from './QAAutoTaskRunner';
 
 interface ToolboxProps {
   onLog?: (log: Omit<GlobalLogEntry, 'id' | 'timestamp'>) => void;
@@ -17,6 +18,9 @@ interface ToolboxProps {
   onHttpRequest?: (ip: string, payload: any) => Promise<any>;
   appid?: string;
   session?: CloudSession | null;
+  qaServerUrl?: string;
+  qaUser?: string;
+  qaToken?: string;
 }
 
 interface ProtocolTemplate {
@@ -38,7 +42,7 @@ const INITIAL_TEMPLATES: ProtocolTemplate[] = [
   { id: 'msgid_format', name: 'MessageId格式', namespace: 'Appliance.System.All', method: 'GET', payload: {}, specialTest: 'msgid_format' },
 ];
 
-type ToolTab = 'STRESS_TEST' | 'MOCK_FORWARD' | 'SERIAL_MONITOR';
+type ToolTab = 'STRESS_TEST' | 'MOCK_FORWARD' | 'SERIAL_MONITOR' | 'QA_AUTO_TASK';
 
 interface StressTestConfig {
   type: 'TOGGLE' | 'UPGRADE' | 'CUSTOM';
@@ -49,6 +53,7 @@ interface StressTestConfig {
   templateIds: string[]; // Changed to array
   customPayload: string;
   useHttp: boolean; // 优先使用 HTTP
+  mode: 'linear' | 'concurrent'; // 压测模式
 }
 
 interface StressTask {
@@ -64,7 +69,7 @@ interface StressTask {
     failed: number;
     avgLatency: number;
   };
-  logs: { time: string; status: 'success' | 'failed' | 'pending'; latency?: number; message?: string }[];
+  logs: { time: string; status: 'success' | 'failed' | 'pending'; latency?: number; message?: string; payload?: string }[];
   startTime: number;
 }
 
@@ -88,7 +93,7 @@ interface AvailablePort {
   friendlyName: string;
 }
 
-export const ProtocolLab: React.FC<ToolboxProps> = ({ onLog, mqttConnected, devices = [], onMqttPublish, onHttpRequest, appid = 'iot-test-tool', session }) => {
+export const ProtocolLab: React.FC<ToolboxProps> = ({ onLog, mqttConnected, devices = [], onMqttPublish, onHttpRequest, appid = 'iot-test-tool', session, qaServerUrl, qaUser, qaToken }) => {
   const [activeTab, setActiveTab] = useState<ToolTab>('STRESS_TEST');
 
   // Stress Test State
@@ -103,7 +108,8 @@ export const ProtocolLab: React.FC<ToolboxProps> = ({ onLog, mqttConnected, devi
       header: { namespace: 'Appliance.Control.ToggleX', method: 'SET' },
       payload: { togglex: { channel: 0, onoff: 1 } }
     }, null, 2),
-    useHttp: true
+    useHttp: true,
+    mode: 'linear'
   });
 
   // 获取当前用户的模板存储 key
@@ -449,6 +455,146 @@ export const ProtocolLab: React.FC<ToolboxProps> = ({ onLog, mqttConnected, devi
     // 用于 msgid_replay 测试：记录前 20 条的 messageId
     const messageIdHistory: string[] = [];
 
+    // 并发模式处理
+    if (configSnapshot.mode === 'concurrent') {
+      const runConcurrent = async () => {
+        const promises = [];
+        for (let i = 1; i <= configSnapshot.count; i++) {
+          if (isStopped) break;
+          const currentRound = i;
+
+          promises.push((async () => {
+            const startTime = Date.now();
+
+            // Initial pending log
+            setTasks(prev => prev.map(t => {
+              if (t.id !== taskId) return t;
+              return {
+                ...t,
+                progress: { ...t.progress, current: Math.max(t.progress.current, currentRound) },
+                logs: [{ time: new Date().toLocaleTimeString(), status: 'pending', message: `Round ${currentRound} started (Concurrent)...` }, ...t.logs.slice(0, 49)]
+              };
+            }));
+
+            try {
+              let requestPayload: any;
+              const useTemplates = configSnapshot.templateIds.length > 0;
+
+              if (useTemplates) {
+                const templateId = configSnapshot.templateIds[(currentRound - 1) % configSnapshot.templateIds.length];
+                const template = templates.find(t => t.id === templateId);
+                if (!template) throw new Error(`Template ${templateId} not found`);
+
+                requestPayload = {
+                  header: {
+                    namespace: template.namespace,
+                    method: template.method,
+                    messageId: '',
+                    timestamp: 0,
+                    sign: '',
+                    triggerSrc: 'iot-test-tool',
+                    from: `/app/${appid}/subscribe`
+                  },
+                  payload: template.payload
+                };
+              } else {
+                try {
+                  requestPayload = JSON.parse(configSnapshot.customPayload);
+                } catch (e) {
+                  throw new Error('Invalid JSON Payload');
+                }
+              }
+
+              const timestamp = Math.floor(Date.now() / 1000);
+              const messageId = md5(crypto.randomUUID()).toLowerCase();
+              const sign = md5(messageId + session.key + String(timestamp)).toLowerCase();
+
+              requestPayload.header.messageId = messageId;
+              requestPayload.header.timestamp = timestamp;
+              requestPayload.header.sign = sign;
+              requestPayload.header.triggerSrc = 'iot-test-tool';
+              if (!requestPayload.header.from) {
+                requestPayload.header.from = `/app/${appid}/subscribe`;
+              }
+
+              let success = false;
+              let method = 'UNKNOWN';
+
+              if (configSnapshot.useHttp && configSnapshot.targetIp && onHttpRequest) {
+                method = 'HTTP';
+                try {
+                  await onHttpRequest(configSnapshot.targetIp, requestPayload);
+                  success = true;
+                } catch (e) {
+                  console.warn(`[Stress] HTTP failed, trying MQTT if available...`, e);
+                }
+              }
+
+              if (!success && onMqttPublish) {
+                method = 'MQTT';
+                const topic = `/appliance/${configSnapshot.targetDevice}/subscribe`;
+                await onMqttPublish(topic, JSON.stringify(requestPayload));
+                success = true;
+              }
+
+              if (!success) {
+                throw new Error('No available transport (HTTP/MQTT failed)');
+              }
+
+              const latency = Date.now() - startTime;
+              latencies.push(latency);
+
+              setTasks(prev => prev.map(t => {
+                if (t.id !== taskId) return t;
+                return {
+                  ...t,
+                  progress: {
+                    ...t.progress,
+                    success: t.progress.success + 1,
+                    avgLatency: latencies.reduce((a, b) => a + b, 0) / latencies.length
+                  },
+                  logs: [{
+                    time: new Date().toLocaleTimeString(),
+                    status: 'success',
+                    latency,
+                    message: `Round ${currentRound} success via ${method} [MsgId: ${messageId.substring(0, 8)}...]`,
+                    payload: JSON.stringify(requestPayload, null, 2)
+                  }, ...t.logs.slice(0, 49)]
+                };
+              }));
+
+            } catch (err: any) {
+              setTasks(prev => prev.map(t => {
+                if (t.id !== taskId) return t;
+                return {
+                  ...t,
+                  progress: { ...t.progress, failed: t.progress.failed + 1 },
+                  logs: [{
+                    time: new Date().toLocaleTimeString(),
+                    status: 'failed',
+                    message: err.message
+                  }, ...t.logs.slice(0, 49)]
+                };
+              }));
+            }
+          })());
+        }
+
+        // Wait for all concurrent requests to finish
+        await Promise.allSettled(promises);
+
+        if (!isStopped) {
+          setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'COMPLETED' } : t));
+          taskControllers.current.delete(taskId);
+        }
+      };
+
+      runConcurrent();
+      taskControllers.current.set(taskId, { stop: () => { isStopped = true; } });
+      return;
+    }
+
+    // 现有的线性执行逻辑
     const runTest = async () => {
       if (isStopped) return;
 
@@ -623,7 +769,8 @@ export const ProtocolLab: React.FC<ToolboxProps> = ({ onLog, mqttConnected, devi
               time: new Date().toLocaleTimeString(),
               status: 'success',
               latency,
-              message: `Round ${round} ${testNote} via ${method} [MsgId: ${messageId.substring(0, 8)}...]`
+              message: `Round ${round} ${testNote} via ${method} [MsgId: ${messageId.substring(0, 8)}...]`,
+              payload: JSON.stringify(requestPayload, null, 2)
             }, ...t.logs.slice(0, 49)]
           };
         }));
@@ -925,6 +1072,7 @@ export const ProtocolLab: React.FC<ToolboxProps> = ({ onLog, mqttConnected, devi
     { id: 'STRESS_TEST' as ToolTab, label: '压力测试', icon: Gauge, desc: 'Stress Test' },
     { id: 'MOCK_FORWARD' as ToolTab, label: 'Mock转发', icon: Cloud, desc: 'Mock Forward' },
     { id: 'SERIAL_MONITOR' as ToolTab, label: '串口监控', icon: Terminal, desc: 'Serial Monitor' },
+    { id: 'QA_AUTO_TASK' as ToolTab, label: '自动化任务(QA)', icon: Play, desc: 'QA Automated Task Runner' },
   ];
 
   return (
@@ -991,7 +1139,16 @@ export const ProtocolLab: React.FC<ToolboxProps> = ({ onLog, mqttConnected, devi
                       <div className={`w-2 h-2 rounded-full ${stressConfig.targetIp ? 'bg-emerald-500' : 'bg-slate-600'}`} />
                       <span className="text-[10px] text-slate-500 font-mono">{stressConfig.targetIp || 'No IP detected'}</span>
 
-                      <label className="ml-auto flex items-center gap-2 cursor-pointer">
+                      <label className="ml-auto flex items-center gap-2 cursor-pointer border-r border-slate-700 pr-3">
+                        <input
+                          type="checkbox"
+                          checked={stressConfig.mode === 'concurrent'}
+                          onChange={e => setStressConfig(prev => ({ ...prev, mode: e.target.checked ? 'concurrent' : 'linear' }))}
+                          className="accent-cyan-500"
+                        />
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">并发执行</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
                         <input
                           type="checkbox"
                           checked={stressConfig.useHttp}
@@ -1331,35 +1488,57 @@ export const ProtocolLab: React.FC<ToolboxProps> = ({ onLog, mqttConnected, devi
                     {/* Selected Template Preview */}
                     {stressConfig.templateIds.length > 0 && !showNameInput && (
                       <div className="mt-4 pt-3 border-t border-slate-700/50">
-                        <div className="text-[10px] font-bold text-slate-600 uppercase mb-2 flex items-center justify-between">
-                          <span className="flex items-center gap-1">
-                            <Activity size={10} />
-                            执行序列预览
-                          </span>
-                          <span className="text-slate-500 font-normal normal-case">
-                            {stressConfig.count} 次 / 每次间隔 {stressConfig.interval}ms
+                        <div className="text-[10px] font-bold text-slate-600 uppercase mb-2 flex flex-col gap-1">
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-1">
+                              <Activity size={10} />
+                              执行序列预览
+                            </span>
+                            <span className="text-slate-500 font-normal normal-case">
+                              {stressConfig.count} 次 / 每次间隔 {stressConfig.interval}ms ({stressConfig.mode === 'concurrent' ? '并发执行' : '线性流转'})
+                            </span>
+                          </div>
+                          <span className="text-slate-500 font-normal normal-case text-[9px]">
+                            注：{stressConfig.mode === 'concurrent' ? '程序将在尽可能短的时间内同时发出去所有请求。' : '程序将根据设定次数进行线性排队发送，达到指定间隔后执行下一次发送。'}
                           </span>
                         </div>
-                        <div className="flex items-center gap-1 flex-wrap">
-                          {Array.from({ length: Math.min(stressConfig.count, 10) }).map((_, i) => {
-                            const templateId = stressConfig.templateIds[i % stressConfig.templateIds.length];
-                            const template = templates.find(t => t.id === templateId);
-                            const isPreset = template && !template.isCustom;
-                            return (
-                              <div
-                                key={i}
-                                className={`px-2 py-0.5 rounded text-[9px] font-bold ${isPreset
-                                  ? 'bg-orange-600/20 text-orange-400'
-                                  : 'bg-violet-600/20 text-violet-400'
-                                  }`}
-                              >
-                                {i + 1}. {template?.name}
-                              </div>
-                            );
-                          })}
-                          {stressConfig.count > 10 && (
-                            <span className="text-[10px] text-slate-500">...共 {stressConfig.count} 次</span>
-                          )}
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-center gap-1 flex-wrap mb-2">
+                            {Array.from({ length: Math.min(stressConfig.count, 10) }).map((_, i) => {
+                              const templateId = stressConfig.templateIds[i % stressConfig.templateIds.length];
+                              const template = templates.find(t => t.id === templateId);
+                              const isPreset = template && !template.isCustom;
+                              return (
+                                <div
+                                  key={i}
+                                  className={`px-2 py-0.5 rounded text-[9px] font-bold ${isPreset
+                                    ? 'bg-orange-600/20 text-orange-400'
+                                    : 'bg-violet-600/20 text-violet-400'
+                                    }`}
+                                >
+                                  {i + 1}. {template?.name}
+                                </div>
+                              );
+                            })}
+                            {stressConfig.count > 10 && (
+                              <span className="text-[10px] text-slate-500">...共 {stressConfig.count} 次</span>
+                            )}
+                          </div>
+                          <div className="bg-slate-950/50 border border-slate-800 rounded-lg p-2 max-h-40 overflow-y-auto custom-scrollbar">
+                            <div className="text-[9px] text-slate-500 mb-1">循环报文样例内容：</div>
+                            {stressConfig.templateIds.map((tid, idx) => {
+                              const temp = templates.find(t => t.id === tid);
+                              if (!temp) return null;
+                              return (
+                                <div key={tid} className="mb-2 last:mb-0">
+                                  <div className="text-[10px] font-mono text-cyan-400 mb-0.5">[{idx + 1}] {temp.namespace} ({temp.method})</div>
+                                  <pre className="text-[9px] font-mono text-slate-300 ml-4 border-l-2 border-slate-700 pl-2">
+                                    {JSON.stringify(temp.payload, null, 2)}
+                                  </pre>
+                                </div>
+                              )
+                            })}
+                          </div>
                         </div>
                       </div>
                     )}
@@ -1477,14 +1656,26 @@ export const ProtocolLab: React.FC<ToolboxProps> = ({ onLog, mqttConnected, devi
                       </div>
 
                       {/* Latest Log */}
-                      <div className="bg-slate-950 rounded-xl p-3 font-mono text-xs text-slate-400 max-h-24 overflow-y-auto custom-scrollbar">
-                        {task.logs.slice(0, 3).map((log, i) => (
-                          <div key={i} className="flex gap-2 mb-1 last:mb-0">
-                            <span className="text-slate-600">[{log.time}]</span>
-                            <span className={log.status === 'success' ? 'text-emerald-500' : log.status === 'failed' ? 'text-red-500' : 'text-amber-500'}>
-                              {log.status === 'success' ? '✓' : log.status === 'failed' ? '✗' : '●'}
-                            </span>
-                            <span className="truncate">{log.message}</span>
+                      <div className="bg-slate-950 rounded-xl p-3 font-mono text-xs text-slate-400 max-h-64 overflow-y-auto custom-scrollbar">
+                        {task.logs.slice(0, 10).map((log, i) => (
+                          <div key={i} className="mb-2 last:mb-0 border-b border-slate-800/50 pb-2 last:border-0 last:pb-0">
+                            <div className="flex gap-2 items-start">
+                              <span className="text-slate-600 flex-shrink-0">[{log.time}]</span>
+                              <span className={`flex-shrink-0 ${log.status === 'success' ? 'text-emerald-500' : log.status === 'failed' ? 'text-red-500' : 'text-amber-500'}`}>
+                                {log.status === 'success' ? '✓' : log.status === 'failed' ? '✗' : '●'}
+                              </span>
+                              <span className="break-all">{log.message}</span>
+                            </div>
+                            {log.payload && (
+                              <details className="mt-1 ml-[4.5rem]">
+                                <summary className="text-[9px] text-slate-500 cursor-pointer hover:text-slate-300 transition-colors select-none">
+                                  查看实际发送报文 (Click to expand)
+                                </summary>
+                                <pre className="mt-1 bg-slate-900 border border-slate-800 rounded p-2 text-[10px] text-indigo-300 overflow-x-auto">
+                                  {log.payload}
+                                </pre>
+                              </details>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -1773,6 +1964,24 @@ export const ProtocolLab: React.FC<ToolboxProps> = ({ onLog, mqttConnected, devi
                 发送
               </button>
             </div>
+          </div>
+        )}
+
+        {/* QA Auto Task Runner Tab */}
+        {activeTab === 'QA_AUTO_TASK' && (
+          <div className="h-full animate-in fade-in duration-300">
+            <QAAutoTaskRunner
+              onLog={onLog}
+              devices={devices}
+              mqttConnected={mqttConnected}
+              onMqttPublish={onMqttPublish}
+              onHttpRequest={onHttpRequest}
+              session={session}
+              appid={appid}
+              qaServerUrl={qaServerUrl}
+              qaUser={qaUser}
+              qaToken={qaToken}
+            />
           </div>
         )}
       </div>
