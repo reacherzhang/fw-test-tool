@@ -43,7 +43,12 @@ const NAMESPACE_PRESETS = [
     { label: 'Custom...', value: 'custom', method: 'GET' },
 ];
 
-const METHODS = ['GET', 'SET', 'PUSH'];
+const METHODS_PRESETS = [
+    { label: 'GET', value: 'GET' },
+    { label: 'SET', value: 'SET' },
+    { label: 'PUSH', value: 'PUSH' },
+    { label: 'Custom...', value: 'custom' }
+];
 
 export const MqttDeviceConsole: React.FC<MqttDeviceConsoleProps> = ({
     device, session, mqttConnected, appid, onLog
@@ -58,6 +63,8 @@ export const MqttDeviceConsole: React.FC<MqttDeviceConsoleProps> = ({
     const [namespace, setNamespace] = useState('Appliance.System.All');
     const [customNamespace, setCustomNamespace] = useState('');
     const [method, setMethod] = useState('GET');
+    const [customMethod, setCustomMethod] = useState('');
+    const [deviceNamespaces, setDeviceNamespaces] = useState<string[]>([]);
 
     // Payload 状态
     const [jsonPayload, setJsonPayload] = useState('{}');
@@ -144,6 +151,40 @@ export const MqttDeviceConsole: React.FC<MqttDeviceConsoleProps> = ({
                     label: `MQTT Response <- ${parsed.header?.namespace || 'Message'}`,
                     detail: `[Topic]: ${data.topic}\n[Payload]:\n${JSON.stringify(parsed, null, 2)}`
                 });
+
+                // Check for Appliance.System.Ability response
+                if (parsed.header && parsed.header.namespace === 'Appliance.System.Ability' && parsed.payload?.ability) {
+                    const abilities = Object.keys(parsed.payload.ability);
+                    if (abilities.length > 0) {
+                        setDeviceNamespaces(abilities);
+
+                        if (abilities.includes('Appliance.Mcu.Firmware')) {
+                            const messageId = md5((Date.now() / 1000).toString()).toLowerCase();
+                            const timestamp = Math.floor(Date.now() / 1000);
+                            const fromTopic = appid
+                                ? `/app/${session.uid}-${appid}/subscribe`
+                                : `/app/${session.uid}/subscribe`;
+
+                            const mcuMsg = {
+                                header: {
+                                    messageId,
+                                    payloadVersion: 1,
+                                    namespace: 'Appliance.Mcu.Firmware',
+                                    method: 'GET',
+                                    triggerSrc: 'iot-test-tool',
+                                    timestamp,
+                                    from: fromTopic,
+                                    sign: md5(messageId + session.key + String(timestamp)).toLowerCase()
+                                },
+                                payload: {}
+                            };
+                            window.electronAPI?.mqttPublish({
+                                topic: `/appliance/${device.id}/subscribe`,
+                                message: JSON.stringify(mcuMsg)
+                            }).catch(() => { });
+                        }
+                    }
+                }
             } catch (e) {
                 console.error('Error processing MQTT message:', e);
             }
@@ -155,6 +196,43 @@ export const MqttDeviceConsole: React.FC<MqttDeviceConsoleProps> = ({
         // 不移除监听器，因为 App.tsx 中也有全局监听器
     }, [mqttConnected, session, onLog]);
 
+    // Fetch Appliance.System.Ability to populate the dropdown
+    useEffect(() => {
+        if (!mqttConnected || !device.id || !session) return;
+
+        const fetchAbility = async () => {
+            const messageId = generateMessageId();
+            const timestamp = Math.floor(Date.now() / 1000);
+            const md5Source = messageId + session.key + String(timestamp);
+            const sign = md5(md5Source).toLowerCase();
+            const fromTopic = appid
+                ? `/app/${session.uid}-${appid}/subscribe`
+                : `/app/${session.uid}/subscribe`;
+
+            const abilityMessage = {
+                header: {
+                    messageId,
+                    payloadVersion: 1,
+                    namespace: 'Appliance.System.Ability',
+                    method: 'GET',
+                    triggerSrc: 'iot-test-tool',
+                    timestamp,
+                    from: fromTopic,
+                    sign
+                },
+                payload: {}
+            };
+
+            try {
+                await window.electronAPI?.mqttPublish({
+                    topic: `/appliance/${device.id}/subscribe`,
+                    message: JSON.stringify(abilityMessage)
+                });
+            } catch (e) { }
+        };
+        fetchAbility();
+    }, [device.id, mqttConnected, session, appid]);
+
     // 生成 messageId - 使用 md5(时间戳字符串) 或随机生成
     const generateMessageId = () => {
         // 使用当前时间戳（带小数的毫秒）生成 messageId
@@ -163,11 +241,10 @@ export const MqttDeviceConsole: React.FC<MqttDeviceConsoleProps> = ({
     };
 
     // 生成 MQTT 消息头
-    const generateHeader = () => {
+    const generateHeaderFor = (ns: string, meth: string) => {
         const messageId = generateMessageId();
         // 使用秒级时间戳（10位整数），与 Python int(time.time()) 一致
         const timestamp = Math.floor(Date.now() / 1000);
-        const actualNamespace = namespace === 'custom' ? customNamespace : namespace;
 
         // 签名公式: md5(messageId + key + timestamp_int)
         const md5Source = messageId + session.key + String(timestamp);
@@ -181,13 +258,19 @@ export const MqttDeviceConsole: React.FC<MqttDeviceConsoleProps> = ({
         return {
             messageId,
             payloadVersion: 1,
-            namespace: actualNamespace,
-            method,
+            namespace: ns,
+            method: meth,
             triggerSrc: 'iot-test-tool',
             timestamp,
             from: fromTopic,
             sign
         };
+    };
+
+    const generateHeader = () => {
+        const actualNamespace = namespace === 'custom' ? customNamespace : namespace;
+        const actualMethod = method === 'custom' ? customMethod : method;
+        return generateHeaderFor(actualNamespace, actualMethod);
     };
 
     // Key-Value 转 JSON 对象
@@ -451,177 +534,205 @@ export const MqttDeviceConsole: React.FC<MqttDeviceConsoleProps> = ({
     };
 
     return (
-        <div className="flex flex-col bg-slate-900/60 rounded-2xl border border-slate-800 shadow-xl overflow-hidden backdrop-blur-xl">
-            {/* Header */}
-            <div className="bg-slate-950/40 px-4 py-3 border-b border-slate-800 flex justify-between items-center">
-                <div className="flex items-center gap-4">
+        <div className="flex flex-col lg:flex-row bg-slate-900/60 rounded-2xl border border-slate-800 shadow-xl overflow-hidden backdrop-blur-xl h-[650px] w-full">
+            {/* Left Column: Builder */}
+            <div className="flex-1 flex flex-col border-r border-slate-800 lg:w-1/2">
+                {/* Header */}
+                <div className="bg-slate-950/40 px-4 py-3 border-b border-slate-800 flex justify-between items-center shrink-0">
                     <div className="flex items-center gap-2">
                         <Globe size={16} className="text-purple-400" />
-                        <span className="text-xs font-black text-white uppercase tracking-widest">MQTT Console</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <div className={`w-2 h-2 rounded-full ${mqttConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-                        <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">
-                            {mqttConnected ? 'Connected' : 'Disconnected'}
-                        </span>
+                        <span className="text-xs font-black text-white uppercase tracking-widest">MQTT Console Builder</span>
                     </div>
                 </div>
 
-                <button
-                    onClick={() => setMessages([])}
-                    className="p-3 hover:bg-red-500/10 rounded-2xl text-slate-500 hover:text-red-400 transition-all"
-                >
-                    <Trash2 size={18} />
-                </button>
-            </div>
-
-            {/* Message Log */}
-            <div ref={scrollRef} className="overflow-y-auto p-4 space-y-3 custom-scrollbar min-h-[120px] max-h-[150px]">
-                {messages.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center h-full text-slate-700 opacity-50">
-                        <Terminal size={48} className="mb-4" />
-                        <p className="text-xs font-black uppercase tracking-widest">No messages yet</p>
-                    </div>
-                ) : (
-                    messages.map((msg) => (
-                        <div key={msg.id} className="animate-in slide-in-from-bottom-2 duration-300">
-                            <div className="flex items-center gap-3 mb-2">
-                                <span className={`text-[10px] font-black px-2 py-1 rounded ${msg.direction === 'TX'
-                                    ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'
-                                    : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                                    }`}>
-                                    {msg.direction}
-                                </span>
-                                <span className="text-[10px] text-slate-600 font-mono">{msg.timestamp}</span>
-                                <span className="text-[10px] text-slate-500 font-mono truncate">{msg.topic}</span>
+                <div className="flex-1 p-4 bg-slate-900/80 flex flex-col space-y-3 min-h-0">
+                    {/* Namespace & Method */}
+                    <div className="flex flex-col xl:flex-row gap-4 shrink-0">
+                        {/* Namespace */}
+                        <div className="flex-1 min-w-0 flex flex-col gap-2">
+                            <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest block">Namespace</label>
+                            <div className="flex flex-col sm:flex-row gap-2">
+                                <select
+                                    value={namespace}
+                                    onChange={(e) => setNamespace(e.target.value)}
+                                    className={`bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-white focus:border-indigo-500 outline-none transition-all ${namespace === 'custom' ? 'w-full sm:w-40 shrink-0' : 'w-full flex-1'}`}
+                                >
+                                    {deviceNamespaces.length > 0 ? (
+                                        <>
+                                            {deviceNamespaces.map(ns => (
+                                                <option key={ns} value={ns}>{ns}</option>
+                                            ))}
+                                            <option value="custom">Custom...</option>
+                                        </>
+                                    ) : (
+                                        NAMESPACE_PRESETS.map(preset => (
+                                            <option key={preset.value} value={preset.value}>{preset.label}</option>
+                                        ))
+                                    )}
+                                </select>
+                                {namespace === 'custom' && (
+                                    <input
+                                        type="text"
+                                        value={customNamespace}
+                                        onChange={(e) => setCustomNamespace(e.target.value)}
+                                        placeholder="Appliance.Control.xxx"
+                                        className="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-white font-mono focus:border-indigo-500 outline-none"
+                                    />
+                                )}
                             </div>
-                            <pre className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-300 overflow-x-auto">
-                                {JSON.stringify(JSON.parse(msg.payload), null, 2)}
-                            </pre>
                         </div>
-                    ))
-                )}
-            </div>
+                        {/* Method */}
+                        <div className={`flex flex-col gap-2 transition-all ${method === 'custom' ? 'w-full xl:w-64 shrink-0' : 'w-full xl:w-32 shrink-0'}`}>
+                            <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest block">Method</label>
+                            <div className="flex flex-col sm:flex-row gap-2">
+                                <select
+                                    value={method}
+                                    onChange={(e) => setMethod(e.target.value)}
+                                    className={`bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-white focus:border-indigo-500 outline-none transition-all ${method === 'custom' ? 'w-full sm:w-28 shrink-0' : 'w-full'}`}
+                                >
+                                    {METHODS_PRESETS.map(m => (
+                                        <option key={m.value} value={m.value}>{m.label}</option>
+                                    ))}
+                                </select>
+                                {method === 'custom' && (
+                                    <input
+                                        type="text"
+                                        value={customMethod}
+                                        onChange={(e) => setCustomMethod(e.target.value)}
+                                        placeholder="METHOD"
+                                        className="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-white font-mono focus:border-indigo-500 outline-none uppercase"
+                                    />
+                                )}
+                            </div>
+                        </div>
+                    </div>
 
-            {/* Message Builder */}
-            <div className="bg-slate-900/80 p-4 border-t border-slate-800 space-y-3">
-                {/* Namespace & Method */}
-                <div className="grid grid-cols-12 gap-4">
-                    <div className="col-span-7">
-                        <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Namespace</label>
-                        <div className="flex gap-2">
-                            <select
-                                value={namespace}
-                                onChange={(e) => setNamespace(e.target.value)}
-                                className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-white focus:border-indigo-500 outline-none"
+                    {/* Edit Mode Toggle */}
+                    <div className="flex items-center justify-between shrink-0">
+                        <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800">
+                            <button
+                                onClick={() => setEditMode('json')}
+                                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${editMode === 'json' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-white'
+                                    }`}
                             >
-                                {NAMESPACE_PRESETS.map(preset => (
-                                    <option key={preset.value} value={preset.value}>{preset.label}</option>
-                                ))}
-                            </select>
-                            {namespace === 'custom' && (
-                                <input
-                                    type="text"
-                                    value={customNamespace}
-                                    onChange={(e) => setCustomNamespace(e.target.value)}
-                                    placeholder="Appliance.Control.xxx"
-                                    className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-white font-mono focus:border-indigo-500 outline-none"
-                                />
-                            )}
+                                <Code size={12} /> JSON
+                            </button>
+                            <button
+                                onClick={() => setEditMode('keyvalue')}
+                                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${editMode === 'keyvalue' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-white'
+                                    }`}
+                            >
+                                <List size={12} /> Key-Value
+                            </button>
                         </div>
-                    </div>
-                    <div className="col-span-3">
-                        <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Method</label>
-                        <select
-                            value={method}
-                            onChange={(e) => setMethod(e.target.value)}
-                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-white focus:border-indigo-500 outline-none"
-                        >
-                            {METHODS.map(m => (
-                                <option key={m} value={m}>{m}</option>
-                            ))}
-                        </select>
-                    </div>
-                    <div className="col-span-2">
-                        <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Topic</label>
-                        <div className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-[10px] text-slate-500 font-mono truncate">
-                            /appliance/{device.id.substring(0, 8)}...
-                        </div>
-                    </div>
-                </div>
 
-                {/* Edit Mode Toggle */}
-                <div className="flex items-center justify-between">
-                    <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800">
                         <button
-                            onClick={() => setEditMode('json')}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${editMode === 'json' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-white'
-                                }`}
+                            onClick={handleCopy}
+                            className="flex items-center gap-2 px-4 py-2 text-[10px] font-black text-slate-500 hover:text-white transition-colors"
                         >
-                            <Code size={12} /> JSON
+                            {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                            {copied ? 'Copied!' : 'Copy Message'}
                         </button>
-                        <button
-                            onClick={() => setEditMode('keyvalue')}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${editMode === 'keyvalue' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-white'
-                                }`}
-                        >
-                            <List size={12} /> Key-Value
-                        </button>
+                    </div>
+
+                    {/* Payload Editor */}
+                    <div className="bg-slate-950/50 border border-slate-800 rounded-2xl p-4 flex flex-col flex-1 min-h-0">
+                        <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-3 block shrink-0">Payload</label>
+
+                        {editMode === 'json' ? (
+                            <textarea
+                                value={jsonPayload}
+                                onChange={(e) => setJsonPayload(e.target.value)}
+                                placeholder='{"channel": 0, "toggle": {"onoff": 1}}'
+                                className="w-full h-full flex-1 bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-indigo-200 focus:border-indigo-500 outline-none resize-none"
+                            />
+                        ) : (
+                            <div className="space-y-2 flex-1 overflow-y-auto custom-scrollbar">
+                                {renderKeyValueEditor(keyValuePairs)}
+                                <button
+                                    onClick={() => addKeyValuePair()}
+                                    className="flex items-center gap-2 px-4 py-2 text-xs font-bold text-emerald-500 hover:bg-emerald-500/10 rounded-lg transition-colors"
+                                >
+                                    <Plus size={14} /> Add Property
+                                </button>
+                            </div>
+                        )}
                     </div>
 
                     <button
-                        onClick={handleCopy}
-                        className="flex items-center gap-2 px-4 py-2 text-[10px] font-black text-slate-500 hover:text-white transition-colors"
+                        onClick={handleSend}
+                        disabled={isSending || !mqttConnected}
+                        className={`w-full py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 shrink-0 ${mqttConnected
+                            ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-lg shadow-purple-500/20 active:scale-[0.98]'
+                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            }`}
                     >
-                        {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
-                        {copied ? 'Copied!' : 'Copy Message'}
+                        {isSending ? (
+                            <>
+                                <RefreshCw className="animate-spin" size={18} />
+                                Sending...
+                            </>
+                        ) : (
+                            <>
+                                <Send size={18} />
+                                Publish to Device
+                            </>
+                        )}
+                    </button>
+                </div>
+            </div>
+
+            {/* Right Column: Message Log Area */}
+            <div className="flex-1 flex flex-col bg-slate-900/40 w-full lg:w-1/2">
+                <div className="bg-slate-950/40 px-4 py-3 border-b border-slate-800 flex justify-between items-center shrink-0">
+                    <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-2">
+                            <Terminal size={16} className="text-emerald-400" />
+                            <span className="text-xs font-black text-white uppercase tracking-widest">Message Log</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className={`w-2 h-2 rounded-full ${mqttConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+                            <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">
+                                {mqttConnected ? 'Connected' : 'Disconnected'}
+                            </span>
+                        </div>
+                    </div>
+
+                    <button
+                        onClick={() => setMessages([])}
+                        className="p-2 hover:bg-red-500/10 rounded-xl text-slate-500 hover:text-red-400 transition-all"
+                    >
+                        <Trash2 size={16} />
                     </button>
                 </div>
 
-                {/* Payload Editor */}
-                <div className="bg-slate-950/50 border border-slate-800 rounded-2xl p-4">
-                    <label className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-3 block">Payload</label>
-
-                    {editMode === 'json' ? (
-                        <textarea
-                            value={jsonPayload}
-                            onChange={(e) => setJsonPayload(e.target.value)}
-                            placeholder='{"channel": 0, "toggle": {"onoff": 1}}'
-                            className="w-full h-20 bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-indigo-200 focus:border-indigo-500 outline-none resize-none"
-                        />
-                    ) : (
-                        <div className="space-y-2 max-h-40 overflow-y-auto custom-scrollbar">
-                            {renderKeyValueEditor(keyValuePairs)}
-                            <button
-                                onClick={() => addKeyValuePair()}
-                                className="flex items-center gap-2 px-4 py-2 text-xs font-bold text-emerald-500 hover:bg-emerald-500/10 rounded-lg transition-colors"
-                            >
-                                <Plus size={14} /> Add Property
-                            </button>
+                {/* Msg Log container with selcectable text */}
+                <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar selectable-text">
+                    {messages.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center h-full text-slate-700 opacity-50">
+                            <Terminal size={48} className="mb-4" />
+                            <p className="text-xs font-black uppercase tracking-widest">No messages yet</p>
                         </div>
+                    ) : (
+                        messages.map((msg) => (
+                            <div key={msg.id} className="animate-in slide-in-from-bottom-2 duration-300">
+                                <div className="flex items-center gap-3 mb-2">
+                                    <span className={`text-[10px] font-black px-2 py-1 rounded ${msg.direction === 'TX'
+                                        ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'
+                                        : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                        }`}>
+                                        {msg.direction}
+                                    </span>
+                                    <span className="text-[10px] text-slate-600 font-mono">{msg.timestamp}</span>
+                                    <span className="text-[10px] text-slate-500 font-mono truncate">{msg.topic}</span>
+                                </div>
+                                <pre className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-300 overflow-x-auto select-text hover:border-slate-700 transition-colors">
+                                    {JSON.stringify(JSON.parse(msg.payload), null, 2)}
+                                </pre>
+                            </div>
+                        ))
                     )}
                 </div>
-
-                <button
-                    onClick={handleSend}
-                    disabled={isSending || !mqttConnected}
-                    className={`w-full py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${mqttConnected
-                        ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-lg shadow-purple-500/20 active:scale-[0.98]'
-                        : 'bg-slate-800 text-slate-500 cursor-not-allowed'
-                        }`}
-                >
-                    {isSending ? (
-                        <>
-                            <RefreshCw className="animate-spin" size={18} />
-                            Sending...
-                        </>
-                    ) : (
-                        <>
-                            <Send size={18} />
-                            Publish to Device
-                        </>
-                    )}
-                </button>
             </div>
         </div>
     );

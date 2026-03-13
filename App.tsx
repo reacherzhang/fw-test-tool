@@ -898,6 +898,7 @@ const App: React.FC = () => {
                       config: {
                         ...d.config,
                         systemInfo: {
+                          ...(d.config?.systemInfo || {}),
                           hardware: hardware || {},
                           firmware: firmware || {},
                           online: system?.online || {}
@@ -905,6 +906,34 @@ const App: React.FC = () => {
                       }
                     };
                   }
+                }
+                return d;
+              });
+              return hasChange ? newDevices : prev;
+            });
+          }
+        }
+
+        // 处理 Appliance.Mcu.Firmware
+        if (parsed.header?.namespace === 'Appliance.Mcu.Firmware' && parsed.header?.method === 'GETACK') {
+          const firmware = parsed.payload?.firmware;
+          const deviceId = parsed.header?.uuid || data.topic.split('/')[2];
+          if (deviceId && firmware) {
+            setDevices(prev => {
+              let hasChange = false;
+              const newDevices = prev.map(d => {
+                if (d.id.toLowerCase() === deviceId.toLowerCase()) {
+                  hasChange = true;
+                  return {
+                    ...d,
+                    config: {
+                      ...d.config,
+                      systemInfo: {
+                        ...(d.config?.systemInfo || {}),
+                        mcu: firmware
+                      }
+                    }
+                  };
                 }
                 return d;
               });
@@ -1255,7 +1284,7 @@ const App: React.FC = () => {
                           <Edit3 size={16} className="text-slate-600 group-hover:text-indigo-400 transition-colors opacity-0 group-hover:opacity-100" />
                         </h2>
                       )}
-                      <p className="text-slate-500 text-xs font-mono mt-1">{selectedDevice.id}</p>
+                      {/* UUID display was removed as per request */}
                       {selectedDevice.config?.devInfo && (
                         <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-slate-400 font-mono bg-slate-800/50 px-3 py-1.5 rounded-lg border border-slate-700/50">
                           {selectedDevice.config.devInfo.version && (
@@ -1298,7 +1327,7 @@ const App: React.FC = () => {
                     return { status: selectedDevice.status === DeviceStatus.ONLINE ? 1 : 2 };
                   }}
                 />
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <div className="w-full">
                   <MqttDeviceConsole
                     device={selectedDevice}
                     session={session!}
@@ -1306,7 +1335,7 @@ const App: React.FC = () => {
                     appid={mqttConfig.appid}
                     onLog={recordGlobalLog}
                   />
-                  <DeviceConfiguration device={selectedDevice} onUpdateConfig={() => { }} onUpdateSequence={() => { }} onUpdateNetwork={() => { }} />
+                  {/* DeviceConfiguration hidden as per request */}
                 </div>
               </div>
             )}
@@ -1321,6 +1350,9 @@ const App: React.FC = () => {
                   onMqttPublish={handleMqttPublish}
                   appid={mqttConfig.appid}
                   session={session}
+                  qaServerUrl={qaServerUrl}
+                  qaUser={qaUser}
+                  qaToken={qaToken}
                   onHttpRequest={async (ip, payload) => {
                     if (!window.electronAPI?.nativeRequest) throw new Error('Electron API not available');
                     const res = await window.electronAPI.nativeRequest({
@@ -1374,11 +1406,11 @@ const App: React.FC = () => {
 
                 {/* 根据模式渲染不同组件 */}
                 {matterMode === 'commissioner' ? (
-                  <MatterCommissioner onLog={recordGlobalLog} />
+                  <MatterCommissioner onLog={recordGlobalLog as any} />
                 ) : (
                   <>
-                    <MatterDashboard onLog={recordGlobalLog} />
-                    <MatterConsole onLog={recordGlobalLog} />
+                    <MatterDashboard onLog={recordGlobalLog as any} />
+                    <MatterConsole onLog={recordGlobalLog as any} />
                   </>
                 )}
               </div>

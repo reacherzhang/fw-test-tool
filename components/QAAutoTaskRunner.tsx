@@ -122,9 +122,10 @@ export const QAAutoTaskRunner: React.FC<QAAutoTaskRunnerProps> = ({
                     }
 
                     if (steps.length === 0) {
-                        onLog?.({ type: 'SYSTEM', direction: 'SYS', label: `No Steps`, detail: `Automated case ${tCase.case_id} has no valid steps defined.` });
-                        await new Promise(r => setTimeout(r, 1500));
+                        onLog?.({ type: 'SYSTEM', direction: 'SYS', label: `Empty Script`, detail: `Automated case ${tCase.case_id} has no valid execution steps defined in its JSON script.` });
+                        markCaseResult(tCase.case_id, 'FAIL', '失败: 未下发或未解析到有效的自动化配置脚本字典');
                     } else {
+                        let stepSuccess = true;
                         for (let sIdx = 0; sIdx < steps.length; sIdx++) {
                             const step = steps[sIdx];
                             const type = step.type || 'unknown';
@@ -133,50 +134,49 @@ export const QAAutoTaskRunner: React.FC<QAAutoTaskRunnerProps> = ({
 
                             onLog?.({ type: 'SYSTEM', direction: 'SYS', label: `Step ${sIdx + 1}/${steps.length}`, detail: `[${type}]\nConfig:\n${JSON.stringify(config, null, 2)}` });
 
-                            if (type === 'delay') {
-                                const delayTime = config.duration || config.delay || 1500;
-                                onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'Wait', detail: `${delayTime} ms...` });
-                                await new Promise(r => setTimeout(r, delayTime));
-                            } else if (type === 'send_request') {
-                                const method = config.method || 'SET';
-                                const rawPayload = config.payload || config.payloadOverride || {};
-                                const payloadStr = typeof rawPayload === 'string' ? rawPayload : JSON.stringify(rawPayload);
+                            try {
+                                if (type === 'delay') {
+                                    const delayTime = config.duration || config.delay || 1500;
+                                    onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'Wait', detail: `${delayTime} ms...` });
+                                    await new Promise(r => setTimeout(r, delayTime));
+                                } else if (type === 'send_request') {
+                                    const method = config.method || 'SET';
+                                    const rawPayload = config.payload || config.payloadOverride || {};
+                                    const payloadStr = typeof rawPayload === 'string' ? rawPayload : JSON.stringify(rawPayload);
 
-                                if (onMqttPublish) {
-                                    const topic = config.topic || `/app/${appid || 'meross'}-${targetDevice}/subscribe`;
-                                    onLog?.({ type: 'MQTT', direction: 'TX', label: `Publish [${method}]`, detail: `Topic: ${topic}\nPayload:\n${payloadStr}` });
-                                    try {
+                                    if (onMqttPublish) {
+                                        const topic = config.topic || `/app/${appid || 'meross'}-${targetDevice}/subscribe`;
+                                        onLog?.({ type: 'MQTT', direction: 'TX', label: `Publish [${method}]`, detail: `Topic: ${topic}\nPayload:\n${payloadStr}` });
                                         await onMqttPublish(topic, payloadStr);
                                         await new Promise(r => setTimeout(r, 800)); // simulate wait for ACK
-                                    } catch (e: any) {
-                                        onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'MQTT Error', detail: e.message });
-                                        if (step.continueOnFail !== true) throw new Error(`Send request failed: ${e.message}`);
-                                    }
-                                } else if (onHttpRequest) {
-                                    const dev = devices.find(d => d.id === targetDevice);
-                                    if (!dev?.ip) throw new Error('Cannot execute HTTP request: Target device IP is missing');
-                                    onLog?.({ type: 'HTTP', direction: 'TX', label: `Request [${method}]`, detail: `Target IP: ${dev.ip}\nPayload:\n${payloadStr}` });
-                                    try {
+                                    } else if (onHttpRequest) {
+                                        const dev = devices.find(d => d.id === targetDevice);
+                                        if (!dev?.ip) throw new Error('Cannot execute HTTP request: Target device IP is missing');
+                                        onLog?.({ type: 'HTTP', direction: 'TX', label: `Request [${method}]`, detail: `Target IP: ${dev.ip}\nPayload:\n${payloadStr}` });
                                         await onHttpRequest(dev.ip, typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload);
-                                    } catch (e: any) {
-                                        onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'HTTP Error', detail: e.message });
-                                        if (step.continueOnFail !== true) throw new Error(`HTTP request failed: ${e.message}`);
+                                    } else {
+                                        throw new Error('Neither MQTT nor HTTP executor is available');
                                     }
+                                } else if (type === 'wait_push') {
+                                    onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'Wait PUSH', detail: `Waiting up to ${timeoutMs}ms for device PUSH message...` });
+                                    await new Promise(r => setTimeout(r, Math.min(timeoutMs, 2500))); // Simulate wait
+                                } else if (type === 'manual_action' || type === 'manual_input') {
+                                    onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'Skip Manual', detail: `Skipped manual intervention step in full-auto mode.` });
                                 } else {
-                                    onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'No Executor', detail: 'Neither MQTT nor HTTP executor is available.' });
+                                    onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'Mock Execute', detail: `Simulating unknown step resolution for 1s` });
+                                    await new Promise(r => setTimeout(r, 1000));
                                 }
-                            } else if (type === 'wait_push') {
-                                onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'Wait PUSH', detail: `Waiting up to ${timeoutMs}ms for device PUSH message...` });
-                                await new Promise(r => setTimeout(r, Math.min(timeoutMs, 2500))); // Simulate wait
-                            } else if (type === 'manual_action' || type === 'manual_input') {
-                                onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'Skip Manual', detail: `Skipped manual intervention step in full-auto mode.` });
-                            } else {
-                                onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'Mock Execute', detail: `Simulating unknown step resolution for 1s` });
-                                await new Promise(r => setTimeout(r, 1000));
+                            } catch (e: any) {
+                                onLog?.({ type: 'SYSTEM', direction: 'SYS', label: 'Step Error', detail: e.message });
+                                if (step.continueOnFail !== true) {
+                                    stepSuccess = false;
+                                    markCaseResult(tCase.case_id, 'FAIL', `Step ${sIdx + 1} failed: ${e.message}`);
+                                    break;
+                                }
                             }
                         }
+                        if (stepSuccess) markCaseResult(tCase.case_id, 'PASS', 'Auto-execution successful');
                     }
-                    markCaseResult(tCase.case_id, 'PASS', 'Auto-execution successful');
                 } else {
                     markCaseResult(tCase.case_id, 'SKIPPED', 'Unknown automation type or degraded');
                 }

@@ -108,27 +108,23 @@ export const DeviceMonitor: React.FC<DeviceMonitorProps> = ({ device, onGetOnlin
 
   return (
     <div className="space-y-4 animate-in fade-in duration-500">
-      {/* Real-time Indicator Cards */}
-      <div className="grid grid-cols-4 gap-3">
+      {/* Basic Info (Text only, completely visible, selectable) */}
+      <div className="flex flex-wrap items-center gap-x-8 gap-y-4 bg-slate-900/40 p-4 rounded-xl border border-slate-800/50 selectable-text select-text">
         {[
-          { icon: Thermometer, label: 'Thermals', val: latest.temperature.toFixed(1) + '°C', color: 'orange' },
-          { icon: Droplets, label: 'Humidity', val: latest.humidity.toFixed(1) + '%', color: 'blue' },
-          { icon: StatusIcon, label: 'Status', val: statusConfig.label, color: statusConfig.color, isStatus: true },
-          { icon: Zap, label: 'Voltage', val: latest.voltage.toFixed(2) + 'V', color: 'yellow' }
-        ].map((card, i) => (
-          <div key={i} className="bg-slate-900/40 p-3 rounded-xl border border-slate-800/50 relative overflow-hidden group">
-            <div className="relative z-10 flex items-center gap-3">
-              <div className={`p-2 bg-${card.color}-500/10 rounded-lg text-${card.color}-500`}>
-                <card.icon size={16} />
-              </div>
-              <div>
-                <p className="text-slate-500 text-[8px] font-black uppercase tracking-wider">{card.label}</p>
-                <div className={`text-lg font-black ${card.isStatus ? statusConfig.textClass : 'text-white'}`}>
-                  {card.val}
-                  {card.isStatus && currentStatus === 1 && <span className="inline-block w-2 h-2 ml-1 bg-emerald-500 rounded-full animate-pulse" />}
-                </div>
-              </div>
-            </div>
+          { label: 'HW SubType', val: device.config?.systemInfo?.hardware?.subType || 'N/A' },
+          { label: 'HW Version', val: device.config?.systemInfo?.hardware?.version || 'N/A' },
+          { label: 'Chip Type', val: device.config?.systemInfo?.hardware?.chipType || 'N/A' },
+          { label: 'UUID', val: device.config?.systemInfo?.hardware?.uuid || device.id || 'N/A' },
+          { label: 'FW Version', val: device.config?.systemInfo?.firmware?.version || 'N/A' },
+          { label: 'Inner IP', val: device.config?.systemInfo?.firmware?.innerIp || 'N/A' },
+          ...(device.config?.systemInfo?.mcu ? [
+            { label: 'MCU Version', val: device.config.systemInfo.mcu.version || 'N/A' },
+            { label: 'MCU Type', val: device.config.systemInfo.mcu.type || 'N/A' }
+          ] : [])
+        ].map((item, i) => (
+          <div key={i} className="flex flex-col">
+            <span className="text-slate-500 text-[9px] font-black uppercase tracking-wider mb-0.5">{item.label}</span>
+            <span className="text-sm font-mono text-indigo-100">{item.val}</span>
           </div>
         ))}
       </div>
